@@ -11,7 +11,7 @@ const DEFAULT_SETTINGS_PATH = path.join(PROJECT_ROOT, '.gemini', 'settings.json'
 const TARGET_PATH = process.env.GEMINI_SETTINGS_JSON || DEFAULT_SETTINGS_PATH;
 
 export function generateConfig(options = {}) {
-    const { targetPath = TARGET_PATH, mcpServers = null } = options;
+    const { targetPath = TARGET_PATH, mcpServers = null, customSettings = null, modelName = null } = options;
 
     const config = {
         general: {
@@ -24,7 +24,7 @@ export function generateConfig(options = {}) {
             enabled: process.env.GEMINI_DISABLE_TELEMETRY !== 'true'
         },
         model: {
-            name: "gemini-2.5-flash-lite",
+            name: modelName || process.env.GEMINI_MODEL || "gemini-2.5-flash-lite",
             maxSessionTurns: -1  // Unlimited — prevents CLI from truncating session history
         },
         tools: {
@@ -60,6 +60,27 @@ export function generateConfig(options = {}) {
 
     if (mcpServers) {
         config.mcpServers = mcpServers;
+    }
+
+    // Helper for deep merging custom settings onto the base config
+    const isObject = (item) => item && typeof item === 'object' && !Array.isArray(item);
+    const deepMerge = (target, source) => {
+        if (!isObject(target) || !isObject(source)) {
+            return source;
+        }
+        for (const key in source) {
+            if (isObject(source[key])) {
+                if (!target[key]) Object.assign(target, { [key]: {} });
+                deepMerge(target[key], source[key]);
+            } else {
+                Object.assign(target, { [key]: source[key] });
+            }
+        }
+        return target;
+    };
+
+    if (customSettings) {
+        deepMerge(config, customSettings);
     }
 
     const dir = path.dirname(targetPath);

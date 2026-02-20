@@ -42,43 +42,115 @@ const sessionMode = process.env.SESSION_MODE || 'stateless';
 console.log(`Starting Gemini Ionosphere (${sessionMode === 'stateful' ? 'Session-Aware' : 'Stateless'} Mode)...`);
 const controller = new GeminiController();
 
-app.post('/v1/prompt', upload.array('files'), async (req, res) => {
+// Garbage Collector: Force-delete temp/ directories older than 15 minutes
+setInterval(() => {
     try {
-        // Initialize turnId if no files were uploaded
-        if (!req.turnId) {
-            req.turnId = randomUUID();
+        if (fs.existsSync(baseTempDir)) {
+            const now = Date.now();
+            const entries = fs.readdirSync(baseTempDir, { withFileTypes: true });
+            for (const entry of entries) {
+                if (entry.isDirectory()) {
+                    const dirPath = path.join(baseTempDir, entry.name);
+                    const stats = fs.statSync(dirPath);
+                    if (now - stats.mtimeMs > 15 * 60 * 1000) {
+                        console.log(`[GC] Sweeping abandoned workspace: ${entry.name}`);
+                        fs.rmSync(dirPath, { recursive: true, force: true });
+                    }
+                }
+            }
+        }
+    } catch (e) {
+        console.error(`[GC] Sweeper error:`, e);
+    }
+}, 5 * 60 * 1000); // Run every 5 minutes
+
+// Process Safety: Ensure zombies are killed
+process.on('SIGINT', () => {
+    process.exit(0);
+});
+process.on('SIGTERM', () => {
+    process.exit(0);
+});
+
+app.post('/v1/chat/completions', upload.any(), async (req, res) => {
+    try {
+        // 1. Authorization Check
+        const expectedApiKey = process.env.API_KEY;
+        if (expectedApiKey) {
+            const authHeader = req.headers['authorization'];
+            if (!authHeader || !authHeader.startsWith('Bearer ')) {
+                return res.status(401).json({ error: { message: "Missing or formatted improperly Authorization header. Use 'Bearer <YOUR_API_KEY>'" } });
+            }
+            const providedKey = authHeader.substring(7);
+            if (providedKey !== expectedApiKey) {
+                return res.status(401).json({ error: { message: "Invalid API Key" } });
+            }
         }
 
-        const turnId = req.turnId;
+        const turnId = req.turnId || randomUUID();
         const turnTempDir = path.join(baseTempDir, turnId);
         if (!fs.existsSync(turnTempDir)) {
             fs.mkdirSync(turnTempDir, { recursive: true });
         }
 
-        // Support JSON fallback if it's not a multipart request
-        const prompt = req.body.prompt;
+        let messages = req.body.messages;
+        if (!messages || !Array.isArray(messages)) {
+            return res.status(400).json({ error: "Missing 'messages' array in request payload" });
+        }
+
+        let systemMessage = "";
+        let conversationPrompt = "";
+
+        for (const msg of messages) {
+            if (msg.role === 'system') {
+                systemMessage += msg.content + "\n\n";
+            } else if (msg.role === 'user') {
+                conversationPrompt += `USER: ${msg.content}\n\n`;
+            } else if (msg.role === 'assistant') {
+                conversationPrompt += `ASSISTANT: ${msg.content}\n\n`;
+            }
+        }
+
+        let prompt = conversationPrompt.trim();
+        let system = systemMessage.trim() || null;
 
         if (!prompt) {
-            return res.status(400).json({ error: "Missing 'prompt' in request payload" });
+            return res.status(400).json({ error: "No user messages provided in conversation" });
         }
 
         // Parse optional MCP Servers payload and generate isolated settings
         let mcpServers = null;
-        if (req.body.mcpServers) {
+        const rawMcp = req.body.mcpServers || (req.body.extra_body && req.body.extra_body.mcpServers);
+        if (rawMcp) {
             try {
-                mcpServers = typeof req.body.mcpServers === 'string'
-                    ? JSON.parse(req.body.mcpServers)
-                    : req.body.mcpServers;
+                mcpServers = typeof rawMcp === 'string'
+                    ? JSON.parse(rawMcp)
+                    : rawMcp;
             } catch (e) {
                 console.warn(`[API] Failed to parse mcpServers block: ${e.message}`);
+            }
+        }
+
+        // Parse optional custom settings payload (e.g. modelConfigs)
+        let customSettings = null;
+        if (req.body.customSettings) {
+            try {
+                customSettings = typeof req.body.customSettings === 'string'
+                    ? JSON.parse(req.body.customSettings)
+                    : req.body.customSettings;
+            } catch (e) {
+                console.warn(`[API] Failed to parse customSettings block: ${e.message}`);
             }
         }
 
         const settingsDir = path.join(turnTempDir, '.gemini');
         const settingsPath = path.join(settingsDir, 'settings.json');
 
+        // Extract requested model routing
+        let modelName = req.body.model;
+
         // Generate and write settings for this specific turn
-        generateConfig({ targetPath: settingsPath, mcpServers });
+        generateConfig({ targetPath: settingsPath, mcpServers, customSettings, modelName });
 
         // Disable Request/Response Socket Timeouts for very long ReAct loops
         req.setTimeout(0);
@@ -90,47 +162,75 @@ app.post('/v1/prompt', upload.array('files'), async (req, res) => {
             return;
         }
 
-        res.setHeader('Content-Type', 'application/x-ndjson');
-        res.setHeader('Transfer-Encoding', 'chunked');
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Connection', 'keep-alive');
 
         // Ensure connection stays alive via heartbeat ping every 15s
         const heartbeatInterval = setInterval(() => {
             if (!res.writableEnded) {
-                res.write(JSON.stringify({ type: "ping" }) + '\n');
+                res.write(': ping\n\n');
             }
         }, 15000);
 
         // Build the full prompt (with any injected file references)
-        let finalPrompt = "";
+        let injectedFiles = "";
         if (req.files && req.files.length > 0) {
             console.log(`[API] Received ${req.files.length} injected files via multipart in turn ${turnId}.`);
             for (const file of req.files) {
                 // file references are relative to the turn directory or absolute
-                finalPrompt += `@${file.path}\n`;
+                injectedFiles += `@${file.path}\n`;
             }
         }
-        finalPrompt += prompt;
+
+        // Sanitize user prompt: escape lines starting with @ or !
+        const sanitizedPrompt = prompt.split('\n').map(line => {
+            if (line.startsWith('@') || line.startsWith('!')) {
+                return '\\' + line;
+            }
+            return line;
+        }).join('\n');
+
+        const finalPrompt = injectedFiles + sanitizedPrompt;
+
+        // Helper to format SSE
+        const sendChunk = (chunk) => {
+            if (!res.writableEnded) {
+                res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+            }
+        };
 
         // Wire up event listeners for this specific request
         const onText = (text) => {
             process.stdout.write(text);
-            if (!res.writableEnded) {
-                res.write(JSON.stringify({ type: 'text', value: text }) + '\n');
-            }
+            sendChunk({
+                id: `chatcmpl-${turnId}`,
+                object: 'chat.completion.chunk',
+                created: Math.floor(Date.now() / 1000),
+                model: 'gemini-cli',
+                choices: [{
+                    index: 0,
+                    delta: { content: text }
+                }]
+            });
         };
 
         const onToolCall = (info) => {
             console.log(`\n[Tool Call] ${JSON.stringify(info)}`);
-            if (!res.writableEnded) {
-                res.write(JSON.stringify({ type: 'toolCall', ...info }) + '\n');
-            }
+            sendChunk({
+                id: `chatcmpl-${turnId}`,
+                object: 'chat.completion.chunk',
+                model: 'gemini-cli',
+                choices: [{
+                    index: 0,
+                    delta: { tool_calls: [info] }
+                }]
+            });
         };
 
         const onError = (err) => {
             console.error(`\n[Error]`, err);
-            if (!res.writableEnded) {
-                res.write(JSON.stringify({ type: 'error', error: err }) + '\n');
-            }
+            sendChunk({ error: err });
 
             if (err.code === 'AUTH_EXPIRED') {
                 process.exit(1);
@@ -140,26 +240,21 @@ app.post('/v1/prompt', upload.array('files'), async (req, res) => {
         const onResult = (json) => {
             console.log(`\n[Turn Result]`, json);
             if (!res.writableEnded) {
-                res.write(JSON.stringify(json) + '\n');
+                res.write('data: [DONE]\n\n');
                 res.end();
             }
             cleanup();
         };
 
         const onEvent = (json) => {
-            if (!res.writableEnded) {
-                res.write(JSON.stringify(json) + '\n');
-            }
+            // Unmapped events are discarded for SSE
         };
 
-        const cleanup = () => {
+        const removeListeners = () => {
             clearInterval(heartbeatInterval);
-            controller.removeListener('text', onText);
-            controller.removeListener('toolCall', onToolCall);
-            controller.removeListener('error', onError);
-            controller.removeListener('result', onResult);
-            controller.removeListener('event', onEvent);
+        };
 
+        const cleanupWorkspace = () => {
             // Clean up the isolated workspace after the turn finishes
             try {
                 if (fs.existsSync(turnTempDir)) {
@@ -170,25 +265,31 @@ app.post('/v1/prompt', upload.array('files'), async (req, res) => {
             }
         };
 
-        controller.on('text', onText);
-        controller.on('toolCall', onToolCall);
-        controller.on('error', onError);
-        controller.on('result', onResult);
-        controller.on('event', onEvent);
+        const cleanup = () => {
+            removeListeners();
+            cleanupWorkspace();
+        };
 
-        // Handle client drops mid-generation
-        req.on('close', () => {
+        // Handle client drops mid-generation.
+        // Only remove listeners and cancel the process — do NOT delete the workspace yet,
+        // as it may still be needed by the queued sendPrompt call.
+        res.on('close', () => {
             if (!res.writableEnded) {
                 console.warn(`[API] Client disconnected mid-stream for turn ${turnId}!`);
-                controller.cancelCurrentTurn();
-                cleanup();
+                controller.cancelCurrentTurn(turnId);
+                removeListeners();
             }
         });
 
         console.log(`\n[API] Enqueueing prompt sequence for turn ${turnId} in workspace ${turnTempDir}...`);
 
-        // Pass the isolated directory and settings file to the controller
-        controller.sendPrompt(finalPrompt, turnTempDir, settingsPath);
+        // Pass the isolated directory and settings file to the controller.
+        // Always clean up the workspace when done, even if the client disconnected early.
+        controller.sendPrompt(turnId, finalPrompt, turnTempDir, settingsPath, system, {
+            onText, onToolCall, onError, onResult, onEvent
+        })
+            .then(() => cleanupWorkspace())
+            .catch(() => cleanupWorkspace());
 
     } catch (err) {
         console.error("[API Error]", err);
@@ -206,5 +307,5 @@ app.get('/health', (req, res) => {
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`\nIonosphere Orchestrator HTTP Interface listening on port ${PORT}`);
-    console.log(`Example: curl -X POST http://localhost:${PORT}/v1/prompt -H "Content-Type: application/json" -d '{"prompt":"Hello"}'\n`);
+    console.log(`Example: curl -X POST http://localhost:${PORT}/v1/chat/completions -H "Content-Type: application/json" -d '{"messages":[{"role":"user","content":"Hello"}]}'\n`);
 });

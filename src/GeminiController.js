@@ -46,9 +46,8 @@ export class JsonlAccumulator extends EventEmitter {
  * from a prior session. The SessionRouter determines which session to resume
  * (or whether to start a new one) using LCP matching.
  */
-export class GeminiController extends EventEmitter {
+export class GeminiController {
     constructor(cwd = process.cwd()) {
-        super();
         this.cwd = cwd;
         this.tempDir = path.join(this.cwd, 'temp');
 
@@ -60,9 +59,7 @@ export class GeminiController extends EventEmitter {
             ? new SessionRouter(path.join(this.tempDir, 'sessions.db'))
             : null;
 
-        // Concurrency: serialize prompts so we don't overlap CLI invocations
-        this.promptQueue = Promise.resolve();
-        this.currentProcess = null;
+        this.processes = new Map();
 
         // Ensure temp dir exists
         if (!fs.existsSync(this.tempDir)) {
@@ -77,155 +74,183 @@ export class GeminiController extends EventEmitter {
      * 3. Stream output events back via EventEmitter
      * 4. After completion, discover/record the session ID
      *
+     * @param {string} turnId - The unique ID for this turn.
      * @param {string} text - The full conversation payload from the client.
      * @param {string} workspacePath - The isolated directory to run this turn in.
      * @param {string} settingsPath - The isolated settings.json to use for this turn.
+     * @param {string} systemPrompt - Optional system prompt to use for this turn.
+     * @param {Object} callbacks - Functions to process output chunks.
      * @returns {Promise<void>}
      */
-    sendPrompt(text, workspacePath = this.cwd, settingsPath = process.env.GEMINI_SETTINGS_JSON || path.join(this.cwd, '.gemini', 'settings.json')) {
-        this.promptQueue = this.promptQueue.then(async () => {
-            try {
-                // 1. Route: find the right session (or skip in stateless mode)
-                let sessionId = null, delta = text, isNew = true;
-                if (this.sessionMode === 'stateful') {
-                    ({ sessionId, delta, isNew } = this.router.route(text));
+    async sendPrompt(turnId, text, workspacePath = this.cwd, settingsPath = process.env.GEMINI_SETTINGS_JSON || path.join(this.cwd, '.gemini', 'settings.json'), systemPrompt = null, callbacks = {}) {
+        try {
+            // 1. Route: find the right session (or skip in stateless mode)
+            let sessionId = null, delta = text, isNew = true;
+            if (this.sessionMode === 'stateful') {
+                ({ sessionId, delta, isNew } = this.router.route(text));
+            }
+
+            if (!delta) {
+                console.warn(`[GeminiController] Turn ${turnId}: Delta was empty — nothing new to send.`);
+                if (callbacks.onResult) callbacks.onResult({ type: 'result', value: '' });
+                return;
+            }
+
+            // 2. Build CLI args
+            let cliPath = process.env.GEMINI_CLI_PATH || 'gemini';
+            if (process.platform === 'win32' && !cliPath.endsWith('.cmd') && !cliPath.endsWith('.exe')) {
+                cliPath += '.cmd';
+            }
+
+            // -y skips all interactive trust prompts for the isolated workspace
+            const args = ['-y'];
+
+            if (!isNew && sessionId) {
+                args.push('--resume', sessionId);
+            }
+
+            // Write delta to the isolated workspace
+            const tempPromptPath = path.join(workspacePath, `prompt-${randomUUID()}.txt`);
+            fs.writeFileSync(tempPromptPath, delta, 'utf-8');
+
+            args.push('-o', 'stream-json');
+            args.push('-p', `@${tempPromptPath}`);
+
+            // Handle System Prompt if provided
+            let systemPromptPath = null;
+            if (systemPrompt) {
+                systemPromptPath = path.join(workspacePath, 'system.md');
+                fs.writeFileSync(systemPromptPath, systemPrompt, 'utf-8');
+            }
+
+            console.log(`[GeminiController] Spawning CLI [${this.sessionMode}]: ${cliPath} ${args.join(' ')}`);
+            if (systemPrompt) console.log(`[GeminiController] System Prompt: ${systemPrompt.length} chars`);
+            console.log(`[GeminiController] Session: ${isNew ? 'NEW' : sessionId}, Delta: ${delta.length} chars`);
+            console.log(`[GeminiController] Workspace: ${workspacePath}`);
+
+            // 3. Spawn the one-shot process
+            const result = await new Promise((resolve, reject) => {
+                const accumulator = new JsonlAccumulator();
+                let lastResultJson = null;
+
+                const spawnEnv = {
+                    ...process.env,
+                    GEMINI_SETTINGS_JSON: settingsPath,
+                };
+
+                // Inject System Prompt override if applicable
+                if (systemPromptPath) {
+                    spawnEnv.GEMINI_SYSTEM_MD = systemPromptPath;
                 }
 
-                if (!delta) {
-                    console.warn('[GeminiController] Delta was empty — nothing new to send.');
-                    this.emit('result', { type: 'result', value: '' });
-                    return;
-                }
-
-                // 2. Build CLI args
-                const cliPath = process.env.GEMINI_CLI_PATH || 'gemini';
-
-                const args = [];
-
-                if (!isNew && sessionId) {
-                    args.push('--resume', sessionId);
-                }
-
-                // Write delta to the isolated workspace
-                const tempPromptPath = path.join(workspacePath, `prompt-${randomUUID()}.txt`);
-                fs.writeFileSync(tempPromptPath, delta, 'utf-8');
-
-                // Use -p with @file reference for the prompt content
-                args.push('-p', `@${tempPromptPath}`);
-                args.push('-o', 'stream-json');
-
-                console.log(`[GeminiController] Spawning CLI [${this.sessionMode}]: ${cliPath} ${args.join(' ')}`);
-                console.log(`[GeminiController] Session: ${isNew ? 'NEW' : sessionId}, Delta: ${delta.length} chars`);
-                console.log(`[GeminiController] Workspace: ${workspacePath}`);
-
-                // 3. Spawn the one-shot process
-                const result = await new Promise((resolve, reject) => {
-                    const accumulator = new JsonlAccumulator();
-                    let lastResultJson = null;
-
-                    const proc = spawn(cliPath, args, {
-                        cwd: workspacePath,
-                        env: {
-                            ...process.env,
-                            GEMINI_SETTINGS_JSON: settingsPath,
-                        },
-                        stdio: ['pipe', 'pipe', 'pipe'],
-                        shell: process.platform === 'win32',
-                    });
-
-                    this.currentProcess = proc;
-
-                    // 5-minute timeout
-                    const timeout = setTimeout(() => {
-                        console.error('[GeminiController] Process timed out after 5 minutes. Killing.');
-                        proc.kill();
-                        reject(new Error('Turn timed out'));
-                    }, 5 * 60 * 1000);
-
-                    accumulator.on('line', (json) => {
-                        if (json.type === 'text') {
-                            this.emit('text', json.value);
-                        } else if (json.type === 'toolCall') {
-                            this.emit('toolCall', json);
-                        } else if (json.type === 'error') {
-                            this.emit('error', json);
-                        } else if (json.type === 'result') {
-                            lastResultJson = json;
-                            this.emit('result', json);
-                        } else if (json.type === 'done') {
-                            this.emit('done');
-                        } else {
-                            this.emit('event', json);
-                        }
-                    });
-
-                    proc.stdout.on('data', (chunk) => {
-                        accumulator.push(chunk);
-                    });
-
-                    proc.stderr.on('data', (chunk) => {
-                        const stderrText = chunk.toString().trim();
-                        if (stderrText) {
-                            console.error(`[Gemini CLI STDERR] ${stderrText}`);
-
-                            if (/(please log in|auth|authorization|credentials)/i.test(stderrText)) {
-                                const errorMsg = `Fatal: CLI Auth Expired or Missing. Raw: ${stderrText}`;
-                                console.error(errorMsg);
-                                this.emit('error', { type: 'error', message: errorMsg, code: 'AUTH_EXPIRED' });
-                            }
-                        }
-                    });
-
-                    proc.on('close', (code) => {
-                        clearTimeout(timeout);
-                        this.currentProcess = null;
-
-                        if (code === 0) {
-                            resolve(lastResultJson);
-                        } else {
-                            reject(new Error(`CLI process exited with code ${code}`));
-                        }
-                    });
-
-                    proc.on('error', (err) => {
-                        clearTimeout(timeout);
-                        this.currentProcess = null;
-                        reject(new Error(`Failed to spawn CLI: ${err.message}`));
-                    });
+                const proc = spawn(cliPath, args, {
+                    cwd: workspacePath,
+                    env: spawnEnv,
+                    stdio: ['ignore', 'pipe', 'pipe'],
+                    shell: process.platform === 'win32',
                 });
 
-                // 4. After success, discover the session ID and record the turn (stateful only)
-                if (this.sessionMode === 'stateful') {
-                    if (isNew) {
-                        // Discover the new session ID by listing sessions from the isolated workspace
-                        const newSessionId = await this._discoverLatestSessionId(workspacePath);
-                        if (newSessionId) {
-                            this.router.registerSession(newSessionId, text);
-                        } else {
-                            console.warn('[GeminiController] Could not discover new session ID. Session will not be resumable.');
-                        }
+                this.processes.set(turnId, proc);
+
+                // 5-minute timeout
+                const timeout = setTimeout(() => {
+                    console.error('[GeminiController] Process timed out after 5 minutes. Killing.');
+                    proc.kill();
+                    reject(new Error('Turn timed out'));
+                }, 5 * 60 * 1000);
+
+                accumulator.on('line', (json) => {
+                    if (json.type === 'text') {
+                        if (callbacks.onText) callbacks.onText(json.value);
+                    } else if (json.type === 'toolCall') {
+                        if (callbacks.onToolCall) callbacks.onToolCall(json);
+                    } else if (json.type === 'error') {
+                        if (callbacks.onError) callbacks.onError(json);
+                    } else if (json.type === 'result') {
+                        lastResultJson = json;
+                        if (callbacks.onResult) callbacks.onResult(json);
+                    } else if (json.type === 'done') {
+                        if (callbacks.onDone) callbacks.onDone();
                     } else {
-                        // Update existing session with the new cumulative payload
-                        this.router.recordTurn(sessionId, text);
+                        if (callbacks.onEvent) callbacks.onEvent(json);
                     }
-                }
+                });
 
-                // Clean up temp prompt file
-                try {
-                    if (fs.existsSync(tempPromptPath)) fs.unlinkSync(tempPromptPath);
-                } catch (err) {
-                    console.error(`[GC] Failed to delete temp file ${tempPromptPath}:`, err);
-                }
+                proc.stdout.on('data', (chunk) => {
+                    accumulator.push(chunk);
+                });
 
-            } catch (err) {
-                console.error(`[GeminiController] Turn error: ${err.message}`);
-                this.emit('error', { type: 'error', message: err.message });
+                proc.stderr.on('data', (chunk) => {
+                    const stderrText = chunk.toString().trim();
+                    if (stderrText) {
+                        console.error(`[Gemini CLI STDERR] ${stderrText}`);
+
+                        const isAuthError = (/(please log in|auth|authorization)/i.test(stderrText) && !/unauthorized tool call/i.test(stderrText)) ||
+                            (/credentials/i.test(stderrText) && !/loaded cached credentials/i.test(stderrText));
+
+                        if (isAuthError) {
+                            const errorMsg = `Fatal: CLI Auth Expired or Missing. Raw: ${stderrText}`;
+                            console.error(errorMsg);
+                            if (callbacks.onError) callbacks.onError({ type: 'error', message: errorMsg, code: 'AUTH_EXPIRED' });
+
+                            if (process.env.WEBHOOK_URL) {
+                                fetch(process.env.WEBHOOK_URL, {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({
+                                        content: "🚨 **Gemini Ionosphere Alert** 🚨\nThe underlying Gemini CLI Authentication has expired or is missing. Please SSH into the container and run `gemini login`."
+                                    })
+                                }).catch(err => console.error(`[Webhook Failed] ${err.message}`));
+                            }
+                        }
+                    }
+                });
+
+                proc.on('close', (code) => {
+                    clearTimeout(timeout);
+                    this.processes.delete(turnId);
+
+                    if (code === 0) {
+                        resolve(lastResultJson);
+                    } else {
+                        reject(new Error(`CLI process exited with code ${code}`));
+                    }
+                });
+
+                proc.on('error', (err) => {
+                    clearTimeout(timeout);
+                    this.processes.delete(turnId);
+                    reject(new Error(`Failed to spawn CLI: ${err.message}`));
+                });
+            });
+
+            // 4. After success, discover the session ID and record the turn (stateful only)
+            if (this.sessionMode === 'stateful') {
+                if (isNew) {
+                    // Discover the new session ID by listing sessions from the isolated workspace
+                    const newSessionId = await this._discoverLatestSessionId(workspacePath);
+                    if (newSessionId) {
+                        this.router.registerSession(newSessionId, text);
+                    } else {
+                        console.warn('[GeminiController] Could not discover new session ID. Session will not be resumable.');
+                    }
+                } else {
+                    // Update existing session with the new cumulative payload
+                    this.router.recordTurn(sessionId, text);
+                }
             }
-        }).catch(err => {
-            console.error(`[Queue Error] ${err.message}`);
-        });
 
-        return this.promptQueue;
+            // Clean up temp prompt file
+            try {
+                if (fs.existsSync(tempPromptPath)) fs.unlinkSync(tempPromptPath);
+            } catch (err) {
+                console.error(`[GC] Failed to delete temp file ${tempPromptPath}:`, err);
+            }
+
+        } catch (err) {
+            console.error(`[GeminiController] Turn error: ${err.message}`);
+            if (callbacks.onError) callbacks.onError({ type: 'error', message: err.message });
+        }
     }
 
     /**
@@ -236,7 +261,10 @@ export class GeminiController extends EventEmitter {
      */
     async _discoverLatestSessionId() {
         try {
-            const cliPath = process.env.GEMINI_CLI_PATH || 'gemini';
+            let cliPath = process.env.GEMINI_CLI_PATH || 'gemini';
+            if (process.platform === 'win32' && !cliPath.endsWith('.cmd') && !cliPath.endsWith('.exe')) {
+                cliPath += '.cmd';
+            }
             const output = await new Promise((resolve, reject) => {
                 let stdout = '';
                 const proc = spawn(cliPath, ['--list-sessions'], {
@@ -290,11 +318,14 @@ export class GeminiController extends EventEmitter {
 
     /**
      * Cancels the currently running CLI process via SIGINT.
+     * @param {string} turnId 
      */
-    cancelCurrentTurn() {
-        if (this.currentProcess) {
-            console.warn('[GeminiController] Cancelling current turn via SIGINT');
-            this.currentProcess.kill('SIGINT');
+    cancelCurrentTurn(turnId) {
+        const proc = this.processes.get(turnId);
+        if (proc) {
+            console.warn(`[GeminiController] Cancelling turn ${turnId} via SIGINT`);
+            proc.kill('SIGINT');
+            this.processes.delete(turnId);
         }
     }
 
@@ -309,18 +340,16 @@ export class GeminiController extends EventEmitter {
     }
 
     /**
-     * Cleanup temp directory.
+     * Cleanup processes gracefully on exit.
      */
-    destroy() {
-        if (this.currentProcess) {
-            this.currentProcess.kill();
-        }
-        if (fs.existsSync(this.tempDir)) {
+    destroyAll() {
+        for (const [turnId, proc] of this.processes.entries()) {
             try {
-                fs.rmSync(this.tempDir, { recursive: true, force: true });
+                proc.kill('SIGKILL');
             } catch (e) {
-                console.error(`Failed to cleanup temp dir: ${e}`);
+                console.error(`Failed to kill process for turn ${turnId}: ${e}`);
             }
         }
+        this.processes.clear();
     }
 }

@@ -1,6 +1,6 @@
 # Ionosphere
 
-**Ionosphere** is a persistent, stateful orchestrator and API bridge for the [Google Gemini CLI](https://github.com/google-gemini/gemini-cli). Instead of spawning a new CLI process for every request, Ionosphere keeps the CLI alive as a long-running child process and pipes prompts to it over stdio — preserving the full conversation context window across requests.
+**Ionosphere** is a session-aware API bridge for the [Google Gemini CLI](https://github.com/google-gemini/gemini-cli). It uses a **Longest Common Prefix (LCP)** algorithm to route incoming prompts to the correct Gemini CLI session — or create a new one when conversations diverge. Each prompt spawns `gemini --resume <sessionId>` in one-shot mode, so context persists across bridge restarts.
 
 ---
 
@@ -8,11 +8,11 @@
 
 | Problem | Standard API Approach | Ionosphere |
 |---|---|---|
-| Context window | Rebuilt from scratch every request | Persistent — CLI retains full history |
+| Context window | Rebuilt from scratch every request | Session-aware — CLI sessions persist to disk |
+| Multi-session | One conversation per server | LCP router finds the right session automatically |
 | Long agent loops | Connection drops after 30s–2min | Infinite socket timeout + 15s heartbeat |
-| Concurrent requests | Race conditions | Mutex queue — serialized cleanly |
-| Client disconnects | Zombie processes, wiped context | SIGINT physics — CLI survives, context preserved |
-| Stateless client history bloat | Full history re-sent every turn | LCP Context Differ strips redundant payload |
+| Client disconnects | Zombie processes, wiped context | SIGINT — CLI halts gracefully |
+| Stateless client history bloat | Full history re-sent every turn | LCP SessionRouter strips redundant payload |
 
 ---
 
@@ -137,15 +137,15 @@ GOOGLE_CLOUD_LOCATION=us-central1
 ```
 gemini-ionosphere/
 ├── src/
-│   ├── index.js            # Express HTTP server — the relay layer
-│   ├── GeminiController.js # Core CLI orchestrator with Mutex, State Machine, GC
-│   └── ContextDiffer.js    # LCP context stripper for stateless clients
+│   ├── index.js            # Express HTTP server — per-request event listeners
+│   ├── GeminiController.js # One-shot CLI spawner with --resume and session discovery
+│   └── SessionRouter.js    # LCP multi-session router with disk persistence
 ├── scripts/
 │   ├── setup.js            # Interactive setup wizard
 │   └── generate_settings.js # Generates ~/.gemini/settings.json
 ├── test/
 │   ├── controller.test.js  # GeminiController unit tests
-│   └── differ.test.js      # ContextDiffer unit tests
+│   └── router.test.js      # SessionRouter unit tests (10 cases)
 ├── Dockerfile              # Single-stage Node.js build with gemini CLI baked in
 ├── docker-compose.yml      # Single-service deployment
 └── .env.example            # Environment variable template

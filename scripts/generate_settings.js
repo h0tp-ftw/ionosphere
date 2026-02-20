@@ -21,7 +21,8 @@ const config = {
         enabled: process.env.GEMINI_DISABLE_TELEMETRY !== 'true'
     },
     model: {
-        name: "gemini-2.5-flash-lite"
+        name: "gemini-2.5-flash-lite",
+        maxSessionTurns: -1  // Unlimited — prevents CLI from truncating session history
     },
     tools: {
         exclude: (() => {

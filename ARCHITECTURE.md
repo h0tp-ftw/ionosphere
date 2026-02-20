@@ -2,9 +2,9 @@
 
 ## Overview
 
-Ionosphere is built around a fundamental insight: the Gemini CLI in `--headless --output-format stream-json` mode is a **stateful, persistent process**. Every prompt fed to it over stdin is processed in the context of all prior conversation history — without the token overhead of embedding that history in every API call.
+Ionosphere is a session-aware API bridge for the [Google Gemini CLI](https://github.com/google-gemini/gemini-cli). It uses a **Longest Common Prefix (LCP)** algorithm to route incoming prompts to the correct Gemini CLI session — or create a new one when conversations diverge.
 
-The orchestrator's job is to act as a clean, resilient relay between HTTP-based clients and this stateful CLI subprocess.
+Instead of maintaining a single persistent CLI process, Ionosphere spawns a **one-shot CLI process per prompt** with `gemini --resume <sessionId>`. The Gemini CLI natively persists sessions to disk, so context survives both bridge and CLI restarts.
 
 ```
 HTTP Client (Roo Code / OpenClaw / curl)
@@ -15,149 +15,135 @@ HTTP Client (Roo Code / OpenClaw / curl)
 │              Express HTTP Server (index.js)          │
 │  - Infinite socket timeout                          │
 │  - 15s heartbeat ping                               │
+│  - Per-request event listeners                      │
 │  - req.on('close') → cancelCurrentTurn()            │
 └───────────────────┬─────────────────────────────────┘
                     │
                     ▼
 ┌─────────────────────────────────────────────────────┐
-│           ContextDiffer (LCP Stripper)               │
-│  Strips redundant history from stateless clients.   │
-│  Only the novel delta reaches the CLI.              │
+│           SessionRouter (LCP Multi-Session)          │
+│  Routes payload to best-matching CLI session.       │
+│  Persists session map to disk (sessions.json).      │
+│  Decision: CONTINUATION / IDENTICAL / NEW           │
 └───────────────────┬─────────────────────────────────┘
-                    │
+                    │  { sessionId, delta, isNew }
                     ▼
 ┌─────────────────────────────────────────────────────┐
-│         GeminiController (State Machine)             │
+│       GeminiController (One-Shot Spawner)            │
 │                                                     │
-│  State: IDLE → PROCESSING → CANCELLING → IDLE       │
-│                                                     │
-│  - Mutex Queue (Promise chain)                      │
-│  - Writes delta to temp file → pipes @path to stdin │
+│  - Spawns: gemini --resume <id> -p @file -o json    │
+│  - New sessions: gemini -p @file -o stream-json     │
+│  - 5-minute timeout per prompt                      │
+│  - Discovers session IDs via --list-sessions        │
 │  - JsonlAccumulator buffers OS pipe fragments       │
-│  - Releases Mutex on {"type":"result"}              │
-│  - try/finally GC: deletes temp files unconditionally│
 └───────────────────┬─────────────────────────────────┘
-                    │ stdin/stdout (pipes)
+                    │ stdout (stream-json)
                     ▼
-┌─────────────────────────────────────────────────────┐
-│        gemini --headless --output-format stream-json │
-│                                                     │
-│  Maintains full conversation context in memory.     │
-└─────────────────────────────────────────────────────┘
+              Response streamed
+              back to HTTP client
 ```
 
 ---
 
-## The State Machine
+## The LCP Session Router
 
-`GeminiController` tracks three states:
+Stateless AI clients (Roo Code, OpenClaw, OpenAI-compatible frontends) send the **entire conversation history** in every HTTP request. Ionosphere must determine **which CLI session** to resume with just the new content (the "delta").
 
-| State | Meaning |
-|---|---|
-| `IDLE` | No active prompt. Mutex is unlocked. Ready for input. |
-| `PROCESSING` | Prompt written to CLI stdin. Mutex locked. Streaming response. |
-| `CANCELLING` | `SIGINT` dispatched. Waiting for CLI to emit `FatalCancellationError`. |
+### Algorithm
 
-The state machine prevents double-firing and race conditions when a client disconnects mid-generation.
+Given an incoming payload `P` and a stored session `S` with cumulative payload `S.payload`:
+
+1. Walk character-by-character comparing `P[i]` to `S.payload[i]`
+2. Stop at the first mismatch at position `n`
+3. Inspect what remains at position `n`:
+
+| `P[n]` exists? | `S[n]` exists? | Verdict |
+|---|---|---|
+| Yes | No | **CONTINUATION** — `S` is a prefix of `P`. Resume session S, delta = `P[n:]` |
+| No | Yes | **SUBSET** — `P` is shorter than `S`. Create new session (client may branch) |
+| No | No | **IDENTICAL** — exact match, no-op resume |
+| Yes | Yes | **DIVERGENT** — different conversation, skip this session |
+
+### Multi-Session Selection
+
+When multiple sessions exist, the router picks the **non-divergent, non-subset candidate with the longest LCP**. If no valid candidates remain, a new session is created.
+
+### Why SUBSET Creates a New Session
+
+Consider:
+```
+S (stored):  "What is 2+2?" → "4" → "And what is that squared?" → "16"
+P (incoming): "What is 2+2?" → "4"
+```
+
+The client sent only the first two turns. Their **next** message could be "And what is that squared?" (matching S) or "What about 3+3?" (diverging). Since we can't predict the future, we must not resume S — the CLI would carry extra context the client didn't ask for.
+
+### Complexity
+
+- **Time:** O(K × M) where K = stored sessions, M = payload length
+- **Accuracy:** 100% — pure character comparison, no hashing
+- Practically, K is small (tens of sessions) and string comparison is SIMD-optimized in V8
 
 ---
 
-## The Turn Boundary — Why `{"type": "result"}` Only
+## One-Shot CLI Model
 
-Early orchestrators used textual shell prompt detection (e.g., waiting for `> ` on stdout) to know when the CLI was ready for the next input. This is brittle and fails completely in `--output-format stream-json` mode, where no such prompt is emitted.
+Each prompt spawns a fresh CLI process:
 
-Ionosphere defines a turn boundary exclusively by the JSON payload:
+```bash
+# Resume an existing session:
+gemini --resume <sessionId> -p @prompt.txt -o stream-json
 
-```json
-// Successful turn
-{"type": "result", "status": "success", ...}
-
-// Interrupted turn (SIGINT)
-{"type": "result", "status": "error", "error": {"type": "FatalCancellationError"}}
+# Start a new session:
+gemini -p @prompt.txt -o stream-json
 ```
 
-**Only** when this object is parsed does the orchestrator:
-1. Call `currentTurnDeferred.resolve()` → releasing the Mutex
-2. Execute the `try/finally` GC block → deleting all temp files for this turn
+**Why one-shot instead of persistent REPL?**
 
-This guarantees the CLI has fully flushed its internal state before the next prompt is enqueued.
+| Aspect | Persistent REPL | One-Shot |
+|---|---|---|
+| Multi-session support | ❌ One process = one session | ✅ Any session per prompt |
+| Context persistence | ❌ Lost on crash/restart | ✅ CLI saves to disk natively |
+| Cold-start overhead | None | ~1-2s per prompt |
+| Process management | Complex (death detection, respawn) | Simple (spawn and wait) |
+
+The trade-off is acceptable: the ~1-2s cold-start is negligible compared to the 5-30s LLM generation time.
 
 ---
 
-## Signal Physics — SIGINT Survival
+## Session Discovery
 
-When an HTTP client drops mid-stream (e.g., the frontend crashes, network drops, or the user cancels), naive orchestrators call `process.kill()` (SIGTERM), which:
-- Immediately destroys the CLI subprocess
-- Wipes the entire conversation context window
-- Forces an expensive cold-start for the next request
+When a **new** conversation is created (no LCP match), the bridge must learn the session ID that the CLI assigned. After the one-shot process exits, the controller calls:
 
-Ionosphere instead:
-
-1. `req.on('close')` fires on the Express server
-2. `controller.cancelCurrentTurn()` is called
-3. State transitions to `CANCELLING`
-4. `geminiProcess.kill('SIGINT')` is dispatched
-5. The CLI traps `SIGINT`, halts generation, **preserves all memory**, and emits `FatalCancellationError`
-6. The Mutex releases; state returns to `IDLE`
-
-The CLI subprocess never dies. Context is never lost.
-
----
-
-## The Mutex Queue
-
-`GeminiController.sendPrompt()` chains all prompts onto a single `Promise` chain (`this.promptQueue`). Each turn:
-
-```
-promptQueue.then(async () => {
-    state = PROCESSING
-    try {
-        await new Promise((resolve, reject) => {
-            // write to stdin, set 5-min timeout
-        });
-        // resolved only by {"type":"result"}
-    } finally {
-        // GC: delete all temp files for this turn
-        state = IDLE
-    }
-})
+```bash
+gemini --list-sessions
 ```
 
-**Why `try/finally` for GC?** If the CLI crashes, times out, or receives SIGINT, the Promise rejects. Without `finally`, temp files would accumulate indefinitely on disk. The `finally` block runs unconditionally — whether the turn succeeded, timed out, or was cancelled.
-
-The 5-minute Mutex Death Timer acts as an absolute backstop against permanent deadlocks.
+It then parses the output for the most recent UUID and registers it in the `SessionRouter` for future routing.
 
 ---
 
 ## The JSONL Accumulator
 
-The OS pipe between Node.js and the CLI does not guarantee that a complete JSON object arrives in a single `data` event. A single object might be split across 2, 3, or 10 reads.
+The OS pipe between Node.js and the CLI does not guarantee that a complete JSON object arrives in a single `data` event. A single object might be split across multiple reads.
 
-`JsonlAccumulator` buffers all incoming chunks as a string. On every `\n` character it attempts to parse the preceding text as JSON. Only valid, complete JSON objects are emitted as `line` events. Incomplete fragments stay in the buffer until the rest arrives.
+`JsonlAccumulator` buffers all incoming chunks as a string. On every `\n` character it attempts to parse the preceding text as JSON. Only valid, complete JSON objects are emitted as `line` events.
 
 ---
 
-## The Context Differ — LCP Stripper
+## Signal Physics — SIGINT Survival
 
-Stateless AI clients (Roo Code, OpenClaw, OpenAI-compatible frontends) must send the **entire conversation history** in every HTTP request — because from their perspective, the backend is stateless.
+When an HTTP client drops mid-stream, Ionosphere dispatches `SIGINT` to the running CLI process (not `SIGTERM`). This allows the CLI to halt generation gracefully and emit a `FatalCancellationError` result, which signals the controller to clean up without losing the process.
 
-The Gemini CLI is NOT stateless. If the full history is piped to it every turn, it treats the prior conversation as a brand new user input, causing catastrophic hallucination and context duplication.
+---
 
-`ContextDiffer` solves this with a **Longest Common Prefix (LCP)** walk:
+## Session Persistence
 
-1. After the first round-trip completes, `lastPayload` stores the full previous request.
-2. On each new request, walk character-by-character comparing `lastPayload[i]` vs `newPayload[i]`.
-3. Stop at the first mismatch at index `n`.
-4. If no mismatch occurs (pure extension — the common case): split at `lastPayload.length`.
-5. `delta = newPayload.slice(splitPoint).trim()` — this is the only new content.
-6. **Only the delta is piped to the CLI.**
+The `SessionRouter` serializes its session map (`sessionId → payload`) to `temp/sessions.json`. This means:
 
-| Case | Outcome |
-|---|---|
-| Pure extension (new message appended) | Delta = only the new user message |
-| No new content (duplicate send) | Delta = `""` → mutex releases immediately, CLI not touched |
-| Mid-string divergence (client rewrote history) | Delta = content from the split point |
-| First turn (no prior baseline) | Full payload passes through unchanged |
+1. Bridge restarts reload the session map from disk
+2. The CLI's own session storage (`~/.gemini/sessions/`) persists conversation history
+3. Both must agree for a session to be resumable
 
 ---
 
@@ -165,7 +151,7 @@ The Gemini CLI is NOT stateless. If the full history is piped to it every turn, 
 
 The deployment is a lightweight, single-stage `node:22-slim` container.
 
-It installs standard Node dependencies, then installs the `@google/gemini-cli` globally so the binary is baked into the image at build time. 
+It installs standard Node dependencies, then installs the `@google/gemini-cli` globally so the binary is baked into the image at build time.
 
 The `GEMINI_CLI_TAG` build arg (default: `latest`) controls which release channel of the CLI is installed:
 
@@ -178,5 +164,3 @@ The container's `CMD` generates `settings.json` at startup then launches the orc
 ```dockerfile
 CMD ["sh", "-c", "node scripts/generate_settings.js && node src/index.js"]
 ```
-
-This ensures settings are always regenerated from environment variables at container start, not baked into the image layer.

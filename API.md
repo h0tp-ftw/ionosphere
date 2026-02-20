@@ -37,7 +37,7 @@ Files uploaded via the `files` field are streamed by `multer` into the orchestra
 Your actual prompt text here.
 ```
 
-All injected files are garbage-collected at the end of the turn via the `try/finally` GC block — regardless of whether the turn succeeded, timed out, or was cancelled.
+All injected files are garbage-collected at the end of the turn — regardless of whether the turn succeeded, timed out, or was cancelled.
 
 #### Example: Text-only (JSON)
 
@@ -90,7 +90,7 @@ Emitted incrementally as the model generates tokens.
 {"type": "result", "status": "error", "error": {"type": "FatalCancellationError", "message": "Operation cancelled."}}
 ```
 
-**This is the terminal event.** The HTTP response ends after this line. Internally, this event also releases the Mutex and triggers the temp file GC.
+**This is the terminal event.** The HTTP response ends after this line.
 
 #### `ping` — Heartbeat (keep-alive)
 
@@ -129,11 +129,10 @@ If the client closes the connection mid-stream (crash, user cancel, network drop
 
 1. Express fires `req.on('close')`
 2. The orchestrator calls `controller.cancelCurrentTurn()`
-3. `SIGINT` is dispatched to the CLI process
-4. The CLI halts generation, preserves its full context window, and emits `FatalCancellationError`
-5. The Mutex releases; the orchestrator returns to `IDLE`
+3. `SIGINT` is dispatched to the running CLI process
+4. The CLI halts generation and emits `FatalCancellationError`
 
-The CLI **does not die**. The next request from any client will resume in the same conversation context.
+Since each prompt runs as a separate one-shot CLI process, there is no persistent state to lose.
 
 ---
 
@@ -148,23 +147,22 @@ curl http://localhost:3000/health
 ```
 
 ```json
-{"status": "ok", "ready": true}
+{"status": "ok"}
 ```
 
 | Field | Type | Description |
 |---|---|---|
 | `status` | `string` | Always `"ok"` if the server is running |
-| `ready` | `boolean` | `true` if the CLI subprocess has initialized and is ready to accept input |
 
 ---
 
-## Context Diffing (Stateless Client Compatibility)
+## Session-Aware Routing (Stateless Client Compatibility)
 
 Ionosphere is designed to work with stateless AI frontends (Roo Code, OpenClaw, etc.) that send the full conversation history on every request.
 
-The `ContextDiffer` middleware automatically strips redundant prior context using a Longest Common Prefix (LCP) walk before the payload reaches the CLI. Clients do not need to be aware of this — send the full history as normal and only the new delta will reach the stateful CLI process.
+The `SessionRouter` automatically identifies which Gemini CLI session to resume using a Longest Common Prefix (LCP) walk across all known sessions. It then extracts only the new content (delta) and spawns `gemini --resume <sessionId> -p <delta>`. Clients do not need to be aware of this — send the full history as normal and the router will find the right session.
 
-This is active **only after the first complete round-trip** (one prompt + one `result` response). The first turn always passes through unchanged.
+If no stored session matches (the conversations diverge), a new CLI session is created automatically.
 
 ---
 

@@ -2,9 +2,12 @@
 
 ## Overview
 
-Ionosphere is a session-aware API bridge for the [Google Gemini CLI](https://github.com/google-gemini/gemini-cli). It uses a **Longest Common Prefix (LCP)** algorithm to route incoming prompts to the correct Gemini CLI session — or create a new one when conversations diverge.
+Ionosphere is a configurable API bridge for the [Google Gemini CLI](https://github.com/google-gemini/gemini-cli). It operates in two modes controlled by the `SESSION_MODE` environment variable:
 
-Instead of maintaining a single persistent CLI process, Ionosphere spawns a **one-shot CLI process per prompt** with `gemini --resume <sessionId>`. The Gemini CLI natively persists sessions to disk, so context survives both bridge and CLI restarts.
+- **Stateless** *(default)* — Every prompt spawns a fresh `gemini -p @file -o stream-json` process. The full conversation is sent each time. No session tracking, no state drift.
+- **Stateful** — Uses a **Longest Common Prefix (LCP)** algorithm to route incoming prompts to the correct Gemini CLI session via `gemini --resume <sessionId>`, sending only the new content (delta). Sessions persist across restarts.
+
+In both modes, each prompt spawns a **one-shot CLI process** — no persistent REPL.
 
 ```
 HTTP Client (Roo Code / OpenClaw / curl)
@@ -21,20 +24,19 @@ HTTP Client (Roo Code / OpenClaw / curl)
                     │
                     ▼
 ┌─────────────────────────────────────────────────────┐
-│           SessionRouter (LCP Multi-Session)          │
-│  Routes payload to best-matching CLI session.       │
-│  Persists session map to disk (sessions.json).      │
-│  Decision: CONTINUATION / IDENTICAL / NEW           │
-└───────────────────┬─────────────────────────────────┘
-                    │  { sessionId, delta, isNew }
-                    ▼
-┌─────────────────────────────────────────────────────┐
 │       GeminiController (One-Shot Spawner)            │
 │                                                     │
-│  - Spawns: gemini --resume <id> -p @file -o json    │
-│  - New sessions: gemini -p @file -o stream-json     │
+│  SESSION_MODE=stateless (default):                  │
+│    Spawns: gemini -p @file -o stream-json            │
+│    Full prompt every time. No session tracking.      │
+│                                                     │
+│  SESSION_MODE=stateful:                             │
+│    SessionRouter (LCP) → { sessionId, delta }       │
+│    Spawns: gemini --resume <id> -p @delta -o json   │
+│    New: gemini -p @file -o stream-json              │
+│    Discovers session IDs via --list-sessions        │
+│                                                     │
 │  - 5-minute timeout per prompt                      │
-│  - Discovers session IDs via --list-sessions        │
 │  - JsonlAccumulator buffers OS pipe fragments       │
 └───────────────────┬─────────────────────────────────┘
                     │ stdout (stream-json)
@@ -45,9 +47,11 @@ HTTP Client (Roo Code / OpenClaw / curl)
 
 ---
 
-## The LCP Session Router
+## The LCP Session Router (Stateful Mode Only)
 
-Stateless AI clients (Roo Code, OpenClaw, OpenAI-compatible frontends) send the **entire conversation history** in every HTTP request. Ionosphere must determine **which CLI session** to resume with just the new content (the "delta").
+> The SessionRouter is only active when `SESSION_MODE=stateful`. In stateless mode, this component is not instantiated.
+
+Stateless AI clients (Roo Code, OpenClaw, OpenAI-compatible frontends) send the **entire conversation history** in every HTTP request. In stateful mode, Ionosphere determines **which CLI session** to resume with just the new content (the "delta").
 
 ### Algorithm
 
@@ -111,9 +115,9 @@ The trade-off is acceptable: the ~1-2s cold-start is negligible compared to the 
 
 ---
 
-## Session Discovery
+## Session Discovery (Stateful Mode Only)
 
-When a **new** conversation is created (no LCP match), the bridge must learn the session ID that the CLI assigned. After the one-shot process exits, the controller calls:
+When a **new** conversation is created in stateful mode (no LCP match), the bridge must learn the session ID that the CLI assigned. After the one-shot process exits, the controller calls:
 
 ```bash
 gemini --list-sessions
@@ -137,13 +141,23 @@ When an HTTP client drops mid-stream, Ionosphere dispatches `SIGINT` to the runn
 
 ---
 
-## Session Persistence
+## Session Persistence (Stateful Mode Only)
 
 The `SessionRouter` serializes its session map (`sessionId → payload`) to `temp/sessions.json`. This means:
 
 1. Bridge restarts reload the session map from disk
 2. The CLI's own session storage (`~/.gemini/sessions/`) persists conversation history
 3. Both must agree for a session to be resumable
+
+---
+
+## Tool Integration
+
+Ionosphere leverages the Gemini CLI's built-in tool execution capabilities but heavily restricts which tools are available to prevent unintended side effects on the host system.
+
+- **Disabled Tools**: By default, the `generate_settings.js` script explicitly disables dangerous or redundant tools. The disabled list includes: `list_directory`, `read_file`, `write_file`, `glob`, `grep_search`, `replace`, and `run_shell_command`. You can re-enable tools by setting `GEMINI_DISABLE_TOOLS=false`.
+- **`read_many_files`**: This tool is **always enabled** to ensure robust read-only capabilities for processing large file contexts. Disabling it is not effective by design.
+- **`google_web_search`**: This is a powerful research capability that can be optionally enabled during settings generation. It provides real-time access to the web.
 
 ---
 

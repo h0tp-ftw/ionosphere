@@ -7,7 +7,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 
-const DEFAULT_SETTINGS_PATH = path.join(os.homedir(), '.gemini', 'settings.json');
+const DEFAULT_SETTINGS_PATH = path.join(PROJECT_ROOT, '.gemini', 'settings.json');
 const TARGET_PATH = process.env.GEMINI_SETTINGS_JSON || DEFAULT_SETTINGS_PATH;
 
 const config = {
@@ -32,11 +32,12 @@ const config = {
 
             if (disableTools) {
                 excludeList.push(
+                    "list_directory",
                     "read_file",
                     "write_file",
-                    "list_files",
-                    "search_files",
-                    "edit_file",
+                    "glob",
+                    "grep_search",
+                    "replace",
                     "run_shell_command"
                 );
             }

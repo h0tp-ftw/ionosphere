@@ -16,6 +16,7 @@
 | Session mode | One-size-fits-all | Configurable: stateless (fresh) or stateful (LCP resume) |
 | Multi-session *(stateful)* | One conversation per server | LCP router finds the right session automatically |
 | History bloat *(stateful)* | Full history re-sent every turn | SessionRouter strips redundant payload, sends only delta |
+| Context Injection | Static tools only | Dynamic per-request **MCP Server** injection via isolated workspaces |
 
 ---
 

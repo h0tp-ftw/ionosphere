@@ -26,6 +26,7 @@ Submit a prompt to the Gemini CLI. Streams the response back as newline-delimite
 |---|---|---|---|
 | `prompt` | `string` | ✅ | The instruction or query for the agent |
 | `files` | `File[]` | ❌ | One or more files to inject into the CLI context |
+| `mcpServers` | `JSON Object` or `string` | ❌ | Dynamic MCP Server configuration to inject for this turn |
 
 #### File Injection Mechanics
 
@@ -45,6 +46,26 @@ All injected files are garbage-collected at the end of the turn — regardless o
 curl -X POST http://localhost:3000/v1/prompt \
   -H "Content-Type: application/json" \
   -d '{"prompt": "Explain the theory of relativity in one paragraph."}'
+```
+
+#### Example: With MCP Servers (JSON)
+
+You can spin up an isolated Gemini session with access to specific MCP servers by passing the `mcpServers` object in the JSON request. Ionosphere will dynamically inject this configuration into that turn's execution environment.
+
+```bash
+curl -X POST http://localhost:3000/v1/prompt \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Ask context7 about lsmcp",
+    "mcpServers": {
+      "context7": {
+        "httpUrl": "https://mcp.context7.com/mcp",
+        "headers": {
+          "Accept": "application/json, text/event-stream"
+        }
+      }
+    }
+  }'
 ```
 
 #### Example: Text + File (Multipart)

@@ -151,13 +151,50 @@ The `SessionRouter` uses the built-in `node:sqlite` module to continuously store
 
 ---
 
+## Dynamic Workspace Isolation
+
+Every single `/v1/prompt` request spawns a unique, geographically isolated environment for the Gemini CLI process:
+
+1. **Temporary Directory**: A unique `temp/<turnId>/` folder is scaffolded on the host.
+2. **File Sandboxing**: Any file attachments streamed via the multipart request are saved strictly inside this scoped directory.
+3. **Dynamic Configuration**: Ionosphere writes a bespoke `.gemini/settings.json` file inside `temp/<turnId>/`. This file inherits the baseline system settings but merges in request-specific properties, such as dynamically defined MCP Servers.
+4. **Execution**: The `gemini` one-shot process is spawned with `cwd` set to the isolated folder and `GEMINI_SETTINGS_JSON` pointing to the bespoke snapshot.
+5. **Collection**: Once the streaming turn completes or aborts, the entire `temp/<turnId>/` tree is recursively deleted.
+
+This architecture ensures zero cross-pollination between concurrent requests, limits the blast radius of any file operations, and enables multi-tenant tool configurations without race conditions.
+
+---
+
 ## Tool Integration
 
-Ionosphere leverages the Gemini CLI's built-in tool execution capabilities but heavily restricts which tools are available to prevent unintended side effects on the host system.
+Ionosphere leverages the Gemini CLI's built-in tool execution capabilities.
 
-- **Disabled Tools**: By default, the `generate_settings.js` script explicitly disables dangerous or redundant tools. The disabled list includes: `list_directory`, `read_file`, `write_file`, `glob`, `grep_search`, `replace`, and `run_shell_command`. You can re-enable tools by setting `GEMINI_DISABLE_TOOLS=false`.
-- **`read_many_files`**: This tool is **always enabled** to ensure robust read-only capabilities for processing large file contexts. Disabling it is not effective by design.
-- **`google_web_search`**: This is a powerful research capability that can be optionally enabled during settings generation. It provides real-time access to the web.
+### Built-in Tools
+It heavily restricts which tools are available to prevent unintended side effects on the host system.
+- **Disabled Tools**: By default, the `generate_settings.js` script explicitly disables dangerous tools. The disabled list includes: `list_directory`, `read_file`, `write_file`, `glob`, `grep_search`, `replace`, and `run_shell_command`. 
+- **Enabled Tools**: `read_many_files` is always enabled for large context reads. `google_web_search` can be optionally enabled during startup.
+
+### MCP Servers (Model Context Protocol)
+
+Because Ionosphere employs **Dynamic Workspace Isolation** (see above), clients can inject custom MCP Server configurations directly into the API request on a turn-by-turn basis.
+
+By including an `"mcpServers": {}` block in the JSON body of the `/v1/prompt` HTTP request, Ionosphere parses the payload and natively merges it into the `.gemini/settings.json` file just before the process spawns. The Gemini CLI then organically connects to those MCP servers for that specific reasoning loop.
+
+```json
+{
+  "prompt": "Ask context7 about LSMCP",
+  "mcpServers": {
+    "context7": {
+      "httpUrl": "https://mcp.context7.com/mcp",
+      "headers": {
+        "Accept": "application/json, text/event-stream"
+      }
+    }
+  }
+}
+```
+
+Since the isolated `.gemini/settings.json` file is destroyed at the end of the turn, subsequent API requests are unpolluted.
 
 ---
 

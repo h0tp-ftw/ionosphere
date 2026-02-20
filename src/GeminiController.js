@@ -78,9 +78,11 @@ export class GeminiController extends EventEmitter {
      * 4. After completion, discover/record the session ID
      *
      * @param {string} text - The full conversation payload from the client.
+     * @param {string} workspacePath - The isolated directory to run this turn in.
+     * @param {string} settingsPath - The isolated settings.json to use for this turn.
      * @returns {Promise<void>}
      */
-    sendPrompt(text) {
+    sendPrompt(text, workspacePath = this.cwd, settingsPath = process.env.GEMINI_SETTINGS_JSON || path.join(this.cwd, '.gemini', 'settings.json')) {
         this.promptQueue = this.promptQueue.then(async () => {
             try {
                 // 1. Route: find the right session (or skip in stateless mode)
@@ -97,7 +99,6 @@ export class GeminiController extends EventEmitter {
 
                 // 2. Build CLI args
                 const cliPath = process.env.GEMINI_CLI_PATH || 'gemini';
-                const settingsPath = process.env.GEMINI_SETTINGS_JSON || path.join(process.cwd(), '.gemini', 'settings.json');
 
                 const args = [];
 
@@ -105,8 +106,8 @@ export class GeminiController extends EventEmitter {
                     args.push('--resume', sessionId);
                 }
 
-                // Write delta to a temp file to avoid shell escaping issues and OS arg limits
-                const tempPromptPath = path.join(this.tempDir, `prompt-${randomUUID()}.txt`);
+                // Write delta to the isolated workspace
+                const tempPromptPath = path.join(workspacePath, `prompt-${randomUUID()}.txt`);
                 fs.writeFileSync(tempPromptPath, delta, 'utf-8');
 
                 // Use -p with @file reference for the prompt content
@@ -115,6 +116,7 @@ export class GeminiController extends EventEmitter {
 
                 console.log(`[GeminiController] Spawning CLI [${this.sessionMode}]: ${cliPath} ${args.join(' ')}`);
                 console.log(`[GeminiController] Session: ${isNew ? 'NEW' : sessionId}, Delta: ${delta.length} chars`);
+                console.log(`[GeminiController] Workspace: ${workspacePath}`);
 
                 // 3. Spawn the one-shot process
                 const result = await new Promise((resolve, reject) => {
@@ -122,7 +124,7 @@ export class GeminiController extends EventEmitter {
                     let lastResultJson = null;
 
                     const proc = spawn(cliPath, args, {
-                        cwd: this.cwd,
+                        cwd: workspacePath,
                         env: {
                             ...process.env,
                             GEMINI_SETTINGS_JSON: settingsPath,
@@ -195,8 +197,8 @@ export class GeminiController extends EventEmitter {
                 // 4. After success, discover the session ID and record the turn (stateful only)
                 if (this.sessionMode === 'stateful') {
                     if (isNew) {
-                        // Discover the new session ID by listing sessions
-                        const newSessionId = await this._discoverLatestSessionId();
+                        // Discover the new session ID by listing sessions from the isolated workspace
+                        const newSessionId = await this._discoverLatestSessionId(workspacePath);
                         if (newSessionId) {
                             this.router.registerSession(newSessionId, text);
                         } else {

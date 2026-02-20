@@ -39,9 +39,9 @@ async function checkDependencies() {
     console.log("✅ Dependencies check complete.\n");
 }
 
-async function setupEnvAndAuth() {
+async function setupEnvAndAuth(isNative, composeCmd) {
     const envPath = path.join(process.cwd(), '.env');
-    let envContent = `GEMINI_CLI_PATH=gemini\nGEMINI_SETTINGS_JSON=./settings.json\n`;
+    const envContent = `GEMINI_CLI_PATH=gemini\nGEMINI_SETTINGS_JSON=./settings.json\n`;
 
     if (fs.existsSync(envPath)) {
         console.log(`✅ .env file already exists at ${envPath}.`);
@@ -52,37 +52,31 @@ async function setupEnvAndAuth() {
     }
 
     console.log("\n--- Authentication Configuration ---");
-    console.log("1. OAuth (Personal / gemini auth login)");
-    console.log("2. API Key (Google AI Studio)");
-    console.log("3. Vertex AI (Google Cloud)");
-    const authChoice = await question("Select authentication method [1/2/3] (default: 1): ");
+    console.log("Ionosphere uses the standard Gemini CLI OAuth flow for authentication.");
+    console.log("This ensures maximum security and zero credential drift.");
 
-    if (authChoice === '2') {
-        const apiKey = await question("Enter your Gemini API Key (GEMINI_API_KEY): ");
-        envContent += `GEMINI_API_KEY=${apiKey}\n`;
-    } else if (authChoice === '3') {
-        const apiKey = await question("Enter your Google API Key for Vertex AI (GOOGLE_API_KEY): ");
-        const project = await question("Enter your Google Cloud Project: ");
-        const location = await question("Enter your Google Cloud Location (e.g. us-central1): ");
-        envContent += `GOOGLE_API_KEY=${apiKey}\nGOOGLE_GENAI_USE_VERTEXAI=true\nGOOGLE_CLOUD_PROJECT=${project}\nGOOGLE_CLOUD_LOCATION=${location}\n`;
-    } else {
-        // OAuth — enforcedAuthType will be injected into settings.json
-        process.env.GEMINI_AUTH_TYPE = 'oauth-personal';
+    // Enforce OAuth in the generated settings.json
+    process.env.GEMINI_AUTH_TYPE = 'oauth-personal';
 
+    if (isNative) {
         const hasGemini = spawnSync('gemini', ['--version'], { encoding: 'utf-8' });
         if (hasGemini.error) {
-            console.log("\n⚠️  `gemini` is not installed locally.");
-            console.log("   The CLI will be installed inside the container at build time.");
+            console.error("\n❌ `gemini` is not installed on your host machine. Please install it with `npm install -g @google/gemini-cli`.");
+            process.exit(1);
         } else {
-            console.log("\n`gemini` is installed locally. Triggering OAuth flow now...");
-            console.log("A browser window will open to authenticate. The setup will continue after.");
-            // `gemini -p` triggers the OAuth browser flow if not already authenticated,
-            // then returns after receiving a valid response — perfect for setup scripts.
-            spawnSync('gemini', ['-p', 'This is a setup test, please reply with the word READY.'], {
-                stdio: 'inherit'
-            });
-            console.log("✅ Gemini CLI authenticated and responsive.");
+            console.log("\n`gemini` is installed locally. Triggering Native OAuth login flow...");
+            console.log("NOTE: A browser window will open to authenticate. Once done, type /quit to return to this installer.");
+            spawnSync('gemini', ['-p', 'Auth check complete! Please tell the user that authentication was successful and they can type /quit to exit and return to the Ionosphere installer.'], { stdio: 'inherit', shell: true });
         }
+    } else {
+        console.log("\nContainer mode selected. Building Image...");
+        // Build the image quickly so we can use its CLI.
+        spawnSync(`${composeCmd}`, ['build'], { stdio: 'inherit', shell: true });
+
+        console.log("\nTriggering Isolated Container OAuth Flow...");
+        console.log("The Gemini CLI will launch inside the container and open a browser link for authentication.");
+        console.log("Once authenticated, type /quit to exit the CLI and return to this installer.");
+        spawnSync(`${composeCmd}`, ['run', '--rm', 'ionosphere', 'gemini', '-p', 'Auth check complete! Please tell the user that authentication was successful and they can type /quit to exit and return to the Ionosphere installer.'], { stdio: 'inherit', shell: true });
     }
 
     fs.writeFileSync(envPath, envContent, 'utf-8');
@@ -121,7 +115,21 @@ async function main() {
     try {
         await checkTermsOfService();
         await checkDependencies();
-        await setupEnvAndAuth();
+
+        console.log("\n--- Setup Environment ---");
+        const envChoice = await question("How will you run Ionosphere?\n[1] Native (Node.js)\n[2] Docker\n[3] Podman\nSelect [1/2/3] (default: 1): ");
+        const isNative = envChoice === '1' || envChoice === '';
+        const isDocker = envChoice === '2';
+        const isPodman = envChoice === '3';
+
+        let composeCmd = '';
+        if (isDocker) composeCmd = 'docker-compose';
+        if (isPodman) {
+            const hasPodmanCompose = !spawnSync('podman-compose', ['--version'], { encoding: 'utf-8' }).error;
+            composeCmd = hasPodmanCompose ? 'podman-compose' : 'podman compose';
+        }
+
+        await setupEnvAndAuth(isNative, composeCmd);
         await setupPreferences();
         await generateSettings();
 
@@ -129,31 +137,12 @@ async function main() {
         console.log("🎉 Setup Complete!");
         console.log("=========================================\n");
 
-        const startChoice = await question("Would you like to start the orchestrator now?\n[1] Native (Node.js)\n[2] Docker\n[3] Podman\n[4] Exit\nSelect [1/2/3/4] (default: 4): ");
-
-        // We close readline before spawning long-running servers so it doesn't trap input
+        const startNow = await question("Start the server now? (y/N): ");
         rl.close();
 
-        if (startChoice === '1') {
-            console.log("\nStarting Natively...");
-            // Pass as a string to avoid DEP0190 shell escaping warning
-            spawnSync('npm start', { stdio: 'inherit', shell: true });
-        } else if (startChoice === '2') {
-            console.log("\nStarting via Docker...");
-            spawnSync('docker-compose up --build', { stdio: 'inherit', shell: true });
-        } else if (startChoice === '3') {
-            console.log("\nStarting via Podman...");
-            // Prefer `podman-compose` (pip package) if installed, otherwise fall back
-            // to `podman compose` which is built into Podman Desktop on Windows/Mac.
-            const hasPodmanCompose = !spawnSync('podman-compose', ['--version'], { encoding: 'utf-8' }).error;
-            const composeCmd = hasPodmanCompose ? 'podman-compose up --build' : 'podman compose up --build';
-            console.log(`   Using: ${composeCmd}`);
-            spawnSync(composeCmd, { stdio: 'inherit', shell: true });
-        } else {
-            console.log("\nExiting. To start later:");
-            console.log("   Native: npm start");
-            console.log("   Docker: docker-compose up --build");
-            console.log("   Podman: podman compose up --build   (or podman-compose up --build)");
+        if (startNow.toLowerCase() === 'y') {
+            const cmd = isNative ? 'npm start' : `${composeCmd} up --build`;
+            console.log(`\nRun the following command to start the server:\n\n  ${cmd}\n`);
         }
 
     } catch (err) {

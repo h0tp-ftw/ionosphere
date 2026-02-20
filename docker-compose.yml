@@ -6,8 +6,14 @@ services:
     environment:
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - GEMINI_SETTINGS_JSON=/app/settings.json
+    ports:
+      - "3000:3000"
     volumes:
+      - gemini-config:/root/.gemini
       # Optional: Mount your local gemini CLI binary if the image doesn't include it. 
       # MUST match target OS architecture (linux). If using Go to build it: GOOS=linux GOARCH=amd64 go build -o gemini.linux
       # - ./gemini.linux:/usr/local/bin/gemini:ro
       - ./temp:/app/temp:z
+
+volumes:
+  gemini-config:

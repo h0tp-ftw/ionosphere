@@ -12,9 +12,9 @@ http://localhost:3000
 
 ## Endpoints
 
-### `POST /v1/prompt`
+### `POST /v1/chat/completions`
 
-Submit a prompt to the Gemini CLI. Streams the response back as newline-delimited JSON (NDJSON).
+Submit an OpenAI-compatible chat completion request to the Gemini CLI. Streams the response back as newline-delimited JSON Events (Server-Sent Events) or returns a single JSON object.
 
 #### Request Format
 
@@ -24,28 +24,29 @@ Submit a prompt to the Gemini CLI. Streams the response back as newline-delimite
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `prompt` | `string` | ✅ | The instruction or query for the agent |
-| `files` | `File[]` | ❌ | One or more files to inject into the CLI context |
-| `mcpServers` | `JSON Object` or `string` | ❌ | Dynamic MCP Server configuration to inject for this turn |
+| `messages` | `Array` | ✅ | Array of OpenAI-format message objects (e.g. `[{"role": "user", "content": "..."}]`). The `system` role is supported and extracted automatically. |
+| `stream` | `boolean` | ❌ | If `true`, streams Server-Sent Events (SSE). Otherwise returns a single JSON object. |
+| `mcpServers` | `JSON Object` | ❌ | Dynamic MCP Server configuration to inject for this turn (passed as a top-level property or inside `extra_body` depending on the client). |
+| `customSettings` | `JSON Object` | ❌ | Dynamic Gemini CLI settings (e.g. `modelConfigs`) to deeply merge for this turn. |
 
 #### File Injection Mechanics
 
-Files uploaded via the `files` field are streamed by `multer` into the orchestrator's `temp/` directory. The controller maps each file to the CLI's `@filepath` injection syntax and prepends it to the prompt before piping to stdin:
+Since the API now exclusively accepts JSON `messages`, file ingestion (via `multipart/form-data`) has been deprecated. To attach files or URLs to a prompt, you must pass them as inline text references in your message content (e.g., `"Summarize this file: @/path/to/doc.pdf"`), and the orchestrator's isolated workspace engine will securely pipe it.
 
-```
-@/app/temp/image-uuid.png
-@/app/temp/document-uuid.pdf
-Your actual prompt text here.
-```
+Lines starting with `@` or `!` in normal conversation are automatically prefixed with a `\` to prevent Gemini CLI from reading unintended host files.
 
-All injected files are garbage-collected at the end of the turn — regardless of whether the turn succeeded, timed out, or was cancelled.
-
-#### Example: Text-only (JSON)
+#### Example: Basic Chat Request
 
 ```bash
-curl -X POST http://localhost:3000/v1/prompt \
+curl -X POST http://localhost:3000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"prompt": "Explain the theory of relativity in one paragraph."}'
+  -d '{
+    "messages": [
+      {"role": "system", "content": "You are a helpful physics teacher."},
+      {"role": "user", "content": "Explain the theory of relativity in one paragraph."}
+    ],
+    "stream": true
+  }'
 ```
 
 #### Example: With MCP Servers (JSON)
@@ -53,10 +54,11 @@ curl -X POST http://localhost:3000/v1/prompt \
 You can spin up an isolated Gemini session with access to specific MCP servers by passing the `mcpServers` object in the JSON request. Ionosphere will dynamically inject this configuration into that turn's execution environment.
 
 ```bash
-curl -X POST http://localhost:3000/v1/prompt \
+curl -X POST http://localhost:3000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "prompt": "Ask context7 about lsmcp",
+    "messages": [{"role": "user", "content": "Ask context7 about lsmcp"}],
+    "stream": true,
     "mcpServers": {
       "context7": {
         "httpUrl": "https://mcp.context7.com/mcp",
@@ -68,50 +70,62 @@ curl -X POST http://localhost:3000/v1/prompt \
   }'
 ```
 
-#### Example: Text + File (Multipart)
+#### Example: With Custom Model Configs (JSON)
+
+You can forcefully inject custom model hyperparameters (like `temperature: 0.0`) for a single request using the `customSettings` block to merge `modelConfigs` into the isolated workspace.
 
 ```bash
-curl -X POST http://localhost:3000/v1/prompt \
-  -F "prompt=Summarize the contents of this document." \
-  -F "files=@/path/to/document.pdf"
+curl -X POST http://localhost:3000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [{"role": "user", "content": "Write a deterministic function."}],
+    "customSettings": {
+      "modelConfigs": {
+        "customAliases": {
+          "precise-mode": {
+            "extends": "chat-base",
+            "modelConfig": {
+              "generateContentConfig": {
+                "temperature": 0.0,
+                "topP": 1.0
+              }
+            }
+          }
+        },
+        "overrides": [
+          {
+            "match": { "model": "gemini-2.5-flash-lite" },
+            "modelConfig": { "model": "precise-mode" }
+          }
+        ]
+      }
+    }
+  }'
 ```
-
-#### Example: Multiple Files
-
-```bash
-curl -X POST http://localhost:3000/v1/prompt \
-  -F "prompt=Compare these two images." \
-  -F "files=@image1.png" \
-  -F "files=@image2.png"
-```
-
----
 
 ## Streaming Response Format
 
-The response is a chunked stream of newline-delimited JSON objects (`application/x-ndjson`). Each line is a self-contained JSON event.
+The response follows the standard OpenAI Server-Sent Events (SSE) format natively.
 
 ### Event Types
 
-#### `text` — Dialogue or reasoning output
+#### `data: {...}` — Chunk Delta
 
 ```json
-{"type": "text", "value": "The theory of relativity..."}
+data: {"id":"chatcmpl-c3d8cc87","object":"chat.completion.chunk","created":1740084337,"model":"gemini-cli","choices":[{"index":0,"delta":{"content":"The theory of relativity..."},"logprobs":null,"finish_reason":null}]}
 ```
 
 Emitted incrementally as the model generates tokens.
 
-#### `result` — Definitive turn boundary
+#### `data: [DONE]` — Exact End of Stream
+
+**This is the terminal event.** The HTTP response ends gracefully after this line.
+
+#### `error` — Fatal orchestrator error
 
 ```json
-{"type": "result", "status": "success", "content": "..."}
+data: {"error":{"message":"Fatal: CLI Auth Expired...","type":"error","code":"AUTH_EXPIRED"}}
 ```
-
-```json
-{"type": "result", "status": "error", "error": {"type": "FatalCancellationError", "message": "Operation cancelled."}}
-```
-
-**This is the terminal event.** The HTTP response ends after this line.
 
 #### `ping` — Heartbeat (keep-alive)
 

@@ -12,7 +12,7 @@ In both modes, each prompt spawns a **one-shot CLI process** — no persistent R
 ```
 HTTP Client (Roo Code / OpenClaw / curl)
         |
-        | POST /v1/prompt  (multipart/form-data)
+        | POST /v1/chat/completions  (application/json)
         v
 ┌─────────────────────────────────────────────────────┐
 │              Express HTTP Server (index.js)          │
@@ -153,10 +153,10 @@ The `SessionRouter` uses the built-in `node:sqlite` module to continuously store
 
 ## Dynamic Workspace Isolation
 
-Every single `/v1/prompt` request spawns a unique, geographically isolated environment for the Gemini CLI process:
+Every single `/v1/chat/completions` request spawns a unique, geographically isolated environment for the Gemini CLI process:
 
 1. **Temporary Directory**: A unique `temp/<turnId>/` folder is scaffolded on the host.
-2. **File Sandboxing**: Any file attachments streamed via the multipart request are saved strictly inside this scoped directory.
+2. **File Sandboxing**: To attach files or URLs to a prompt, clients pass them as inline text references in their message content (e.g., `"Summarize this file: @/path/to/doc.pdf"`). Note that the orchestrator requires absolute paths.
 3. **Dynamic Configuration**: Ionosphere writes a bespoke `.gemini/settings.json` file inside `temp/<turnId>/`. This file inherits the baseline system settings but merges in request-specific properties, such as dynamically defined MCP Servers.
 4. **Execution**: The `gemini` one-shot process is spawned with `cwd` set to the isolated folder and `GEMINI_SETTINGS_JSON` pointing to the bespoke snapshot.
 5. **Collection**: Once the streaming turn completes or aborts, the entire `temp/<turnId>/` tree is recursively deleted.
@@ -178,11 +178,11 @@ It heavily restricts which tools are available to prevent unintended side effect
 
 Because Ionosphere employs **Dynamic Workspace Isolation** (see above), clients can inject custom MCP Server configurations directly into the API request on a turn-by-turn basis.
 
-By including an `"mcpServers": {}` block in the JSON body of the `/v1/prompt` HTTP request, Ionosphere parses the payload and natively merges it into the `.gemini/settings.json` file just before the process spawns. The Gemini CLI then organically connects to those MCP servers for that specific reasoning loop.
+By including an `"mcpServers": {}` block in the JSON body of the `/v1/chat/completions` HTTP request, Ionosphere parses the payload and natively merges it into the `.gemini/settings.json` file just before the process spawns. The Gemini CLI then organically connects to those MCP servers for that specific reasoning loop.
 
 ```json
 {
-  "prompt": "Ask context7 about LSMCP",
+  "messages": [{"role": "user", "content": "Ask context7 about LSMCP"}],
   "mcpServers": {
     "context7": {
       "httpUrl": "https://mcp.context7.com/mcp",

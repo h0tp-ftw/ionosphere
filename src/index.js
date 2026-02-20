@@ -42,6 +42,26 @@ const sessionMode = process.env.SESSION_MODE || 'stateless';
 console.log(`Starting Gemini Ionosphere (${sessionMode === 'stateful' ? 'Session-Aware' : 'Stateless'} Mode)...`);
 const controller = new GeminiController();
 
+const MAX_CONCURRENT_CLI = parseInt(process.env.MAX_CONCURRENT_CLI) || 5;
+let currentlyRunning = 0;
+const requestQueue = [];
+
+async function enqueueControllerPrompt(executeTask) {
+    if (currentlyRunning >= MAX_CONCURRENT_CLI) {
+        await new Promise(resolve => requestQueue.push(resolve));
+    }
+    currentlyRunning++;
+    try {
+        await executeTask();
+    } finally {
+        currentlyRunning--;
+        if (requestQueue.length > 0) {
+            const next = requestQueue.shift();
+            next();
+        }
+    }
+}
+
 // Garbage Collector: Force-delete temp/ directories older than 15 minutes
 setInterval(() => {
     try {
@@ -100,14 +120,42 @@ app.post('/v1/chat/completions', upload.any(), async (req, res) => {
 
         let systemMessage = "";
         let conversationPrompt = "";
+        let imageCounter = 0;
 
         for (const msg of messages) {
             if (msg.role === 'system') {
-                systemMessage += msg.content + "\n\n";
-            } else if (msg.role === 'user') {
-                conversationPrompt += `USER: ${msg.content}\n\n`;
-            } else if (msg.role === 'assistant') {
-                conversationPrompt += `ASSISTANT: ${msg.content}\n\n`;
+                let text = Array.isArray(msg.content) ? msg.content.map(p => p.type === 'text' ? p.text : '').join('') : msg.content;
+                systemMessage += text + "\n\n";
+            } else {
+                let textContent = "";
+                let inlinedFiles = "";
+
+                if (Array.isArray(msg.content)) {
+                    for (const part of msg.content) {
+                        if (part.type === 'text') {
+                            textContent += part.text;
+                        } else if (part.type === 'image_url' && part.image_url && part.image_url.url && part.image_url.url.startsWith('data:image/')) {
+                            const b64Data = part.image_url.url.split(',')[1];
+                            if (b64Data) {
+                                imageCounter++;
+                                const mimePart = part.image_url.url.split(';')[0];
+                                const ext = mimePart.includes('/') ? mimePart.split('/')[1] : 'png';
+                                const imagePath = path.join(turnTempDir, `image_${imageCounter}.${ext}`);
+                                fs.writeFileSync(imagePath, Buffer.from(b64Data, 'base64'));
+                                // Injected into prompt referencing the newly dumped disk file
+                                inlinedFiles += `@${imagePath}\n`;
+                            }
+                        }
+                    }
+                } else {
+                    textContent = msg.content;
+                }
+
+                if (msg.role === 'user') {
+                    conversationPrompt += `USER:\n${inlinedFiles}${textContent}\n\n`;
+                } else if (msg.role === 'assistant') {
+                    conversationPrompt += `ASSISTANT:\n${textContent}\n\n`;
+                }
             }
         }
 
@@ -273,8 +321,10 @@ app.post('/v1/chat/completions', upload.any(), async (req, res) => {
         // Handle client drops mid-generation.
         // Only remove listeners and cancel the process — do NOT delete the workspace yet,
         // as it may still be needed by the queued sendPrompt call.
+        let aborted = false;
         res.on('close', () => {
             if (!res.writableEnded) {
+                aborted = true;
                 console.warn(`[API] Client disconnected mid-stream for turn ${turnId}!`);
                 controller.cancelCurrentTurn(turnId);
                 removeListeners();
@@ -283,13 +333,24 @@ app.post('/v1/chat/completions', upload.any(), async (req, res) => {
 
         console.log(`\n[API] Enqueueing prompt sequence for turn ${turnId} in workspace ${turnTempDir}...`);
 
-        // Pass the isolated directory and settings file to the controller.
-        // Always clean up the workspace when done, even if the client disconnected early.
-        controller.sendPrompt(turnId, finalPrompt, turnTempDir, settingsPath, system, {
-            onText, onToolCall, onError, onResult, onEvent
-        })
-            .then(() => cleanupWorkspace())
-            .catch(() => cleanupWorkspace());
+        const executeTask = async () => {
+            if (aborted) {
+                cleanupWorkspace();
+                return;
+            }
+            try {
+                await controller.sendPrompt(turnId, finalPrompt, turnTempDir, settingsPath, system, {
+                    onText, onToolCall, onError, onResult, onEvent
+                });
+            } finally {
+                cleanupWorkspace();
+            }
+        };
+
+        enqueueControllerPrompt(executeTask).catch(err => {
+            console.error(`[API Controller Error]`, err);
+            cleanupWorkspace();
+        });
 
     } catch (err) {
         console.error("[API Error]", err);

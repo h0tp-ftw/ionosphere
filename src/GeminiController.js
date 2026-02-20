@@ -147,7 +147,7 @@ export class GeminiController {
                     cwd: workspacePath,
                     env: spawnEnv,
                     stdio: ['ignore', 'pipe', 'pipe'],
-                    shell: process.platform === 'win32',
+                    shell: false,
                 });
 
                 this.processes.set(turnId, proc);

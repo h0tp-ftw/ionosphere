@@ -1,0 +1,18 @@
+{
+    "name": "gemini-ionosphere",
+    "version": "1.0.0",
+    "type": "module",
+    "scripts": {
+        "start": "node src/index.js",
+        "generate-settings": "node scripts/generate_settings.js",
+        "setup": "node scripts/setup.js",
+        "test": "node --test"
+    },
+    "dependencies": {
+        "express": "^5.2.1",
+        "multer": "^2.0.2"
+    },
+    "devDependencies": {
+        "prompt-sync": "^4.2.0"
+    }
+}

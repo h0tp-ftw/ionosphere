@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Environment variables — never commit secrets
+.env
+
+# Temp files generated at runtime by the orchestrator
+temp/
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+*.egg-info/
+
+# Build artefacts
+dist/
+build/
+
+# Playwright browser cache
+.playwright/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp

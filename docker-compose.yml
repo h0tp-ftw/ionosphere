@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  ionosphere:
+    build: .
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_SETTINGS_JSON=/app/settings.json
+    volumes:
+      # Optional: Mount your local gemini CLI binary if the image doesn't include it. 
+      # MUST match target OS architecture (linux). If using Go to build it: GOOS=linux GOARCH=amd64 go build -o gemini.linux
+      # - ./gemini.linux:/usr/local/bin/gemini:ro
+      - ./temp:/app/temp:z

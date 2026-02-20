@@ -1,6 +1,12 @@
 # Ionosphere
 
-**Ionosphere** is a configurable API bridge for the [Google Gemini CLI](https://github.com/google-gemini/gemini-cli). It operates in two modes:
+**Ionosphere** is a configurable API bridge for the [Google Gemini CLI](https://github.com/google-gemini/gemini-cli) to let it be the brain for your AI application. In other words, it lets you use the Gemini CLI like a standard API, with abiity to have multiple sessions, and ability to inject MCP servers on the fly (for tools). 
+
+Ionosphere allows for the multi-step work of Gemini CLI in any AI application, provided that
+- tools can be defined as MCP servers
+- multi-step work can be handled directly by the Gemini CLI
+
+It operates in two modes:
 
 - **Stateless** *(default)* — Every prompt spawns a fresh CLI session. The full conversation is sent each time, just like a standard OpenAI-compatible API call. Simple, zero-drift, zero-state.
 - **Stateful** *(opt-in via `SESSION_MODE=stateful`)* — Uses a **Longest Common Prefix (LCP)** algorithm to route incoming prompts to the correct Gemini CLI session, sending only the new content (delta). Sessions persist across bridge restarts via `--resume`.
@@ -17,6 +23,9 @@
 | Multi-session *(stateful)* | One conversation per server | LCP router finds the right session automatically |
 | History bloat *(stateful)* | Full history re-sent every turn | SessionRouter strips redundant payload, sends only delta |
 | Context Injection | Static tools only | Dynamic per-request **MCP Server** injection via isolated workspaces |
+
+> [!TIP]
+> Ionosphere is optimized for **agentic workflows** and complex tool orchestration. If your primary goal is to minimize token costs, a direct API integration may be more efficient. Use Ionosphere when you need to leverage the Gemini CLI's superior handling of long-running tasks, multi-step reasoning, and dynamic tool injection. (But it is a bonus that OAuth gives you daily limits on Gemini CLI usage.)
 
 ---
 

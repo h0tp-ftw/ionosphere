@@ -156,9 +156,15 @@ curl http://localhost:3000/health
 
 ---
 
-## Session-Aware Routing (Stateless Client Compatibility)
+## Session Routing
 
-Ionosphere is designed to work with stateless AI frontends (Roo Code, OpenClaw, etc.) that send the full conversation history on every request.
+Ionosphere supports two session modes, configured via the `SESSION_MODE` environment variable:
+
+### Stateless Mode *(default)*
+
+Every prompt spawns a fresh Gemini CLI session. The full conversation history is sent as the prompt each time. No session tracking, no `--resume`, no state drift. This is the architecturally correct choice for OpenAI-compatible clients that already send the full `messages[]` array on every request.
+
+### Stateful Mode (`SESSION_MODE=stateful`)
 
 The `SessionRouter` automatically identifies which Gemini CLI session to resume using a Longest Common Prefix (LCP) walk across all known sessions. It then extracts only the new content (delta) and spawns `gemini --resume <sessionId> -p <delta>`. Clients do not need to be aware of this — send the full history as normal and the router will find the right session.
 

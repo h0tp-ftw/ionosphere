@@ -52,8 +52,13 @@ export class GeminiController extends EventEmitter {
         this.cwd = cwd;
         this.tempDir = path.join(this.cwd, 'temp');
 
-        // Session Router: determines which CLI session to resume
-        this.router = new SessionRouter(path.join(this.tempDir, 'sessions.json'));
+        // Session mode: 'stateless' (fresh every time) or 'stateful' (LCP-based resume)
+        this.sessionMode = (process.env.SESSION_MODE || 'stateless').toLowerCase();
+
+        // Session Router: only instantiated in stateful mode
+        this.router = this.sessionMode === 'stateful'
+            ? new SessionRouter(path.join(this.tempDir, 'sessions.json'))
+            : null;
 
         // Concurrency: serialize prompts so we don't overlap CLI invocations
         this.promptQueue = Promise.resolve();
@@ -78,8 +83,11 @@ export class GeminiController extends EventEmitter {
     sendPrompt(text) {
         this.promptQueue = this.promptQueue.then(async () => {
             try {
-                // 1. Route: find the right session
-                const { sessionId, delta, isNew } = this.router.route(text);
+                // 1. Route: find the right session (or skip in stateless mode)
+                let sessionId = null, delta = text, isNew = true;
+                if (this.sessionMode === 'stateful') {
+                    ({ sessionId, delta, isNew } = this.router.route(text));
+                }
 
                 if (!delta) {
                     console.warn('[GeminiController] Delta was empty — nothing new to send.');
@@ -89,7 +97,7 @@ export class GeminiController extends EventEmitter {
 
                 // 2. Build CLI args
                 const cliPath = process.env.GEMINI_CLI_PATH || 'gemini';
-                const settingsPath = process.env.GEMINI_SETTINGS_JSON || path.join(os.homedir(), '.gemini', 'settings.json');
+                const settingsPath = process.env.GEMINI_SETTINGS_JSON || path.join(process.cwd(), '.gemini', 'settings.json');
 
                 const args = [];
 
@@ -105,7 +113,7 @@ export class GeminiController extends EventEmitter {
                 args.push('-p', `@${tempPromptPath}`);
                 args.push('-o', 'stream-json');
 
-                console.log(`[GeminiController] Spawning CLI: ${cliPath} ${args.join(' ')}`);
+                console.log(`[GeminiController] Spawning CLI [${this.sessionMode}]: ${cliPath} ${args.join(' ')}`);
                 console.log(`[GeminiController] Session: ${isNew ? 'NEW' : sessionId}, Delta: ${delta.length} chars`);
 
                 // 3. Spawn the one-shot process
@@ -184,18 +192,20 @@ export class GeminiController extends EventEmitter {
                     });
                 });
 
-                // 4. After success, discover the session ID and record the turn
-                if (isNew) {
-                    // Discover the new session ID by listing sessions
-                    const newSessionId = await this._discoverLatestSessionId();
-                    if (newSessionId) {
-                        this.router.registerSession(newSessionId, text);
+                // 4. After success, discover the session ID and record the turn (stateful only)
+                if (this.sessionMode === 'stateful') {
+                    if (isNew) {
+                        // Discover the new session ID by listing sessions
+                        const newSessionId = await this._discoverLatestSessionId();
+                        if (newSessionId) {
+                            this.router.registerSession(newSessionId, text);
+                        } else {
+                            console.warn('[GeminiController] Could not discover new session ID. Session will not be resumable.');
+                        }
                     } else {
-                        console.warn('[GeminiController] Could not discover new session ID. Session will not be resumable.');
+                        // Update existing session with the new cumulative payload
+                        this.router.recordTurn(sessionId, text);
                     }
-                } else {
-                    // Update existing session with the new cumulative payload
-                    this.router.recordTurn(sessionId, text);
                 }
 
                 // Clean up temp prompt file

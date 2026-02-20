@@ -40,10 +40,20 @@ test('GeminiController - File Injection creates @temp references', (t) => {
     fs.unlinkSync(dummyPath);
 });
 
-test('GeminiController - exposes a SessionRouter instance', (t) => {
+test('GeminiController - in stateless mode (default), router is null', (t) => {
+    delete process.env.SESSION_MODE;
     const controller = new GeminiController();
-    assert.ok(controller.router, "Controller must expose a SessionRouter");
+    assert.strictEqual(controller.router, null, "Router must be null in stateless mode");
+    assert.strictEqual(controller.sessionMode, 'stateless');
+});
+
+test('GeminiController - in stateful mode, exposes a SessionRouter instance', (t) => {
+    process.env.SESSION_MODE = 'stateful';
+    const controller = new GeminiController();
+    assert.ok(controller.router, "Controller must expose a SessionRouter in stateful mode");
     assert.strictEqual(typeof controller.router.route, 'function');
     assert.strictEqual(typeof controller.router.registerSession, 'function');
     assert.strictEqual(typeof controller.router.recordTurn, 'function');
+    assert.strictEqual(controller.sessionMode, 'stateful');
+    delete process.env.SESSION_MODE;
 });

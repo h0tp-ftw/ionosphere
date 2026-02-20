@@ -7,7 +7,7 @@ import os from 'os';
 
 // Use a temp path for test persistence to avoid clobbering real data
 function makeTempPersistPath() {
-    return path.join(os.tmpdir(), `session-router-test-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
+    return path.join(os.tmpdir(), `session-router-test-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
 }
 
 // ── Empty store: new session ─────────────────────────────────────────────────
@@ -143,9 +143,9 @@ test('SessionRouter - persists sessions to disk and reloads', (t) => {
     // Create a new router pointing to the same persistence file
     const router2 = new SessionRouter(persistPath);
 
-    assert.strictEqual(router2.sessions.size, 2);
-    assert.strictEqual(router2.sessions.get('session-abc').payload, "Hello World");
-    assert.strictEqual(router2.sessions.get('session-def').payload, "Goodbye World");
+    assert.strictEqual(router2.stmtCount.get().count, 2);
+    assert.strictEqual(router2.db.prepare("SELECT payload FROM sessions WHERE id = 'session-abc'").get().payload, "Hello World");
+    assert.strictEqual(router2.db.prepare("SELECT payload FROM sessions WHERE id = 'session-def'").get().payload, "Goodbye World");
 
     // Route should work on the reloaded router
     const result = router2.route("Hello World, new turn.");
@@ -165,10 +165,10 @@ test('SessionRouter - reset clears all sessions', (t) => {
     const router = new SessionRouter(makeTempPersistPath());
 
     router.registerSession('session-abc', "Hello");
-    assert.strictEqual(router.sessions.size, 1);
+    assert.strictEqual(router.stmtCount.get().count, 1);
 
     router.reset();
-    assert.strictEqual(router.sessions.size, 0);
+    assert.strictEqual(router.stmtCount.get().count, 0);
 
     // After reset, everything routes as new
     const result = router.route("Hello");

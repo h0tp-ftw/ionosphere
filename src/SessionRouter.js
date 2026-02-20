@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { DatabaseSync } from 'node:sqlite';
 
 /**
  * SessionRouter — LCP-based Multi-Session Context Router
@@ -25,19 +26,34 @@ import path from 'path';
  */
 export class SessionRouter {
     /**
-     * @param {string} persistPath - Absolute path to the JSON file used for disk persistence.
+     * @param {string} persistPath - Absolute path to the SQLite DB file.
      */
     constructor(persistPath) {
-        /**
-         * Map of sessionId → { payload: string }
-         * @type {Map<string, { payload: string }>}
-         */
-        this.sessions = new Map();
+        /** Path to the persistence database on disk. */
+        this.persistPath = persistPath || path.join(process.cwd(), 'temp', 'sessions.db');
 
-        /** Path to the persistence file on disk. */
-        this.persistPath = persistPath || path.join(process.cwd(), 'temp', 'sessions.json');
+        const dir = path.dirname(this.persistPath);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
-        this.loadFromDisk();
+        // Initialize built-in SQLite database
+        this.db = new DatabaseSync(this.persistPath);
+
+        // Define schema
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS sessions (
+                id TEXT PRIMARY KEY,
+                payload TEXT NOT NULL
+            )
+        `);
+
+        // Prepare statements for optimal performance
+        this.stmtInsert = this.db.prepare('INSERT OR REPLACE INTO sessions (id, payload) VALUES (?, ?)');
+        this.stmtSelectAll = this.db.prepare('SELECT id, payload FROM sessions');
+        this.stmtDeleteAll = this.db.prepare('DELETE FROM sessions');
+        this.stmtCount = this.db.prepare('SELECT COUNT(*) as count FROM sessions');
+
+        const count = this.stmtCount.get().count;
+        console.log(`[SessionRouter] SQLite DB initialized. Currently tracking ${count} sessions.`);
     }
 
     /**
@@ -47,7 +63,8 @@ export class SessionRouter {
      * @returns {{ sessionId: string|null, delta: string, isNew: boolean }}
      */
     route(incomingPayload) {
-        if (this.sessions.size === 0) {
+        const count = this.stmtCount.get().count;
+        if (count === 0) {
             return { sessionId: null, delta: incomingPayload, isNew: true };
         }
 
@@ -55,8 +72,10 @@ export class SessionRouter {
         let bestLcpLength = -1;
         let bestVerdict = null;
 
-        for (const [sessionId, session] of this.sessions) {
-            const stored = session.payload;
+        // Iterate over rows directly from SQLite (this avoids a gigantic JSON buffer in memory)
+        for (const row of this.stmtSelectAll.all()) {
+            const sessionId = row.id;
+            const stored = row.payload;
             const incoming = incomingPayload;
 
             // --- LCP Walk ---
@@ -72,20 +91,15 @@ export class SessionRouter {
 
             if (pHasMore && sHasMore) {
                 // DIVERGENT — both have content after the split point.
-                // This is a different conversation. Skip.
                 continue;
             }
 
             if (!pHasMore && sHasMore) {
-                // SUBSET — P is a prefix of S. The client sent less history
-                // than the stored session has. This means the client may be
-                // branching from an earlier point, so we must NOT resume S.
-                // Treat as a skip (the client's next message could diverge).
+                // SUBSET — P is a prefix of S. Treat as a skip.
                 continue;
             }
 
             // CONTINUATION or IDENTICAL — valid matches.
-            // Pick the one with the longest overlap.
             if (n > bestLcpLength) {
                 bestLcpLength = n;
                 bestSessionId = sessionId;
@@ -99,13 +113,11 @@ export class SessionRouter {
         }
 
         if (bestSessionId === null) {
-            // All sessions diverged. Start a new conversation.
             console.log(`[SessionRouter] No matching session found. Creating new session.`);
             return { sessionId: null, delta: incomingPayload, isNew: true };
         }
 
-        const stored = this.sessions.get(bestSessionId).payload;
-
+        // We fetch the chosen payload again implicitly via LCP length since we just need the remainder
         if (bestVerdict === 'CONTINUATION') {
             const delta = incomingPayload.slice(bestLcpLength).trim();
             console.log(`[SessionRouter] CONTINUATION match on session ${bestSessionId}. Stripped ${bestLcpLength} chars. Delta: ${delta.length} chars.`);
@@ -118,16 +130,13 @@ export class SessionRouter {
     }
 
     /**
-     * Record a completed turn. Updates the stored payload for the session.
-     * Call this AFTER a successful round-trip so the next route() has the
-     * correct baseline.
+     * Record a completed turn. Updates the database record for the session.
      *
      * @param {string} sessionId - The CLI session ID.
      * @param {string} fullPayload - The full cumulative payload up to this point.
      */
     recordTurn(sessionId, fullPayload) {
-        this.sessions.set(sessionId, { payload: fullPayload });
-        this.persistToDisk();
+        this.stmtInsert.run(sessionId, fullPayload);
     }
 
     /**
@@ -137,60 +146,15 @@ export class SessionRouter {
      * @param {string} initialPayload - The initial payload that created this session.
      */
     registerSession(sessionId, initialPayload) {
-        this.sessions.set(sessionId, { payload: initialPayload });
-        this.persistToDisk();
-        console.log(`[SessionRouter] Registered new session: ${sessionId}`);
+        this.stmtInsert.run(sessionId, initialPayload);
+        console.log(`[SessionRouter] Registered new session in SQLite: ${sessionId}`);
     }
 
     /**
-     * Serialize the session map to disk as JSON.
-     */
-    persistToDisk() {
-        try {
-            const dir = path.dirname(this.persistPath);
-            if (!fs.existsSync(dir)) {
-                fs.mkdirSync(dir, { recursive: true });
-            }
-
-            const serialized = {};
-            for (const [id, data] of this.sessions) {
-                serialized[id] = data;
-            }
-            fs.writeFileSync(this.persistPath, JSON.stringify(serialized, null, 2), 'utf-8');
-        } catch (err) {
-            console.error(`[SessionRouter] Failed to persist sessions to disk:`, err);
-        }
-    }
-
-    /**
-     * Load the session map from disk.
-     */
-    loadFromDisk() {
-        try {
-            if (fs.existsSync(this.persistPath)) {
-                const raw = fs.readFileSync(this.persistPath, 'utf-8');
-                const parsed = JSON.parse(raw);
-                for (const [id, data] of Object.entries(parsed)) {
-                    this.sessions.set(id, data);
-                }
-                console.log(`[SessionRouter] Loaded ${this.sessions.size} sessions from disk.`);
-            }
-        } catch (err) {
-            console.error(`[SessionRouter] Failed to load sessions from disk:`, err);
-        }
-    }
-
-    /**
-     * Fully resets the router — clears all sessions and removes the persistence file.
+     * Fully resets the router — clears all sessions from the database.
      */
     reset() {
-        this.sessions.clear();
-        try {
-            if (fs.existsSync(this.persistPath)) {
-                fs.unlinkSync(this.persistPath);
-            }
-        } catch (err) {
-            console.error(`[SessionRouter] Failed to delete persistence file:`, err);
-        }
+        this.stmtDeleteAll.run();
+        console.log(`[SessionRouter] Wiped all sessions from database.`);
     }
 }

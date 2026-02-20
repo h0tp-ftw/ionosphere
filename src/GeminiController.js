@@ -57,7 +57,7 @@ export class GeminiController extends EventEmitter {
 
         // Session Router: only instantiated in stateful mode
         this.router = this.sessionMode === 'stateful'
-            ? new SessionRouter(path.join(this.tempDir, 'sessions.json'))
+            ? new SessionRouter(path.join(this.tempDir, 'sessions.db'))
             : null;
 
         // Concurrency: serialize prompts so we don't overlap CLI invocations

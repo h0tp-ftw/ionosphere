@@ -143,7 +143,7 @@ When an HTTP client drops mid-stream, Ionosphere dispatches `SIGINT` to the runn
 
 ## Session Persistence (Stateful Mode Only)
 
-The `SessionRouter` serializes its session map (`sessionId → payload`) to `temp/sessions.json`. This means:
+The `SessionRouter` uses the built-in `node:sqlite` module to continuously store session mappings (`sessionId → payload`) into `temp/sessions.db`. This means:
 
 1. Bridge restarts reload the session map from disk
 2. The CLI's own session storage (`~/.gemini/sessions/`) persists conversation history

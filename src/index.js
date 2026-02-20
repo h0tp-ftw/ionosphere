@@ -8,11 +8,22 @@ const app = express();
 app.use(express.json());
 
 // Setup multer so files stream directly into our existing temp/ directory
-const upload = multer({ dest: path.join(process.cwd(), 'temp') });
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        cb(null, path.join(process.cwd(), 'temp'));
+    },
+    filename: (req, file, cb) => {
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        const ext = path.extname(file.originalname);
+        cb(null, file.fieldname + '-' + uniqueSuffix + ext);
+    }
+});
+const upload = multer({ storage: storage });
 
 const PORT = process.env.PORT || 3000;
 
-console.log("Starting Gemini Ionosphere (Session-Aware Mode)...");
+const sessionMode = process.env.SESSION_MODE || 'stateless';
+console.log(`Starting Gemini Ionosphere (${sessionMode === 'stateful' ? 'Session-Aware' : 'Stateless'} Mode)...`);
 const controller = new GeminiController();
 
 app.post('/v1/prompt', upload.array('files'), async (req, res) => {

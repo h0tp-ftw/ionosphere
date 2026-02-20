@@ -2,8 +2,6 @@
 
 **Ionosphere** is a persistent, stateful orchestrator and API bridge for the [Google Gemini CLI](https://github.com/google-gemini/gemini-cli). Instead of spawning a new CLI process for every request, Ionosphere keeps the CLI alive as a long-running child process and pipes prompts to it over stdio — preserving the full conversation context window across requests.
 
-A Python [FastMCP](https://github.com/jlowin/fastmcp) server runs alongside the CLI and exposes local tools (a headless Playwright browser and a filesystem manager) directly to the Gemini model over stdio transport — no HTTP, no latency.
-
 ---
 
 ## Why Ionosphere?
@@ -11,7 +9,6 @@ A Python [FastMCP](https://github.com/jlowin/fastmcp) server runs alongside the 
 | Problem | Standard API Approach | Ionosphere |
 |---|---|---|
 | Context window | Rebuilt from scratch every request | Persistent — CLI retains full history |
-| Tool execution | Remote API calls with auth overhead | Local stdio — zero network latency |
 | Long agent loops | Connection drops after 30s–2min | Infinite socket timeout + 15s heartbeat |
 | Concurrent requests | Race conditions | Mutex queue — serialized cleanly |
 | Client disconnects | Zombie processes, wiped context | SIGINT physics — CLI survives, context preserved |
@@ -23,7 +20,6 @@ A Python [FastMCP](https://github.com/jlowin/fastmcp) server runs alongside the 
 
 - **OS**: macOS 15+, Windows 11 24H2+, Ubuntu 20.04+
 - **Node.js**: 20.0.0+
-- **Python**: 3.12+ (for MCP server)
 - **Docker** or **Podman** *(optional, for containerized deployment)*
 - **Gemini CLI**: Installed locally (`npm install -g @google/gemini-cli`) or auto-installed in container
 
@@ -48,12 +44,7 @@ This will:
 ### 2. Run Natively
 
 ```bash
-# Install dependencies
 npm install
-pip install -r mcp_server/requirements.txt
-playwright install chromium
-
-# Start
 npm start
 ```
 
@@ -149,15 +140,13 @@ gemini-ionosphere/
 │   ├── index.js            # Express HTTP server — the relay layer
 │   ├── GeminiController.js # Core CLI orchestrator with Mutex, State Machine, GC
 │   └── ContextDiffer.js    # LCP context stripper for stateless clients
-├── mcp_server/
-│   └── server.py           # Python FastMCP server (browser + filesystem tools)
 ├── scripts/
 │   ├── setup.js            # Interactive setup wizard
 │   └── generate_settings.js # Generates ~/.gemini/settings.json
 ├── test/
 │   ├── controller.test.js  # GeminiController unit tests
 │   └── differ.test.js      # ContextDiffer unit tests
-├── Dockerfile              # Multi-stage build (Playwright + Node)
+├── Dockerfile              # Single-stage Node.js build with gemini CLI baked in
 ├── docker-compose.yml      # Single-service deployment
 └── .env.example            # Environment variable template
 ```

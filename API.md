@@ -80,14 +80,6 @@ The response is a chunked stream of newline-delimited JSON objects (`application
 
 Emitted incrementally as the model generates tokens.
 
-#### `toolCall` — MCP tool invocation
-
-```json
-{"type": "toolCall", "name": "web_browser", "args": {"action": "navigate", "params": {"url": "https://example.com"}}}
-```
-
-Emitted when the CLI dispatches a call to the FastMCP server.
-
 #### `result` — Definitive turn boundary
 
 ```json
@@ -129,7 +121,7 @@ req.setTimeout(0);
 res.setTimeout(0);
 ```
 
-Agentic ReAct loops running tools like headless Playwright scraping can take minutes. The orchestrator will never forcibly close a connection due to inactivity.
+The orchestrator will never forcibly close a connection due to inactivity.
 
 ### Client Disconnect Handling
 

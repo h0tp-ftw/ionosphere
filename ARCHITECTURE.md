@@ -43,16 +43,6 @@ HTTP Client (Roo Code / OpenClaw / curl)
 │        gemini --headless --output-format stream-json │
 │                                                     │
 │  Maintains full conversation context in memory.     │
-│  Connects to Python MCP server over stdio.          │
-└───────────────┬─────────────────────────────────────┘
-                │  stdio (MCP protocol)
-                ▼
-┌─────────────────────────────────────────────────────┐
-│         Python FastMCP Server (server.py)            │
-│                                                     │
-│  Tools:                                             │
-│  - web_browser   (Playwright headless Chromium)     │
-│  - filesystem_manager (read/write/list/search)      │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -171,48 +161,11 @@ The Gemini CLI is NOT stateless. If the full history is piped to it every turn, 
 
 ---
 
-## The MCP Bridge
+## Docker Build
 
-The CLI's tool execution is handled over **stdio**, not HTTP. When `settings.json` configures `mcpServers.ionosphere`, the CLI automatically spawns:
+The deployment is a lightweight, single-stage `node:22-slim` container.
 
-```
-python -m mcp_server.server
-```
-
-...and communicates with it over the MCP protocol via stdin/stdout pipes. No local port is opened. No network traffic is generated for tool calls.
-
-### `web_browser` Tool
-
-Manages a singleton headless Chromium instance via Playwright. The browser is lazy-initialized on first tool call and shared across all subsequent calls within the session.
-
-| Action | Parameters |
-|---|---|
-| `navigate` | `url` |
-| `get_text` | *(none)* — returns `document.body.innerText` |
-| `click` | `selector` |
-| `fill` | `selector`, `value` |
-| `evaluate` | `script` — arbitrary JS, returns result |
-
-### `filesystem_manager` Tool
-
-Direct local filesystem operations using Python's `pathlib`.
-
-| Action | Parameters |
-|---|---|
-| `read_file` | `path` |
-| `write_file` | `path`, `content` |
-| `list_directory` | `path` |
-| `search_files` | `path`, `query` (filename substring match) |
-| `make_directory` | `path` |
-| `delete_path` | `path` |
-
----
-
-## Multi-Stage Docker Build
-
-**Stage 1 (`mcp`)**: Based on `mcr.microsoft.com/playwright/python:v1.44.0-jammy`. Installs Python MCP dependencies and Playwright Chromium with all OS-level browser dependencies pre-baked.
-
-**Stage 2 (`app`)**: Based on `node:22-slim`. Copies browser libs from Stage 1, installs Python 3, copies Python packages, installs Node dependencies, then installs `@google/gemini-cli` globally.
+It installs standard Node dependencies, then installs the `@google/gemini-cli` globally so the binary is baked into the image at build time. 
 
 The `GEMINI_CLI_TAG` build arg (default: `latest`) controls which release channel of the CLI is installed:
 

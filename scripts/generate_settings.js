@@ -15,31 +15,35 @@ const config = {
         previewFeatures: process.env.GEMINI_ENABLE_PREVIEW !== 'false'
     },
     privacy: {
-        usageStatisticsEnabled: process.env.GEMINI_DISABLE_TELEMETRY === 'false'
+        usageStatisticsEnabled: process.env.GEMINI_DISABLE_TELEMETRY !== 'true'
     },
     telemetry: {
-        enabled: process.env.GEMINI_DISABLE_TELEMETRY === 'false'
+        enabled: process.env.GEMINI_DISABLE_TELEMETRY !== 'true'
     },
     model: {
         name: "gemini-2.5-flash-lite"
     },
     tools: {
-        exclude: [
-            "read_file",
-            "write_file",
-            "list_files",
-            "search_files",
-            "edit_file",
-            "run_shell_command",
-            "google_web_search"
-        ]
-    },
-    mcpServers: {
-        ionosphere: {
-            command: "python",
-            args: ["-m", "mcp_server.server"],
-            cwd: PROJECT_ROOT
-        }
+        exclude: (() => {
+            const excludeList = [];
+            const disableTools = process.env.GEMINI_DISABLE_TOOLS !== 'false';
+            const disableSearch = process.env.GEMINI_DISABLE_WEB_SEARCH === 'true';
+
+            if (disableTools) {
+                excludeList.push(
+                    "read_file",
+                    "write_file",
+                    "list_files",
+                    "search_files",
+                    "edit_file",
+                    "run_shell_command"
+                );
+            }
+            if (disableSearch) {
+                excludeList.push("google_web_search");
+            }
+            return excludeList;
+        })()
     }
 };
 

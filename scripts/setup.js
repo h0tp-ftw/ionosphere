@@ -62,7 +62,6 @@ async function setupEnvAndAuth() {
         if (hasGemini.error) {
             console.log("\n⚠️  `gemini` is not installed locally.");
             console.log("   The CLI will be installed inside the container at build time.");
-            console.log("   Run `gemini auth login` inside the container on first boot.");
         } else {
             console.log("\n`gemini` is installed locally. Triggering OAuth flow now...");
             console.log("A browser window will open to authenticate. The setup will continue after.");
@@ -86,6 +85,12 @@ async function setupPreferences() {
 
     const preview = await question("Enable preview models? (Y/n): ");
     process.env.GEMINI_ENABLE_PREVIEW = preview.toLowerCase() === 'n' ? 'false' : 'true';
+
+    const tools = await question("Disable inbuilt tools (read/write files, shell commands) by default? (Y/n): ");
+    process.env.GEMINI_DISABLE_TOOLS = tools.toLowerCase() === 'n' ? 'false' : 'true';
+
+    const search = await question("Disable Google Web Search tool as well? (y/N): ");
+    process.env.GEMINI_DISABLE_WEB_SEARCH = search.toLowerCase() === 'y' ? 'true' : 'false';
 }
 
 async function generateSettings() {

@@ -12,66 +12,8 @@ const upload = multer({ dest: path.join(process.cwd(), 'temp') });
 
 const PORT = process.env.PORT || 3000;
 
-console.log("Starting Gemini Native Orchestrator (Persistent Mode)...");
+console.log("Starting Gemini Ionosphere (Session-Aware Mode)...");
 const controller = new GeminiController();
-
-// We need to store active HTTP responses to stream chunks back to the client
-let currentRes = null;
-let heartbeatInterval = null;
-
-controller.on('text', (text) => {
-    process.stdout.write(text);
-    if (currentRes && !currentRes.writableEnded) {
-        currentRes.write(JSON.stringify({ type: 'text', value: text }) + '\n');
-    }
-});
-
-controller.on('toolCall', (info) => {
-    console.log(`\n[Tool Call] ${JSON.stringify(info)}`);
-    if (currentRes && !currentRes.writableEnded) {
-        currentRes.write(JSON.stringify({ type: 'toolCall', ...info }) + '\n');
-    }
-});
-
-controller.on('error', (err) => {
-    console.error(`\n[Fatal Error]`, err);
-    if (currentRes && !currentRes.writableEnded) {
-        currentRes.write(JSON.stringify({ type: 'error', error: err }) + '\n');
-        currentRes.end();
-    }
-
-    // Auth errors are fatal and require the container/process to restart
-    if (err.code === 'AUTH_EXPIRED') {
-        process.exit(1);
-    }
-});
-
-controller.on('done', () => {
-    // We now rely on 'result' to be the definitive end of turn
-});
-
-controller.on('result', (json) => {
-    console.log(`\n[Turn Result]`, json);
-    if (currentRes && !currentRes.writableEnded) {
-        currentRes.write(JSON.stringify(json) + '\n');
-        currentRes.end();
-    }
-    if (heartbeatInterval) {
-        clearInterval(heartbeatInterval);
-        heartbeatInterval = null;
-    }
-    currentRes = null;
-});
-
-controller.on('close', (code) => {
-    console.error(`\n[CLI Process Closed] Exit code ${code}. Restarting...`);
-    // Simple self-healing: if the CLI dies, try to respawn it.
-    controller.spawn();
-    controller.waitForReady().catch(console.error);
-});
-
-// Start the CLI Subprocess
-controller.spawn();
 
 app.post('/v1/prompt', upload.array('files'), async (req, res) => {
     try {
@@ -82,14 +24,11 @@ app.post('/v1/prompt', upload.array('files'), async (req, res) => {
             return res.status(400).json({ error: "Missing 'prompt' in request payload" });
         }
 
-        // 2) Disable Request/Response Socket Timeouts for very long ReAct loops
+        // Disable Request/Response Socket Timeouts for very long ReAct loops
         req.setTimeout(0);
         res.setTimeout(0);
 
-        // Wait for CLI to be ready
-        await controller.waitForReady();
-
-        // Check if the client disconnected before we even got the mutex lock
+        // Check if the client disconnected before we started
         if (req.closed) {
             console.log("[API] Client disconnected before prompt was enqueued.");
             return;
@@ -99,41 +38,95 @@ app.post('/v1/prompt', upload.array('files'), async (req, res) => {
         res.setHeader('Transfer-Encoding', 'chunked');
 
         // Ensure connection stays alive via heartbeat ping every 15s
-        if (heartbeatInterval) clearInterval(heartbeatInterval);
-        heartbeatInterval = setInterval(() => {
+        const heartbeatInterval = setInterval(() => {
             if (!res.writableEnded) {
                 res.write(JSON.stringify({ type: "ping" }) + '\n');
             }
         }, 15000);
 
-        currentRes = res;
-
-        // 1) Zombie Process Cleanup: Handle client drops mid-generation
-        req.on('close', () => {
-            if (!res.writableEnded) {
-                console.warn("[API] Client disconnected mid-stream!");
-                if (heartbeatInterval) clearInterval(heartbeatInterval);
-
-                // Send SIGINT to gracefully interrupt the CLI, triggering a FatalCancellationError 
-                // which will release the Mutex cleanly via the {"type": "result"} object.
-                controller.cancelCurrentTurn();
-            }
-        });
-
-        // 3) Multi-part file injection gap
+        // Build the full prompt (with any injected file references)
         let finalPrompt = "";
-
-        // If multer successfully wrote files to `temp/`, we inject them as `@temp/file`
         if (req.files && req.files.length > 0) {
             console.log(`[API] Received ${req.files.length} injected files via multipart.`);
             for (const file of req.files) {
-                // Ensure the file is tracked by the controller for GC
-                controller.currentPromptFiles.push(file.path);
                 finalPrompt += `@${file.path}\n`;
             }
         }
-
         finalPrompt += prompt;
+
+        // Wire up event listeners for this specific request
+        const onText = (text) => {
+            process.stdout.write(text);
+            if (!res.writableEnded) {
+                res.write(JSON.stringify({ type: 'text', value: text }) + '\n');
+            }
+        };
+
+        const onToolCall = (info) => {
+            console.log(`\n[Tool Call] ${JSON.stringify(info)}`);
+            if (!res.writableEnded) {
+                res.write(JSON.stringify({ type: 'toolCall', ...info }) + '\n');
+            }
+        };
+
+        const onError = (err) => {
+            console.error(`\n[Error]`, err);
+            if (!res.writableEnded) {
+                res.write(JSON.stringify({ type: 'error', error: err }) + '\n');
+            }
+
+            if (err.code === 'AUTH_EXPIRED') {
+                process.exit(1);
+            }
+        };
+
+        const onResult = (json) => {
+            console.log(`\n[Turn Result]`, json);
+            if (!res.writableEnded) {
+                res.write(JSON.stringify(json) + '\n');
+                res.end();
+            }
+            cleanup();
+        };
+
+        const onEvent = (json) => {
+            if (!res.writableEnded) {
+                res.write(JSON.stringify(json) + '\n');
+            }
+        };
+
+        const cleanup = () => {
+            clearInterval(heartbeatInterval);
+            controller.removeListener('text', onText);
+            controller.removeListener('toolCall', onToolCall);
+            controller.removeListener('error', onError);
+            controller.removeListener('result', onResult);
+            controller.removeListener('event', onEvent);
+
+            // Clean up multipart temp files
+            if (req.files) {
+                for (const file of req.files) {
+                    try {
+                        if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
+                    } catch (e) { /* ignore */ }
+                }
+            }
+        };
+
+        controller.on('text', onText);
+        controller.on('toolCall', onToolCall);
+        controller.on('error', onError);
+        controller.on('result', onResult);
+        controller.on('event', onEvent);
+
+        // Handle client drops mid-generation
+        req.on('close', () => {
+            if (!res.writableEnded) {
+                console.warn("[API] Client disconnected mid-stream!");
+                controller.cancelCurrentTurn();
+                cleanup();
+            }
+        });
 
         console.log(`\n[API] Enqueueing prompt sequence...`);
         controller.sendPrompt(finalPrompt);
@@ -149,7 +142,7 @@ app.post('/v1/prompt', upload.array('files'), async (req, res) => {
 });
 
 app.get('/health', (req, res) => {
-    res.json({ status: "ok", ready: controller.ready });
+    res.json({ status: "ok" });
 });
 
 app.listen(PORT, '0.0.0.0', () => {

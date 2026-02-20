@@ -10,6 +10,17 @@ const rl = readline.createInterface({
 
 const question = (query) => new Promise(resolve => rl.question(query, resolve));
 
+async function checkTermsOfService() {
+    console.log("By using Ionosphere and the Gemini CLI, you agree to follow the Google API and Gemini CLI Terms of Service.");
+    console.log("Please review them before proceeding.");
+    const agree = await question("Do you agree to these Terms of Service? (y/N): ");
+    if (agree.toLowerCase() !== 'y') {
+        console.error("❌ You must agree to the Terms of Service to use this software. Exiting.");
+        process.exit(1);
+    }
+    console.log("✅ Terms of Service accepted.\n");
+}
+
 async function checkDependencies() {
     console.log("Checking dependencies...");
     const nodeStatus = spawnSync('node', ['--version']);
@@ -108,6 +119,7 @@ async function main() {
     console.log("=========================================\n");
 
     try {
+        await checkTermsOfService();
         await checkDependencies();
         await setupEnvAndAuth();
         await setupPreferences();

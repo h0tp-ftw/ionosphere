@@ -160,10 +160,12 @@ export class GeminiController {
                 }, 5 * 60 * 1000);
 
                 accumulator.on('line', (json) => {
-                    // Support both legacy 'text' and new 'message' chunk formats
-                    if (json.type === 'text' || (json.type === 'message' && json.role === 'assistant')) {
-                        const content = json.value || json.content;
-                        if (content && callbacks.onText) callbacks.onText(content);
+                    if (json.type === 'text') {
+                        if (json.value && callbacks.onText) callbacks.onText(json.value);
+                    } else if (json.type === 'message' && json.role === 'assistant') {
+                        // Support modern CLI 'message' format with 'content.text'
+                        const text = (typeof json.content === 'object') ? json.content.text : json.content;
+                        if (text && callbacks.onText) callbacks.onText(text);
                     } else if (json.type === 'toolCall' || json.type === 'call') {
                         if (callbacks.onToolCall) callbacks.onToolCall(json);
                     } else if (json.type === 'error') {

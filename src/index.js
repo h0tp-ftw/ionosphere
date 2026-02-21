@@ -216,13 +216,27 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         if (req.body.temperature !== undefined || req.body.top_p !== undefined || req.body.max_tokens !== undefined) {
             customSettings = customSettings || {};
             const reqModel = req.body.model || 'gemini-2.5-flash-lite';
-            customSettings.model = {
-                name: reqModel,
-                generateContentConfig: {
-                    ...(req.body.temperature !== undefined && { temperature: req.body.temperature }),
-                    ...(req.body.top_p !== undefined && { topP: req.body.top_p }),
-                    ...(req.body.max_tokens !== undefined && { maxOutputTokens: req.body.max_tokens })
-                }
+
+            // Re-implementing parameter mapping using modelConfigs as per supervisor request
+            customSettings.modelConfigs = {
+                customAliases: {
+                    "request-override": {
+                        extends: reqModel,
+                        modelConfig: {
+                            generateContentConfig: {
+                                ...(req.body.temperature !== undefined && { temperature: req.body.temperature }),
+                                ...(req.body.top_p !== undefined && { topP: req.body.top_p }),
+                                ...(req.body.max_tokens !== undefined && { maxOutputTokens: req.body.max_tokens })
+                            }
+                        }
+                    }
+                },
+                overrides: [
+                    {
+                        match: { model: "*" },
+                        modelConfig: { model: "request-override" }
+                    }
+                ]
             };
         }
 
@@ -342,24 +356,30 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             clearInterval(heartbeatInterval);
         };
 
-        const cleanupWorkspace = () => {
-            // Clean up the isolated workspace after the turn finishes
+        const cleanupWorkspace = (retryCount = 0) => {
             try {
+                if (process.env.SESSION_MODE === 'stateful') return;
+                if (!fs.existsSync(turnTempDir)) return;
+
+                fs.rmSync(turnTempDir, { recursive: true, force: true });
                 if (process.env.DEBUG_IONOSPHERE) {
-                    console.log(`[DEBUG] Skipping cleanup for turn ${turnId} to allow inspection of ${turnTempDir}`);
-                    return;
-                }
-                if (fs.existsSync(turnTempDir)) {
-                    fs.rmSync(turnTempDir, { recursive: true, force: true });
+                    console.log(`[API] Successfully cleaned up workspace ${turnId}`);
                 }
             } catch (e) {
-                console.error(`[API] Clean up failed for turn ${turnId}:`, e);
+                // Handle Windows EPERM/EBUSY with a delayed retry strategy
+                if ((e.code === 'EPERM' || e.code === 'EBUSY') && retryCount < 3) {
+                    if (process.env.DEBUG_IONOSPHERE) {
+                        console.warn(`[API] Workspace ${turnId} is locked. Retrying in 2000ms... (Attempt ${retryCount + 1})`);
+                    }
+                    setTimeout(() => cleanupWorkspace(retryCount + 1), 2000);
+                } else {
+                    console.error(`[API] Clean up failed for turn ${turnId}:`, e.message);
+                }
             }
         };
 
         const cleanup = () => {
             removeListeners();
-            // Don't call cleanupWorkspace here as it will be called in the finally block of executeTask
         };
 
         // Handle client drops mid-generation.

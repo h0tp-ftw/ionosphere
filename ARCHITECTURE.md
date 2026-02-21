@@ -165,6 +165,100 @@ This architecture ensures zero cross-pollination between concurrent requests, li
 
 ---
 
+---
+
+## Multimodal Input Handling (Vision & Files)
+
+Ionosphere handles multimodal inputs (images, PDFs, etc.) by leveraging the Gemini CLI's native **inline file expansion**. Instead of passing files as separate command-line arguments, they are injected directly into the text prompt.
+
+### Data Flow
+
+```mermaid
+graph TD
+    Client[HTTP Client] -->|POST /chat/completions| API[Express API index.js]
+    
+    subgraph "Workspace Isolation (temp/turnId/)"
+        API -->|1. Decode & Write| Media[image_1.png]
+        API -->|2. Sanitize| Text[Clean User Text]
+        Text -->|3. Inject| FileRefs["@/path/to/image_1.png"]
+        FileRefs -->|4. Finalize| PromptFile[prompt.txt]
+    end
+    
+    API -->|5. Spawn| Ctrl[GeminiController]
+    Ctrl -->|gemini -p @prompt.txt| CLI[Gemini CLI]
+    
+    CLI -->|6. Native Parse| CLI_Parser[Inline File Expansion]
+    CLI_Parser -->|Load Bytes| Media
+    CLI_Parser -->|Send to API| Vision[Gemini Vision/Multimodal API]
+```
+
+### Sanitization & Safety
+
+To prevent prompt injection or accidental file loading from user-provided text:
+1.  **Upstream Sanitization**: All user-provided text is sanitized *before* machine-generated paths are added. Any line starting with `@` or `!` is escaped with a backslash (`\@`).
+2.  **Machine Injection**: The orchestrator then prepends the absolute paths of verified uploaded files as clean `@/path` lines.
+3.  **Bypass**: Because the machine-generated lines are added *after* the sanitization step, they remain un-escaped, allowing the CLI to recognize them.
+
+---
+
+---
+
+## The Assembly Line: Reconstructing the Context
+
+When an API request arrives, Ionosphere assembles a unified execution context for the one-shot CLI spawn. This is how the various parts come together:
+
+### 1. The Prompt Snapshot (`prompt.txt`)
+The `index.js` message loop iterates through the entire conversation history to build a single text payload:
+*   **System Messages**: Aggregated and written to `system.md` (overriding `GEMINI_SYSTEM_MD`).
+*   **User/Assistant Text**: Sanitized (escaping `@` and `!`) and prepended with machine-generated file references.
+*   **Image Attachments**: Decoded from base64 into `image_N.png` and injected as `@/path/to/image_N.png` lines directly inside the message block.
+*   **File Attachments**: For multipart uploads, the absolute path is prepended to the final prompt as `@/path/to/file`.
+*   **Action Narration**: Assistant tool calls are explicitly narrated (e.g., `[ACTION: Called tool 'foo' with args: {...}]`) and tool results are labeled (e.g., `[TOOL RESULT (foo)]: ...`) to maintain ReAct loop context in the one-shot history.
+
+### 2. Configuration Snapshot (`settings.json`)
+The `scripts/generate_settings.js` logic creates a bespoke configuration for the turn:
+*   **MCP Servers**: If provided in the request, they are merged into the `mcpServers` block.
+*   **Tool Constraints**: Dangerous tools are disabled, while necessary tools (like `read_many_files`) are enabled.
+*   **Model Routing**: If a specific `model` is requested, it is mapped to a custom alias in the settings to override the default.
+
+---
+
+## Output Emission: From JSONL to SSE
+
+The Gemini CLI emits a stream of JSON objects to `stdout`. The bridge transforms these into OpenAI-compatible Server-Sent Events (SSE).
+
+### Data Transformation Flow
+
+```mermaid
+sequenceDiagram
+    participant CLI as Gemini CLI
+    participant Accu as JsonlAccumulator
+    participant Ctrl as GeminiController
+    participant API as Express API
+    participant Client as HTTP Client
+
+    CLI->>Accu: Raw Chunked Buffer
+    Note over Accu: Buffers fragments until \n character
+    Accu->>Ctrl: emit('line', {type: "text", value: "Hello"})
+    Ctrl->>API: onText("Hello")
+    API->>Client: data: {"choices": [{"delta": {"content": "Hello"}}]}
+
+    Accu->>Ctrl: emit('line', {type: "toolCall", name: "list_dir", ...})
+    Ctrl->>API: onToolCall({...})
+    API->>Client: data: {"choices": [{"delta": {"tool_calls": [...]}}]}
+
+    Accu->>Ctrl: emit('line', {type: "done"})
+    Ctrl->>API: onResult({type: "result", ...})
+    API->>Client: data: [DONE]
+```
+
+### Key Mechanisms
+*   **JsonlAccumulator**: Crucial for OS pipe stability. It ensures that even if a large JSON object (like a long tool call) is fragmented across multiple 64KB pipe chunks, it is correctly reconstructed before being parsed.
+*   **15s Heartbeat**: While waiting for complex ReAct loops or slow tool executions, the API sends `: ping` comments to keep the HTTP socket alive and prevent timeouts.
+*   **SIGINT Handling**: If the client disconnects, `SIGINT` is sent to the CLI, causing it to halt and emit a final `FatalCancellationError` JSON, allowing the bridge to clean up the workspace immediately.
+
+---
+
 ## Tool Integration
 
 Ionosphere leverages the Gemini CLI's built-in tool execution capabilities.

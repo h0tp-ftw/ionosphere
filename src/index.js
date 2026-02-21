@@ -9,6 +9,17 @@ import { generateConfig } from '../scripts/generate_settings.js';
 const app = express();
 app.use(express.json());
 
+// Helper to sanitize user-provided text: escape lines starting with @ or !
+const sanitizePromptText = (text) => {
+    if (typeof text !== 'string') return text;
+    return text.split('\n').map(line => {
+        if (line.startsWith('@') || line.startsWith('!')) {
+            return '\\' + line;
+        }
+        return line;
+    }).join('\n');
+};
+
 // Ensure base temp directory exists
 const baseTempDir = path.join(process.cwd(), 'temp');
 if (!fs.existsSync(baseTempDir)) {
@@ -133,7 +144,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         for (const msg of messages) {
             if (msg.role === 'system') {
                 let text = Array.isArray(msg.content) ? msg.content.map(p => p.type === 'text' ? p.text : '').join('') : msg.content;
-                systemMessage += text + "\n\n";
+                systemMessage += sanitizePromptText(text) + "\n\n";
             } else {
                 let textContent = "";
                 let inlinedFiles = "";
@@ -141,7 +152,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 if (Array.isArray(msg.content)) {
                     for (const part of msg.content) {
                         if (part.type === 'text') {
-                            textContent += part.text;
+                            textContent += sanitizePromptText(part.text);
                         } else if (part.type === 'image_url' && part.image_url && part.image_url.url && part.image_url.url.startsWith('data:image/')) {
                             const b64Data = part.image_url.url.split(',')[1];
                             if (b64Data) {
@@ -152,13 +163,14 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
                                 // Buffer decoding of the base64 string
                                 fs.writeFileSync(imagePath, Buffer.from(b64Data, 'base64'));
-                                req.mediaPaths = req.mediaPaths || [];
-                                req.mediaPaths.push(imagePath);
+
+                                // Inject the file reference directly (clean @path format)
+                                textContent = "@" + imagePath + "\n" + textContent;
                             }
                         }
                     }
                 } else {
-                    textContent = msg.content || "";
+                    textContent = sanitizePromptText(msg.content || "");
                 }
 
                 if (msg.role === 'user') {
@@ -268,22 +280,14 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             }
         }, 15000);
 
-        // Build final list of media paths (from inline base64 or multipart files)
-        let mediaPaths = req.mediaPaths || [];
+        // Inject any multipart file uploads directly into the prompt string
         if (req.files && req.files.length > 0) {
-            console.log(`[API] Received ${req.files.length} injected files via multipart in turn ${turnId}.`);
             for (const file of req.files) {
-                mediaPaths.push(file.path);
+                prompt = `@${file.path}\n` + prompt;
             }
         }
 
-        // Sanitize user prompt: escape lines starting with @ or !
-        const sanitizedPrompt = prompt.split('\n').map(line => {
-            if (line.startsWith('@') || line.startsWith('!')) {
-                return '\\' + line;
-            }
-            return line;
-        }).join('\n');
+        const sanitizedPrompt = prompt;
         if (process.env.DEBUG_IONOSPHERE) {
             console.log(`[DEBUG] Final Prompt:\n${sanitizedPrompt}`);
             console.log(`[DEBUG] Settings Path: ${settingsPath}`);
@@ -389,7 +393,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 return;
             }
             try {
-                await controller.sendPrompt(turnId, sanitizedPrompt, turnTempDir, settingsPath, system, mediaPaths, {
+                await controller.sendPrompt(turnId, sanitizedPrompt, turnTempDir, settingsPath, system, {
                     onText, onToolCall, onError, onResult, onEvent
                 });
             } finally {

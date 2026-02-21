@@ -5,7 +5,6 @@ import fs from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
 import { generateConfig } from '../scripts/generate_settings.js';
-import { WebSocketController } from './WebSocketController.js';
 
 const app = express();
 app.use(express.json());
@@ -93,7 +92,15 @@ process.on('SIGTERM', () => {
     process.exit(0);
 });
 
-app.post('/v1/chat/completions', upload.any(), async (req, res) => {
+const handleUpload = (req, res, next) => {
+    if (req.is('multipart/form-data')) {
+        upload.any()(req, res, next);
+    } else {
+        next();
+    }
+};
+
+app.post('/v1/chat/completions', handleUpload, async (req, res) => {
     try {
         // 1. Authorization Check
         const expectedApiKey = process.env.API_KEY;
@@ -149,13 +156,23 @@ app.post('/v1/chat/completions', upload.any(), async (req, res) => {
                         }
                     }
                 } else {
-                    textContent = msg.content;
+                    textContent = msg.content || "";
                 }
 
                 if (msg.role === 'user') {
-                    conversationPrompt += `USER:\n${inlinedFiles}${textContent}\n\n`;
+                    conversationPrompt += `USER: ${inlinedFiles}${textContent}\n\n`;
                 } else if (msg.role === 'assistant') {
-                    conversationPrompt += `ASSISTANT:\n${textContent}\n\n`;
+                    let content = textContent;
+                    // Explicitly narrate the tool call so the CLI remembers its action
+                    if (msg.tool_calls && msg.tool_calls.length > 0) {
+                        for (const tc of msg.tool_calls) {
+                            content += `\n[ACTION: Called tool '${tc.function.name}' with args: ${tc.function.arguments}]`;
+                        }
+                    }
+                    conversationPrompt += `ASSISTANT: ${content.trim()}\n\n`;
+                } else if (msg.role === 'tool' || msg.role === 'function') {
+                    const toolName = msg.name || msg.tool_call_id || 'unknown';
+                    conversationPrompt += `[TOOL RESULT (${toolName})]:\n${textContent}\n\n`;
                 }
             }
         }
@@ -371,6 +388,3 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`\nIonosphere Orchestrator HTTP Interface listening on port ${PORT}`);
     console.log(`Example: curl -X POST http://localhost:${PORT}/v1/chat/completions -H "Content-Type: application/json" -d '{"messages":[{"role":"user","content":"Hello"}]}'\n`);
 });
-
-// Attach the Native Pi-AI WebSocket Provider Pipe
-const wsController = new WebSocketController(server, baseTempDir);

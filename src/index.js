@@ -196,6 +196,12 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                     conversationPrompt += `ASSISTANT: ${content.trim()}\n\n`;
                 } else if (msg.role === 'tool' || msg.role === 'function') {
                     const toolName = msg.name || msg.tool_call_id || 'unknown';
+                    // Strip 'call_' prefix if present (added by bridge for client compliance)
+                    const callKey = msg.tool_call_id?.startsWith('call_') ? msg.tool_call_id.substring(5) : msg.tool_call_id;
+
+                    // Resolve any pending ICP calls for this tool result
+                    if (callKey) resolveToolCall(callKey, textContent);
+
                     conversationPrompt += `[TOOL RESULT (${toolName})]:\n${textContent}\n\n`;
                 }
             }
@@ -480,6 +486,13 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                     finish_reason: 'tool_calls'
                 }]
             });
+
+            // End the response so the client knows it's their turn to execute the tool
+            if (!res.writableEnded) {
+                res.write('data: [DONE]\n\n');
+                res.end();
+            }
+            removeListeners();
         };
 
         const onError = (err) => {

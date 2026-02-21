@@ -56,10 +56,12 @@ sequenceDiagram
     CLI-->>TB: tools/call {name, arguments}
     TB-->>B: IPC: {event:"tool_call", name, arguments}
     B-->>C: SSE: delta.tool_calls chunk + finish_reason:"tool_calls"
-    C->>B: POST (next turn, role:"tool" result)
+    Note over B,C: data: [DONE] sent, Turn 1 ends
+    C->>B: POST (Turn 2: role:"tool" result)
+    B->>B: resolveToolCall() matches callKey from Turn 1
     B-->>TB: IPC: {event:"tool_result", result}
     TB-->>CLI: MCP tools/call response
-    CLI->>CLI: Continues ReAct, generates final text
+    CLI->>CLI: (In Turn 2 CLI) Continues ReAct, generates final text
     CLI-->>B: JSONL: {type:"message", role:"assistant", delta:true}
     B-->>C: SSE: delta.content chunks
     CLI-->>B: JSONL: {type:"result", stats:{...}}
@@ -477,6 +479,21 @@ flowchart TD
 ```
 
 The delta (new content only) is sent to the resumed CLI session, preserving the existing context window without re-sending history.
+
+---
+
+## Context Optimization & Efficiency
+
+OpenAI-compatible clients (SDKs) are designed for a stateless API and therefore send the **full conversation history** (context) in every request message array. 
+
+Ionosphere handles this re-injection with two layers of optimization:
+
+1. **Protocol Layer**: The Bridge receives the full history, but it immediately converts it into a single `conversationPrompt` string. If a message is identified as a `tool` result, `resolveToolCall()` attempts to unblock any active ToolBridge loops.
+2. **CLI Layer (Stateful Mode)**: The `SessionRouter` uses LCP matching to avoid re-sending history to the Gemini CLI. Even if the client sends 1MB of history, if Ionosphere recognizes the suffix, it only sends the few new bytes to the CLI.
+3. **CLI Layer (Stateless Mode)**: Every request spawns a fresh `gemini` process. The full history is narrated into the prompt so the model understands the state, but we rely on the bridge's isolated `temp/` workspaces to ensure concurrency doesn't cause context overlap.
+
+> [!NOTE]
+> Since we correctly narrate `[ACTION: Called tool '...']` and `[TOOL RESULT (...)]` in the serialized prompt, the model maintains high ReAct coherence even across Turn 1 → Turn 2 process boundaries.
 
 ---
 

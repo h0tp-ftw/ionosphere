@@ -163,10 +163,10 @@ export class GeminiController {
                     if (json.type === 'text') {
                         if (json.value && callbacks.onText) callbacks.onText(json.value);
                     } else if (json.type === 'message' && json.role === 'assistant') {
-                        // Support modern CLI 'message' format with 'content.text'
+                        // Modern CLI format support
                         const text = (typeof json.content === 'object') ? json.content.text : json.content;
                         if (text && callbacks.onText) callbacks.onText(text);
-                    } else if (json.type === 'toolCall' || json.type === 'call') {
+                    } else if (json.type === 'toolCall') {
                         if (callbacks.onToolCall) callbacks.onToolCall(json);
                     } else if (json.type === 'error') {
                         if (callbacks.onError) callbacks.onError(json);

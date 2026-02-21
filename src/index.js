@@ -212,12 +212,11 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             }
         }
 
-        // Map standard OpenAI top-level parameters into Gemini CLI's modelConfigs
+        // Dynamically inject generation parameters
         if (req.body.temperature !== undefined || req.body.top_p !== undefined || req.body.max_tokens !== undefined) {
             customSettings = customSettings || {};
             const reqModel = req.body.model || 'gemini-2.5-flash-lite';
 
-            // Re-implementing parameter mapping using modelConfigs as per supervisor request
             customSettings.modelConfigs = {
                 customAliases: {
                     "request-override": {
@@ -358,19 +357,10 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
         const cleanupWorkspace = (retryCount = 0) => {
             try {
-                if (process.env.SESSION_MODE === 'stateful') return;
                 if (!fs.existsSync(turnTempDir)) return;
-
                 fs.rmSync(turnTempDir, { recursive: true, force: true });
-                if (process.env.DEBUG_IONOSPHERE) {
-                    console.log(`[API] Successfully cleaned up workspace ${turnId}`);
-                }
             } catch (e) {
-                // Handle Windows EPERM/EBUSY with a delayed retry strategy
                 if ((e.code === 'EPERM' || e.code === 'EBUSY') && retryCount < 3) {
-                    if (process.env.DEBUG_IONOSPHERE) {
-                        console.warn(`[API] Workspace ${turnId} is locked. Retrying in 2000ms... (Attempt ${retryCount + 1})`);
-                    }
                     setTimeout(() => cleanupWorkspace(retryCount + 1), 2000);
                 } else {
                     console.error(`[API] Clean up failed for turn ${turnId}:`, e.message);

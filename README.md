@@ -1,31 +1,23 @@
 # Ionosphere
 
-**Ionosphere** is a configurable API bridge for the [Google Gemini CLI](https://github.com/google-gemini/gemini-cli) to let it be the brain for your AI application. In other words, it lets you use the Gemini CLI like a standard API, with abiity to have multiple sessions, and ability to inject MCP servers on the fly (for tools). 
+**Ionosphere** is a strictly stateless HTTP bridge for the [Google Gemini CLI](https://github.com/google-gemini/gemini-cli). It allows you to use the Gemini CLI as a backend reasoning engine for any OpenAI-compatible application while maintaining high-efficiency tool loops via a **Warm Stateless Handoff** strategy.
 
-Ionosphere allows for the multi-step work of Gemini CLI in any AI application, provided that
-- tools can be defined as MCP servers
-- multi-step work can be handled directly by the Gemini CLI
-
-It operates in two modes:
-
-- **Stateless** *(default)* — Every prompt spawns a fresh CLI session. The full conversation is sent each time, just like a standard OpenAI-compatible API call. Simple, zero-drift, zero-state.
-- **Stateful** *(opt-in via `SESSION_MODE=stateful`)* — Uses a **Longest Common Prefix (LCP)** algorithm to route incoming prompts to the correct Gemini CLI session, sending only the new content (delta). Sessions persist across bridge restarts via `--resume`.
+Ionosphere is ideal for workflows where:
+- Tools are defined as MCP servers (stdio).
+- Multi-step reasoning (ReAct) is handled by the model.
+- Privacy is a priority (no server-side conversation storage).
 
 ---
 
 ## Why Ionosphere?
 
-| Problem | Standard API Approach | Ionosphere |
-|---|---|---|
-| Long agent loops | Connection drops after 30s–2min | Infinite socket timeout + 15s heartbeat |
-| Client disconnects | Zombie processes, wiped context | SIGINT — CLI halts gracefully |
-| Session mode | One-size-fits-all | Configurable: stateless (fresh) or stateful (LCP resume) |
-| Multi-session *(stateful)* | One conversation per server | LCP router finds the right session automatically |
-| History bloat *(stateful)* | Full history re-sent every turn | SessionRouter strips redundant payload, sends only delta |
-| Context Injection | Static tools only | Dynamic per-request **MCP Server** injection via isolated workspaces |
-
-> [!TIP]
-> Ionosphere is optimized for **agentic workflows** and complex tool orchestration. If your primary goal is to minimize token costs, a direct API integration may be more efficient. Use Ionosphere when you need to leverage the Gemini CLI's superior handling of long-running tasks, multi-step reasoning, and dynamic tool injection. (But it is a bonus that OAuth gives you daily limits on Gemini CLI usage.)
+| Feature | Description |
+|---|---|
+| **Warm Stateless Handoff** | Keeps CLI processes "warm" during tool loops in-memory without persistent state. |
+| **Strictly Stateless** | No local database or session files. Every request is a clean slate from a storage perspective. |
+| **Isolated Workspaces** | Every turn gets a throwaway `temp/` workspace for images, logs, and IPC sockets. |
+| **Wait-Free Queuing** | Internal concurrency management to prevent CPU starvation under high load. |
+| **MCP Aggregation** | Automatically namespaces and routes multiple upstream MCP servers through a single bridge. |
 
 ---
 
@@ -33,8 +25,8 @@ It operates in two modes:
 
 - **OS**: macOS 15+, Windows 11 24H2+, Ubuntu 20.04+
 - **Node.js**: 20.0.0+
-- **Docker** or **Podman** *(optional, for containerized deployment)*
-- **Gemini CLI**: Installed locally (`npm install -g @google/gemini-cli`) or auto-installed in container
+- **Docker** or **Podman** *(Recommended for production)*
+- **Gemini CLI**: Installed locally (`npm install -g @google/gemini-cli`)
 
 ---
 
@@ -46,76 +38,22 @@ It operates in two modes:
 npm run setup
 ```
 
-This will:
-- Check for Node.js, Docker/Podman
-- Ask for your authentication method (OAuth, API Key, or Vertex AI)
-- Trigger the `gemini` OAuth flow inline if the binary is on PATH
-- Ask about telemetry and preview model preferences
-- Generate `settings.json` and `.env`
-- Offer to launch the orchestrator immediately (Native / Docker / Podman)
+This script generates your `.env` and `settings.json` based on your preferred auth (OAuth, API Key, or Vertex).
 
-### 2. Run Natively
+### 2. Run Natively (Development)
 
 ```bash
 npm install
 npm start
 ```
 
-### 3. Run via Docker
+### 3. Run via Docker (Production)
 
 ```bash
 docker-compose up --build
 ```
 
-The Docker image automatically installs the Gemini CLI at build time. Pass `GEMINI_CLI_TAG=preview` to install a non-stable release:
-
-```bash
-docker-compose build --build-arg GEMINI_CLI_TAG=preview
-```
-
-### 4. Run via Podman
-
-```bash
-podman compose up --build
-# or, if podman-compose is installed via pip:
-podman-compose up --build
-```
-
----
-
-## Authentication
-
-Configure authentication before running. The setup script handles this interactively.
-
-### OAuth (Personal — Recommended)
-
-```bash
-gemini auth login
-# or trigger inline:
-gemini -p "Hi"
-```
-
-For settings.json enforcement, the setup injects:
-```json
-{ "auth": { "enforcedAuthType": "oauth-personal" } }
-```
-
-### API Key (Google AI Studio)
-
-Set in `.env`:
-```env
-GEMINI_API_KEY=your-key-here
-```
-
-### Vertex AI (Google Cloud)
-
-Set in `.env`:
-```env
-GOOGLE_API_KEY=your-key-here
-GOOGLE_GENAI_USE_VERTEXAI=true
-GOOGLE_CLOUD_PROJECT=your-project
-GOOGLE_CLOUD_LOCATION=us-central1
-```
+The Docker image includes the Gemini CLI and provides a secure, isolated environment for your agentic loops.
 
 ---
 
@@ -123,26 +61,11 @@ GOOGLE_CLOUD_LOCATION=us-central1
 
 | Variable | Default | Description |
 |---|---|---|
-| `SESSION_MODE` | `stateless` | `stateless` (fresh session per prompt) or `stateful` (LCP-based session resume) |
 | `GEMINI_CLI_PATH` | `gemini` | Path to the Gemini CLI binary |
-| `GEMINI_SETTINGS_JSON` | `~/.gemini/settings.json` | Path to the CLI settings file |
-| `GEMINI_API_KEY` | — | API Key auth |
-| `GOOGLE_API_KEY` | — | Vertex AI auth |
-| `GOOGLE_GENAI_USE_VERTEXAI` | — | Set `true` for Vertex AI |
-| `GOOGLE_CLOUD_PROJECT` | — | GCP project ID |
-| `GOOGLE_CLOUD_LOCATION` | — | GCP region |
+| `API_KEY` | — | Bearer token for bridge security |
+| `GEMINI_MODEL` | `gemini-2.0-flash-exp` | Default model |
+| `MAX_CONCURRENT_CLI` | `5` | Max simultaneous CLI processes |
 | `PORT` | `3000` | Express server port |
-
----
-
-## npm Scripts
-
-| Command | Description |
-|---|---|
-| `npm start` | Start the orchestrator HTTP server |
-| `npm run setup` | Interactive first-run setup wizard |
-| `npm run generate-settings` | Regenerate `settings.json` only |
-| `npm test` | Run the automated test suite |
 
 ---
 
@@ -151,16 +74,15 @@ GOOGLE_CLOUD_LOCATION=us-central1
 ```
 gemini-ionosphere/
 ├── src/
-│   ├── index.js            # Express HTTP server — per-request event listeners
-│   ├── GeminiController.js # One-shot CLI spawner (stateless or stateful via SESSION_MODE)
-│   └── SessionRouter.js    # LCP multi-session router (stateful mode only)
+│   ├── index.js            # Handoff Orchestrator — manages parked CLI turns
+│   └── GeminiController.js # Stateless CLI Spawner & Stream Parser
+├── packages/
+│   └── tool-bridge/        # MCP Aggregator (The "Dumb CLI" Bridge)
 ├── scripts/
-│   ├── setup.js            # Interactive setup wizard
-│   └── generate_settings.js # Generates ~/.gemini/settings.json
+│   └── generate_settings.js # Generates per-turn settings.json
 ├── test/
-│   ├── controller.test.js  # GeminiController unit tests
-│   └── router.test.js      # SessionRouter unit tests (10 cases)
-├── Dockerfile              # Single-stage Node.js build with gemini CLI baked in
-├── docker-compose.yml      # Single-service deployment
-└── .env.example            # Environment variable template
+│   ├── controller.test.js  # Controller unit tests
+│   └── ipc_bridge.test.js  # IPC socket verification
+├── Dockerfile              # Node.js + Gemini CLI image
+└── .env.example            # Environment template
 ```

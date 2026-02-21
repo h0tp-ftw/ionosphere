@@ -152,9 +152,8 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
                                 // Buffer decoding of the base64 string
                                 fs.writeFileSync(imagePath, Buffer.from(b64Data, 'base64'));
-
-                                // Injected into prompt referencing the newly dumped disk file
-                                inlinedFiles += `@${imagePath}\n`;
+                                req.mediaPaths = req.mediaPaths || [];
+                                req.mediaPaths.push(imagePath);
                             }
                         }
                     }
@@ -163,7 +162,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 }
 
                 if (msg.role === 'user') {
-                    conversationPrompt += `USER: ${inlinedFiles}${textContent}\n\n`;
+                    conversationPrompt += `USER: ${textContent}\n\n`;
                 } else if (msg.role === 'assistant') {
                     let content = textContent;
                     // Explicitly narrate the tool call so the CLI remembers its action
@@ -269,13 +268,12 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             }
         }, 15000);
 
-        // Build the full prompt (with any injected file references)
-        let injectedFiles = "";
+        // Build final list of media paths (from inline base64 or multipart files)
+        let mediaPaths = req.mediaPaths || [];
         if (req.files && req.files.length > 0) {
             console.log(`[API] Received ${req.files.length} injected files via multipart in turn ${turnId}.`);
             for (const file of req.files) {
-                // file references are relative to the turn directory or absolute
-                injectedFiles += `@${file.path}\n`;
+                mediaPaths.push(file.path);
             }
         }
 
@@ -286,10 +284,8 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             }
             return line;
         }).join('\n');
-
-        const finalPrompt = injectedFiles + sanitizedPrompt;
         if (process.env.DEBUG_IONOSPHERE) {
-            console.log(`[DEBUG] Final Prompt:\n${finalPrompt}`);
+            console.log(`[DEBUG] Final Prompt:\n${sanitizedPrompt}`);
             console.log(`[DEBUG] Settings Path: ${settingsPath}`);
             console.log(`[DEBUG] Settings Content:\n${fs.readFileSync(settingsPath, 'utf8')}`);
         }
@@ -393,7 +389,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 return;
             }
             try {
-                await controller.sendPrompt(turnId, finalPrompt, turnTempDir, settingsPath, system, {
+                await controller.sendPrompt(turnId, sanitizedPrompt, turnTempDir, settingsPath, system, mediaPaths, {
                     onText, onToolCall, onError, onResult, onEvent
                 });
             } finally {

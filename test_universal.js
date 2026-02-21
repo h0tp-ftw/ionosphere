@@ -2,7 +2,7 @@ import OpenAI from 'openai';
 
 const openai = new OpenAI({
     apiKey: 'sk-no-key-required',
-    baseURL: 'http://127.0.0.1:3000/v1'
+    baseURL: 'http://localhost:3000/v1'
 });
 
 const tinyRedDotBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAYAAACNMs+9AAAADElEQVR42mP8z8BQyAAEABH+AdfmveXAAAAAAElFTkSuQmCC";

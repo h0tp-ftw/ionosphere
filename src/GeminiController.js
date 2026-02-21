@@ -82,7 +82,7 @@ export class GeminiController {
      * @param {Object} callbacks - Functions to process output chunks.
      * @returns {Promise<void>}
      */
-    async sendPrompt(turnId, text, workspacePath = this.cwd, settingsPath = process.env.GEMINI_SETTINGS_JSON || path.join(this.cwd, '.gemini', 'settings.json'), systemPrompt = null, callbacks = {}) {
+    async sendPrompt(turnId, text, workspacePath = this.cwd, settingsPath = process.env.GEMINI_SETTINGS_JSON || path.join(this.cwd, '.gemini', 'settings.json'), systemPrompt = null, mediaPaths = [], callbacks = {}) {
         try {
             // 1. Route: find the right session (or skip in stateless mode)
             let sessionId = null, delta = text, isNew = true;
@@ -109,11 +109,16 @@ export class GeminiController {
                 args.push('--resume', sessionId);
             }
 
+            args.push('-o', 'stream-json');
+
+            // Pass media files natively as separate command line arguments!
+            for (const mediaPath of mediaPaths) {
+                args.push('-p', `@${mediaPath}`);
+            }
+
             // Write delta to the isolated workspace
             const tempPromptPath = path.join(workspacePath, `prompt-${randomUUID()}.txt`);
             fs.writeFileSync(tempPromptPath, delta, 'utf-8');
-
-            args.push('-o', 'stream-json');
             args.push('-p', `@${tempPromptPath}`);
 
             // Handle System Prompt if provided

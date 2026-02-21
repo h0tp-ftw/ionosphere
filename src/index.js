@@ -208,21 +208,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             return res.status(400).json({ error: "No user messages provided in conversation" });
         }
 
-        // Parse optional MCP Servers payload and generate isolated settings
-        let mcpServers = null;
-        const rawMcp = req.body.mcpServers || (req.body.extra_body && req.body.extra_body.mcpServers);
-        if (rawMcp) {
-            try {
-                mcpServers = typeof rawMcp === 'string'
-                    ? JSON.parse(rawMcp)
-                    : rawMcp;
-            } catch (e) {
-                console.warn(`[API] Failed to parse mcpServers block: ${e.message}`);
-            }
-        }
-
-        // Parse OpenAI tool definitions — if present, the ToolBridge MCP server
-        // will be injected into settings so the Gemini CLI can call them natively.
+        // Parse OpenAI tool definitions — forwarded to ToolBridge for MCP registration
         const openAiTools = req.body.tools || null;
 
         // Per-turn IPC socket for ToolBridge ↔ Bridge communication
@@ -316,23 +302,54 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         });
         console.log(`[API] IPC server listening at ${ipcPath}`);
 
-        // If the client sent OpenAI tool definitions, write them to a temp file
-        // and inject the ToolBridge as an MCP server for this turn.
-        if (openAiTools && openAiTools.length > 0) {
-            const toolsFilePath = path.join(turnTempDir, 'tools.json');
-            fs.writeFileSync(toolsFilePath, JSON.stringify(openAiTools), 'utf-8');
+        // Resolve upstream MCP servers from the request.
+        // These are passed to ToolBridge via TOOL_BRIDGE_MCP_SERVERS — NOT injected
+        // directly into settings.json. This ensures ALL tool calls flow through the
+        // ToolBridge aggregator → IPC → SSE → client. The CLI never reaches upstream
+        // MCP servers directly, preserving full client observability and control.
+        let mcpServers = null;
+        let upstreamMcpServers = null;
+        const rawMcp = req.body.mcpServers || (req.body.extra_body && req.body.extra_body.mcpServers);
+        if (rawMcp) {
+            try {
+                upstreamMcpServers = typeof rawMcp === 'string' ? JSON.parse(rawMcp) : rawMcp;
+            } catch (e) {
+                console.warn(`[API] Failed to parse mcpServers block: ${e.message}`);
+            }
+        }
 
-            mcpServers = mcpServers || {};
-            mcpServers['ionosphere-tool-bridge'] = {
-                command: 'node',
-                args: [TOOL_BRIDGE_PATH],
-                env: {
-                    TOOL_BRIDGE_TOOLS: toolsFilePath,
-                    TOOL_BRIDGE_IPC: ipcPath
+        // Determine if ToolBridge is needed for this turn
+        const hasOpenAiTools = openAiTools && openAiTools.length > 0;
+        const hasUpstreamMcp = upstreamMcpServers && Object.keys(upstreamMcpServers).length > 0;
+
+        if (hasOpenAiTools || hasUpstreamMcp) {
+            const toolBridgeEnv = { TOOL_BRIDGE_IPC: ipcPath };
+
+            if (hasOpenAiTools) {
+                const toolsFilePath = path.join(turnTempDir, 'tools.json');
+                fs.writeFileSync(toolsFilePath, JSON.stringify(openAiTools), 'utf-8');
+                toolBridgeEnv.TOOL_BRIDGE_TOOLS = toolsFilePath;
+                console.log(`[API] ToolBridge: ${openAiTools.length} OpenAI tool(s) registered.`);
+            }
+
+            if (hasUpstreamMcp) {
+                const mcpServersFilePath = path.join(turnTempDir, 'mcp_servers.json');
+                fs.writeFileSync(mcpServersFilePath, JSON.stringify(upstreamMcpServers), 'utf-8');
+                toolBridgeEnv.TOOL_BRIDGE_MCP_SERVERS = mcpServersFilePath;
+                console.log(`[API] ToolBridge: aggregating ${Object.keys(upstreamMcpServers).length} upstream MCP server(s).`);
+            }
+
+            // ToolBridge is the ONLY mcpServers entry in settings.json.
+            // All tool routing goes through it — upstream MCPs are invisible to the CLI.
+            mcpServers = {
+                'ionosphere-tool-bridge': {
+                    command: 'node',
+                    args: [TOOL_BRIDGE_PATH],
+                    env: toolBridgeEnv
                 }
             };
-            console.log(`[API] Injected ToolBridge for ${openAiTools.length} tool(s) into settings.`);
         }
+
 
         // Parse optional custom settings payload (e.g. modelConfigs)
         let customSettings = null;

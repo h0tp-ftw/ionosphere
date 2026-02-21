@@ -1,66 +1,89 @@
 #!/usr/bin/env node
 /**
- * Ionosphere ToolBridge — Ephemeral MCP stdio Server
+ * Ionosphere ToolBridge — Universal MCP Aggregator + OpenAI Adapter
  *
  * Spawned once per request turn by the Ionosphere bridge.
- * Reads OpenAI-format tool definitions and registers each as a named MCP tool.
- * When the Gemini CLI calls one of those tools, this process:
- *   1. Writes a tool_call JSON message to the IPC socket.
- *   2. Waits for a tool_result reply from the bridge.
- *   3. Returns the result as MCP tool content, allowing the CLI to continue.
+ * Acts as a unified gateway that:
+ *
+ *   1. Reads OpenAI-format tool definitions (TOOL_BRIDGE_TOOLS) and registers
+ *      each as a named MCP tool. When the Gemini CLI calls one, it is forwarded
+ *      via IPC → SSE to the client for client-side execution.
+ *
+ *   2. Reads upstream MCP server configs (TOOL_BRIDGE_MCP_SERVERS) and connects
+ *      to each as an MCP client. Discovers their tools, re-exposes them to the
+ *      Gemini CLI under namespaced names ({serverName}__{toolName}). When the
+ *      CLI calls one, it is also forwarded via IPC → SSE to the client.
+ *      The client is always the executor — the CLI never calls upstream servers.
  *
  * Environment variables:
- *   TOOL_BRIDGE_TOOLS  — Path to a JSON file containing an OpenAI tools array.
- *   TOOL_BRIDGE_IPC    — Path to the named pipe / Unix socket for IPC.
+ *   TOOL_BRIDGE_TOOLS       — Path to JSON file: OpenAI tools array (optional)
+ *   TOOL_BRIDGE_MCP_SERVERS — Path to JSON file: mcpServers config object (optional)
+ *   TOOL_BRIDGE_IPC         — Named pipe / Unix socket path for IPC (required)
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import net from 'net';
 import fs from 'fs';
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
-const toolsFilePath = process.env.TOOL_BRIDGE_TOOLS;
 const ipcPath = process.env.TOOL_BRIDGE_IPC;
-
-if (!toolsFilePath || !ipcPath) {
-    process.stderr.write('[ToolBridge] FATAL: TOOL_BRIDGE_TOOLS and TOOL_BRIDGE_IPC must be set.\n');
+if (!ipcPath) {
+    process.stderr.write('[ToolBridge] FATAL: TOOL_BRIDGE_IPC must be set.\n');
     process.exit(1);
 }
 
-let toolDefinitions = [];
-try {
-    toolDefinitions = JSON.parse(fs.readFileSync(toolsFilePath, 'utf-8'));
-} catch (err) {
-    process.stderr.write(`[ToolBridge] FATAL: Failed to read tools file ${toolsFilePath}: ${err.message}\n`);
-    process.exit(1);
+let openAiTools = [];
+if (process.env.TOOL_BRIDGE_TOOLS) {
+    try {
+        openAiTools = JSON.parse(fs.readFileSync(process.env.TOOL_BRIDGE_TOOLS, 'utf-8'));
+    } catch (err) {
+        process.stderr.write(`[ToolBridge] WARN: Failed to read TOOL_BRIDGE_TOOLS: ${err.message}\n`);
+    }
 }
 
-// ─── IPC Channel ──────────────────────────────────────────────────────────────
+let mcpServerConfigs = {};
+if (process.env.TOOL_BRIDGE_MCP_SERVERS) {
+    try {
+        mcpServerConfigs = JSON.parse(fs.readFileSync(process.env.TOOL_BRIDGE_MCP_SERVERS, 'utf-8'));
+    } catch (err) {
+        process.stderr.write(`[ToolBridge] WARN: Failed to read TOOL_BRIDGE_MCP_SERVERS: ${err.message}\n`);
+    }
+}
+
+// ─── IPC Dispatch ─────────────────────────────────────────────────────────────
 
 /**
- * Sends a tool_call over the IPC socket and awaits a tool_result reply.
- * The bridge holds this promise open until the client sends back the result
- * in a subsequent request, at which point it writes the reply on the socket.
+ * Sends a tool_call event over the IPC socket and awaits a tool_result reply.
+ * The bridge in index.js holds this open until the client sends the result
+ * back in a subsequent role:tool message.
  *
- * @param {string} name - The tool name.
- * @param {object} args - The tool arguments.
- * @returns {Promise<string>} - The string result from the client.
+ * @param {string} name - The tool name (may be namespaced: serverName__toolName)
+ * @param {object|string} args - The tool arguments
+ * @returns {Promise<string>}
  */
 function dispatchToolCall(name, args) {
     return new Promise((resolve, reject) => {
         const client = net.createConnection(ipcPath, () => {
-            const payload = JSON.stringify({ event: 'tool_call', name, arguments: args }) + '\n';
+            const payload = JSON.stringify({
+                event: 'tool_call',
+                name,
+                arguments: args
+            }) + '\n';
             client.write(payload);
         });
 
         let buffer = '';
         client.on('data', (chunk) => {
             buffer += chunk.toString();
-            const newlineIdx = buffer.indexOf('\n');
-            if (newlineIdx !== -1) {
-                const line = buffer.slice(0, newlineIdx).trim();
+            const nl = buffer.indexOf('\n');
+            if (nl !== -1) {
+                const line = buffer.slice(0, nl).trim();
                 client.destroy();
                 try {
                     const parsed = JSON.parse(line);
@@ -75,11 +98,8 @@ function dispatchToolCall(name, args) {
             }
         });
 
-        client.on('error', (err) => {
-            reject(new Error(`[ToolBridge] IPC connection error: ${err.message}`));
-        });
+        client.on('error', (err) => reject(new Error(`[ToolBridge] IPC error: ${err.message}`)));
 
-        // Hard timeout: if the bridge doesn't reply in 10 minutes, abort.
         const t = setTimeout(() => {
             client.destroy();
             reject(new Error('[ToolBridge] IPC reply timed out after 10 minutes.'));
@@ -89,12 +109,70 @@ function dispatchToolCall(name, args) {
     });
 }
 
-// ─── OpenAI JSON Schema → Zod-free raw schema helper ─────────────────────────
+// ─── MCP Client Factory ───────────────────────────────────────────────────────
 
 /**
- * The MCP SDK accepts raw JSON Schema objects when using the low-level Server API.
- * We map from OpenAI's function.parameters (which is already JSON Schema) directly.
+ * Connects an MCP client to an upstream server using the appropriate transport.
+ * Supports stdio (command/args) and HTTP (serverUrl with StreamableHTTP + SSE fallback).
+ *
+ * @param {string} serverName
+ * @param {object} config - { command, args, env } or { serverUrl, headers }
+ * @returns {Promise<Client>}
  */
+async function connectUpstreamMcp(serverName, config) {
+    const mcpClient = new Client({ name: `ionosphere-tool-bridge-${serverName}`, version: '1.0.0' });
+
+    if (config.command) {
+        // stdio transport — spawn the upstream server process
+        const transport = new StdioClientTransport({
+            command: config.command,
+            args: config.args || [],
+            env: { ...process.env, ...(config.env || {}) }
+        });
+        await mcpClient.connect(transport);
+        process.stderr.write(`[ToolBridge] Connected to upstream MCP (stdio): ${serverName}\n`);
+        return mcpClient;
+    }
+
+    if (config.serverUrl) {
+        const baseUrl = new URL(config.serverUrl);
+        const headers = config.headers || {};
+
+        // Try StreamableHTTP first (modern), fall back to SSE (legacy)
+        try {
+            const transport = new StreamableHTTPClientTransport(baseUrl, { requestInit: { headers } });
+            await mcpClient.connect(transport);
+            process.stderr.write(`[ToolBridge] Connected to upstream MCP (StreamableHTTP): ${serverName}\n`);
+            return mcpClient;
+        } catch {
+            process.stderr.write(`[ToolBridge] StreamableHTTP failed for ${serverName}, falling back to SSE...\n`);
+            const fallbackClient = new Client({ name: `ionosphere-tool-bridge-${serverName}`, version: '1.0.0' });
+            const transport = new SSEClientTransport(baseUrl, { eventSourceInit: { headers } });
+            await fallbackClient.connect(transport);
+            process.stderr.write(`[ToolBridge] Connected to upstream MCP (SSE): ${serverName}\n`);
+            return fallbackClient;
+        }
+    }
+
+    throw new Error(`[ToolBridge] Unknown transport config for server "${serverName}": ${JSON.stringify(config)}`);
+}
+
+// ─── Tool Registration Helpers ────────────────────────────────────────────────
+
+function makeIpcHandler(toolName) {
+    return async (args) => {
+        try {
+            process.stderr.write(`[ToolBridge] → IPC dispatch: ${toolName}\n`);
+            const result = await dispatchToolCall(toolName, args);
+            process.stderr.write(`[ToolBridge] ← IPC result received for: ${toolName}\n`);
+            return { content: [{ type: 'text', text: String(result) }] };
+        } catch (err) {
+            process.stderr.write(`[ToolBridge] Error dispatching ${toolName}: ${err.message}\n`);
+            return { content: [{ type: 'text', text: `Error: ${err.message}` }], isError: true };
+        }
+    };
+}
+
 function openaiParamsToInputSchema(parameters) {
     if (!parameters || typeof parameters !== 'object') {
         return { type: 'object', properties: {} };
@@ -102,52 +180,63 @@ function openaiParamsToInputSchema(parameters) {
     return parameters;
 }
 
-// ─── MCP Server ───────────────────────────────────────────────────────────────
+// ─── Main ─────────────────────────────────────────────────────────────────────
 
-const server = new McpServer({
-    name: 'ionosphere-tool-bridge',
-    version: '1.0.0',
-});
+const server = new McpServer({ name: 'ionosphere-tool-bridge', version: '1.0.0' });
 
-for (const toolDef of toolDefinitions) {
-    // Support both OpenAI formats:
-    //   { type: 'function', function: { name, description, parameters } }
-    //   { name, description, parameters }   (bare format)
+// 1. Register OpenAI-format tools (client-side execution via IPC)
+for (const toolDef of openAiTools) {
     const fn = toolDef.function ?? toolDef;
     const { name, description, parameters } = fn;
+    if (!name) continue;
 
-    if (!name) {
-        process.stderr.write(`[ToolBridge] Skipping tool with no name: ${JSON.stringify(toolDef)}\n`);
-        continue;
-    }
-
-    process.stderr.write(`[ToolBridge] Registering tool: ${name}\n`);
-
+    process.stderr.write(`[ToolBridge] Registering OpenAI tool: ${name}\n`);
     server.tool(
         name,
         description ?? `Client-side tool: ${name}`,
         openaiParamsToInputSchema(parameters),
-        async (args) => {
-            try {
-                process.stderr.write(`[ToolBridge] Tool called: ${name} args=${JSON.stringify(args)}\n`);
-                const result = await dispatchToolCall(name, args);
-                process.stderr.write(`[ToolBridge] Tool result received for ${name}\n`);
-                return {
-                    content: [{ type: 'text', text: String(result) }]
-                };
-            } catch (err) {
-                process.stderr.write(`[ToolBridge] Error executing ${name}: ${err.message}\n`);
-                return {
-                    content: [{ type: 'text', text: `Error: ${err.message}` }],
-                    isError: true
-                };
-            }
-        }
+        makeIpcHandler(name)
     );
 }
 
-// ─── Launch ───────────────────────────────────────────────────────────────────
+// 2. Connect to upstream MCP servers, discover tools, re-register under namespace
+const serverEntries = Object.entries(mcpServerConfigs);
+if (serverEntries.length > 0) {
+    process.stderr.write(`[ToolBridge] Aggregating ${serverEntries.length} upstream MCP server(s)...\n`);
+}
 
+for (const [serverName, config] of serverEntries) {
+    if (config.disabled) {
+        process.stderr.write(`[ToolBridge] Skipping disabled server: ${serverName}\n`);
+        continue;
+    }
+
+    try {
+        const upstreamClient = await connectUpstreamMcp(serverName, config);
+        const { tools } = await upstreamClient.listTools();
+
+        process.stderr.write(`[ToolBridge] Discovered ${tools.length} tool(s) from ${serverName}\n`);
+
+        for (const tool of tools) {
+            // Namespace to avoid collisions: serverName__toolName
+            const namespacedName = `${serverName}__${tool.name}`;
+
+            process.stderr.write(`[ToolBridge] Re-registering: ${namespacedName}\n`);
+
+            server.tool(
+                namespacedName,
+                `[${serverName}] ${tool.description ?? tool.name}`,
+                tool.inputSchema ?? { type: 'object', properties: {} },
+                // Route via IPC → client — client is always the executor
+                makeIpcHandler(namespacedName)
+            );
+        }
+    } catch (err) {
+        process.stderr.write(`[ToolBridge] WARN: Failed to aggregate server "${serverName}": ${err.message}\n`);
+    }
+}
+
+// 3. Start the MCP stdio server (the Gemini CLI connects to this)
 const transport = new StdioServerTransport();
 await server.connect(transport);
-process.stderr.write('[ToolBridge] MCP server running on stdio.\n');
+process.stderr.write('[ToolBridge] MCP server running on stdio — all tool calls routed via IPC.\n');

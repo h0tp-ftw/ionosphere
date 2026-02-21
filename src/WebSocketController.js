@@ -19,6 +19,9 @@ export class WebSocketController {
 
         console.log(`[WebSocketController] Bound WebSocket Native Pi-AI endpoint to /v1/stream`);
 
+        // True Multiplexing: Map of execution_id -> child_process
+        this.activeExecutions = new Map();
+
         this.wss.on('connection', (ws) => {
             console.log(`[WebSocketController] Client connected`);
             this.handleConnection(ws);
@@ -65,15 +68,15 @@ export class WebSocketController {
                 const message = JSON.parse(data.toString());
 
                 if (!initialized) {
-                    // Expecting the Initialization Payload
-                    if (message.type !== 'init') {
-                        ws.send(JSON.stringify({ type: 'error', message: 'First message must be an init payload' }));
+                    const executionId = message.execution_id;
+                    if (!executionId) {
+                        ws.send(JSON.stringify({ type: 'error', message: 'Missing execution_id in init payload' }));
                         return ws.close();
                     }
 
                     initialized = true;
 
-                    const { prompt, mcpServers, systemPrompt, modelConfig } = message;
+                    const { prompt, mcpServers, systemPrompt, modelConfig } = message.data;
 
                     if (!fs.existsSync(turnTempDir)) {
                         fs.mkdirSync(turnTempDir, { recursive: true });
@@ -143,9 +146,14 @@ export class WebSocketController {
                                 if ((frame.startsWith('{') && frame.endsWith('}')) ||
                                     (frame.startsWith('[') && frame.endsWith(']'))) {
 
-                                    // Send the raw frame directly over the websocket
+                                    // Wrap the raw frame in an envelope
+                                    const envelope = JSON.stringify({
+                                        execution_id: executionId,
+                                        type: 'frame',
+                                        data: JSON.parse(frame) // Parse briefly to ensure valid JSON structure in the envelope
+                                    });
                                     if (ws.readyState === WebSocket.OPEN) {
-                                        ws.send(frame);
+                                        ws.send(envelope);
                                     }
                                 } else {
                                     console.warn(`[WebSocketController] Dropping malformed CLI output frame: ${frame}`);
@@ -162,33 +170,41 @@ export class WebSocketController {
                     });
 
                     cliProcess.on('close', (code) => {
-                        console.log(`[WebSocketController] CLI exited with code ${code}`);
+                        console.log(`[WebSocketController] CLI exited with code ${code} for execution ${executionId}`);
+                        this.activeExecutions.delete(executionId);
                         if (ws.readyState === WebSocket.OPEN) {
-                            ws.send(JSON.stringify({ type: 'done', code }));
-                            ws.close();
+                            ws.send(JSON.stringify({ execution_id: executionId, type: 'done', data: { code } }));
                         }
                         cleanup();
                     });
 
                     cliProcess.on('error', (err) => {
-                        console.error(`[WebSocketController] CLI Spawn Error:`, err);
+                        console.error(`[WebSocketController] CLI Spawn Error for execution ${executionId}:`, err);
+                        this.activeExecutions.delete(executionId);
                         if (ws.readyState === WebSocket.OPEN) {
-                            ws.send(JSON.stringify({ type: 'error', message: err.message }));
-                            ws.close();
+                            ws.send(JSON.stringify({ execution_id: executionId, type: 'error', data: { message: err.message } }));
                         }
                         cleanup();
                     });
 
+                    this.activeExecutions.set(executionId, cliProcess);
+
                 } else {
                     // Processing subsequent messages from Pi-AI (Reverse Tunnel Tool Results)
                     // Write directly to the running CLI's standard input
-                    if (message.type === 'tool_result' && cliProcess && !cliProcess.killed) {
-                        try {
-                            const resultPayload = JSON.stringify(message.data) + '\n';
-                            console.log(`[WebSocketController] Pumping Tool Result back to CLI stdin (${resultPayload.length} bytes)`);
-                            cliProcess.stdin.write(resultPayload);
-                        } catch (e) {
-                            console.error('[WebSocketController] Failed to write to CLI stdin:', e);
+                    const targetExecutionId = message.execution_id;
+                    if (message.type === 'tool_result' && targetExecutionId) {
+                        const targetProcess = this.activeExecutions.get(targetExecutionId);
+                        if (targetProcess && !targetProcess.killed) {
+                            try {
+                                const resultPayload = JSON.stringify(message.data) + '\n';
+                                console.log(`[WebSocketController] Pumping Tool Result back to CLI stdin for ${targetExecutionId} (${resultPayload.length} bytes)`);
+                                targetProcess.stdin.write(resultPayload);
+                            } catch (e) {
+                                console.error(`[WebSocketController] Failed to write to CLI stdin for ${targetExecutionId}:`, e);
+                            }
+                        } else {
+                            console.warn(`[WebSocketController] Received tool_result for dead or unknown execution_id: ${targetExecutionId}`);
                         }
                     }
                 }

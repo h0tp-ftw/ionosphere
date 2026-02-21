@@ -1,60 +1,57 @@
 import WebSocket from 'ws';
+import { randomUUID } from 'crypto';
 
-// Module-level connection state to maintain session continuity during ReAct loops
+// True Multiplexing State
 let ws: WebSocket | null = null;
-let wsQueue: string[] = [];
-let wsResolver: (() => void) | null = null;
-let isSocketDone = false;
-let socketError: Error | null = null;
+const executionQueues = new Map<string, any[]>();
+const executionResolvers = new Map<string, () => void>();
+let globalSocketError: Error | null = null;
 
-/**
- * Initializes or retrieves the existing WebSocket connection.
- * If isNewTurn is true, it forces a teardown of the old socket to ensure
- * Ionosphere spawns a fresh CLI context instance.
- */
-async function getSocket(isNewTurn: boolean, wsUrl: string): Promise<WebSocket> {
-    if (isNewTurn && ws) {
-        try { ws.close(); } catch (e) { }
-        ws = null;
-    }
-
+async function getSharedSocket(wsUrl: string): Promise<WebSocket> {
     if (ws && ws.readyState === WebSocket.OPEN) {
         return ws;
     }
 
     return new Promise((resolve, reject) => {
-        wsQueue = [];
-        isSocketDone = false;
-        socketError = null;
-        wsResolver = null;
-
+        globalSocketError = null;
         ws = new WebSocket(wsUrl);
 
         ws.on('open', () => resolve(ws!));
 
         ws.on('message', (data) => {
-            wsQueue.push(data.toString());
-            if (wsResolver) {
-                wsResolver();
-                wsResolver = null;
+            try {
+                const envelope = JSON.parse(data.toString());
+                const execId = envelope.execution_id;
+                if (!execId) return; // Drop malformed envelopes
+
+                const queue = executionQueues.get(execId);
+                if (queue) {
+                    queue.push(envelope);
+                    const resolver = executionResolvers.get(execId);
+                    if (resolver) {
+                        resolver();
+                        executionResolvers.delete(execId);
+                    }
+                }
+            } catch (e) {
+                // Ignore non-envelope noise
             }
         });
 
         ws.on('close', () => {
-            isSocketDone = true;
-            if (wsResolver) {
-                wsResolver();
-                wsResolver = null;
+            // In true multiplexing, backend doesn't close on completion, only on fatal failure.
+            for (const [id, resolver] of executionResolvers.entries()) {
+                const q = executionQueues.get(id);
+                if (q) q.push({ execution_id: id, type: 'socket_closed' });
+                resolver();
             }
+            executionResolvers.clear();
         });
 
         ws.on('error', (err) => {
-            socketError = err instanceof Error ? err : new Error(String(err));
-            isSocketDone = true;
-            if (wsResolver) {
-                wsResolver();
-                wsResolver = null;
-            }
+            globalSocketError = err instanceof Error ? err : new Error(String(err));
+            for (const resolver of executionResolvers.values()) resolver();
+            executionResolvers.clear();
             reject(err);
         });
     });
@@ -72,12 +69,17 @@ export async function* streamIonosphereProvider(
     const messages = context.messages || [];
     const lastMsg = messages[messages.length - 1];
 
-    // In Pi-AI ReAct loops, if the last message was a tool result,
-    // we continue the existing thread instead of building a new initialization.
+    // In Pi-AI ReAct loops, we rely on the client thread ID for multiplex continuity
+    const executionId = context.threadId || randomUUID();
     const isToolResult = lastMsg && lastMsg.role === 'tool';
 
+    // Initialize execution queue for this specific stream generator
+    if (!executionQueues.has(executionId)) {
+        executionQueues.set(executionId, []);
+    }
+
     const wsUrl = process.env.IONOSPHERE_WS_URL || 'ws://localhost:3000/v1/stream';
-    const socket = await getSocket(!isToolResult, wsUrl);
+    const socket = await getSharedSocket(wsUrl);
 
     if (!isToolResult) {
         // Brand new invocation
@@ -96,11 +98,14 @@ export async function* streamIonosphereProvider(
         }
 
         socket.send(JSON.stringify({
+            execution_id: executionId,
             type: 'init',
-            modelConfig: model,
-            systemPrompt: systemPrompt.trim(),
-            prompt: prompt.trim(),
-            mcpServers: context.mcpServers || {}
+            data: {
+                modelConfig: model,
+                systemPrompt: systemPrompt.trim(),
+                prompt: prompt.trim(),
+                mcpServers: context.mcpServers || {}
+            }
         }));
     } else {
         // Continuing ReAct loop
@@ -109,6 +114,7 @@ export async function* streamIonosphereProvider(
         const toolResults = Array.isArray(content) ? content : [{ type: 'text', text: content }];
 
         socket.send(JSON.stringify({
+            execution_id: executionId,
             type: 'tool_result',
             data: {
                 type: 'toolResult',
@@ -120,10 +126,11 @@ export async function* streamIonosphereProvider(
 
     yield { type: 'assistant_start' };
 
-    // The inner queue consumer loop to convert WebSocket push -> AsyncGenerator pull
+    // The inner queue consumer loop to convert Multiplexed WebSocket push -> AsyncGenerator pull
     const waitForData = () => new Promise<void>(resolve => {
-        if (wsQueue.length > 0 || isSocketDone || socketError) return resolve();
-        wsResolver = resolve;
+        const queue = executionQueues.get(executionId) || [];
+        if (queue.length > 0 || globalSocketError) return resolve();
+        executionResolvers.set(executionId, resolve);
     });
 
     try {
@@ -132,59 +139,63 @@ export async function* streamIonosphereProvider(
         while (!isDone) {
             await waitForData();
 
-            if (socketError) {
-                throw socketError;
+            if (globalSocketError) {
+                throw globalSocketError;
             }
 
-            while (wsQueue.length > 0) {
-                const raw = wsQueue.shift()!;
-                let parsed;
-                try {
-                    parsed = JSON.parse(raw);
-                } catch (e) {
-                    continue; // Skip noise
+            const queue = executionQueues.get(executionId) || [];
+
+            while (queue.length > 0) {
+                const envelope = queue.shift()!;
+
+                if (envelope.type === 'socket_closed') {
+                    isDone = true;
+                    break;
                 }
 
-                if (parsed.type === 'text') {
-                    yield { type: 'text_start' };
-                    yield { type: 'text_delta', delta: parsed.value };
-                    yield { type: 'text_end' };
-                } else if (parsed.type === 'toolCall') {
-                    // Start tool call
-                    yield {
-                        type: 'toolcall_start',
-                        toolCall: {
-                            id: parsed.toolCallId,
-                            name: parsed.functionCall?.name || 'unknown'
-                        }
-                    };
+                if (envelope.type === 'error') {
+                    throw new Error(envelope.data?.message || "Gemini CLI Backend Error");
+                }
 
-                    // Pipe the arguments JSON directly into delta payload
-                    const argsString = JSON.stringify(parsed.functionCall?.args || {});
-                    yield { type: 'toolcall_delta', delta: argsString };
-
-                    // End tool call
-                    yield { type: 'toolcall_end' };
-
-                    // We must break to allow OpenClaw to execute the tool locally!
-                    isDone = true;
-                } else if (parsed.type === 'done') {
+                if (envelope.type === 'done') {
                     // The generation loop completed natively and no further tools were requested
                     isDone = true;
-                    if (ws) {
-                        try { ws.close(); } catch (e) { }
-                        ws = null;
-                    }
-                } else if (parsed.type === 'error') {
-                    throw new Error(parsed.message || "Gemini CLI Backend Error");
+                    break;
                 }
-            }
 
-            if (isSocketDone && wsQueue.length === 0) {
-                break;
+                if (envelope.type === 'frame') {
+                    const parsed = envelope.data;
+
+                    if (parsed.type === 'text') {
+                        yield { type: 'text_start' };
+                        yield { type: 'text_delta', delta: parsed.value };
+                        yield { type: 'text_end' };
+                    } else if (parsed.type === 'toolCall') {
+                        // Start tool call
+                        yield {
+                            type: 'toolcall_start',
+                            toolCall: {
+                                id: parsed.toolCallId,
+                                name: parsed.functionCall?.name || 'unknown'
+                            }
+                        };
+
+                        // Pipe the arguments JSON directly into delta payload
+                        const argsString = JSON.stringify(parsed.functionCall?.args || {});
+                        yield { type: 'toolcall_delta', delta: argsString };
+
+                        // End tool call
+                        yield { type: 'toolcall_end' };
+
+                        // We must break to allow OpenClaw to execute the tool locally!
+                        isDone = true;
+                    }
+                }
             }
         }
     } finally {
+        executionQueues.delete(executionId);
+        executionResolvers.delete(executionId);
         yield { type: 'assistant_end' };
     }
 }

@@ -149,7 +149,10 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                                 const mimePart = part.image_url.url.split(';')[0];
                                 const ext = mimePart.includes('/') ? mimePart.split('/')[1] : 'png';
                                 const imagePath = path.join(turnTempDir, `image_${imageCounter}.${ext}`);
+
+                                // Buffer decoding of the base64 string
                                 fs.writeFileSync(imagePath, Buffer.from(b64Data, 'base64'));
+
                                 // Injected into prompt referencing the newly dumped disk file
                                 inlinedFiles += `@${imagePath}\n`;
                             }
@@ -207,6 +210,33 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             } catch (e) {
                 console.warn(`[API] Failed to parse customSettings block: ${e.message}`);
             }
+        }
+
+        // Map standard OpenAI top-level parameters into Gemini CLI's modelConfigs
+        if (req.body.temperature !== undefined || req.body.top_p !== undefined || req.body.max_tokens !== undefined) {
+            customSettings = customSettings || {};
+            const reqModel = req.body.model || 'gemini-2.5-flash-lite';
+
+            customSettings.modelConfigs = {
+                customAliases: {
+                    "request-override": {
+                        extends: "chat-base",
+                        modelConfig: {
+                            generateContentConfig: {
+                                ...(req.body.temperature !== undefined && { temperature: req.body.temperature }),
+                                ...(req.body.top_p !== undefined && { topP: req.body.top_p }),
+                                ...(req.body.max_tokens !== undefined && { maxOutputTokens: req.body.max_tokens })
+                            }
+                        }
+                    }
+                },
+                overrides: [
+                    {
+                        match: { model: reqModel },
+                        modelConfig: { model: "request-override" }
+                    }
+                ]
+            };
         }
 
         const settingsDir = path.join(turnTempDir, '.gemini');

@@ -151,3 +151,13 @@ gemini-ionosphere/
 │   └── generate_settings.js  ← Per-turn settings generator
 └── temp/                     ← Ephemeral turn workspaces
 ```
+
+---
+
+### Transparent Native Tools
+To provide a seamless experience for internal CLI features (like `google_web_search`), Ionosphere supports a **Transparent Whitelist**. When the CLI emits a `tool_use` event for a whitelisted tool:
+1. The bridge logs the execution but **skips** the `onToolCall` callback.
+2. The HTTP request remains open and the SSE stream continues.
+3. Once the CLI finishes its internal tool loop, it emits more `message` chunks which are sent to the client as usual.
+
+This allows the client to see a search-augmented response without managing the intermediate tool step.

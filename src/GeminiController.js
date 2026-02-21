@@ -127,11 +127,19 @@ export class GeminiController {
                         if (content && activeCallbacks.onText) activeCallbacks.onText(content);
 
                     } else if (json.type === 'tool_use' || json.type === 'toolCall') {
-                        if (activeCallbacks.onToolCall) activeCallbacks.onToolCall({
-                            id: json.tool_id || json.id || `call_${randomUUID().substring(0, 8)}`,
-                            name: json.tool_name || json.name,
-                            arguments: JSON.stringify(json.parameters ?? json.arguments ?? {})
-                        });
+                        const toolName = json.tool_name || json.name;
+                        const transparentTools = ['google_web_search'];
+
+                        if (transparentTools.includes(toolName)) {
+                            console.log(`[GeminiController] Transparently executing native tool: ${toolName}`);
+                            if (activeCallbacks.onEvent) activeCallbacks.onEvent(json);
+                        } else {
+                            if (activeCallbacks.onToolCall) activeCallbacks.onToolCall({
+                                id: json.tool_id || json.id || `call_${randomUUID().substring(0, 8)}`,
+                                name: toolName,
+                                arguments: JSON.stringify(json.parameters ?? json.arguments ?? {})
+                            });
+                        }
 
                     } else if (json.type === 'error') {
                         if (activeCallbacks.onError) activeCallbacks.onError(json);

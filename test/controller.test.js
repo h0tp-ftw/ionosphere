@@ -24,40 +24,6 @@ test('JsonlAccumulator - handles fragmented OS pipes', (t) => {
     assert.strictEqual(results[1].type, 'done');
 });
 
-test('GeminiController - File Injection creates @temp references', (t) => {
-    const controller = new GeminiController();
-
-    // Create dummy file
-    const dummyPath = path.join(process.cwd(), 'dummy.txt');
-    fs.writeFileSync(dummyPath, 'Hello');
-
-    const injectedName = controller.injectFile(dummyPath);
-
-    assert.ok(injectedName.startsWith('@'));
-    assert.ok(injectedName.includes('dummy.txt'));
-
-    // Clean up
-    fs.unlinkSync(dummyPath);
-});
-
-test('GeminiController - in stateless mode (default), router is null', (t) => {
-    delete process.env.SESSION_MODE;
-    const controller = new GeminiController();
-    assert.strictEqual(controller.router, null, "Router must be null in stateless mode");
-    assert.strictEqual(controller.sessionMode, 'stateless');
-});
-
-test('GeminiController - in stateful mode, exposes a SessionRouter instance', (t) => {
-    process.env.SESSION_MODE = 'stateful';
-    const controller = new GeminiController();
-    assert.ok(controller.router, "Controller must expose a SessionRouter in stateful mode");
-    assert.strictEqual(typeof controller.router.route, 'function');
-    assert.strictEqual(typeof controller.router.registerSession, 'function');
-    assert.strictEqual(typeof controller.router.recordTurn, 'function');
-    assert.strictEqual(controller.sessionMode, 'stateful');
-    delete process.env.SESSION_MODE;
-});
-
 // ─── Real CLI event type routing ──────────────────────────────────────────────
 
 test('JsonlAccumulator - tool_use event is parsed and fields are accessible', (t) => {

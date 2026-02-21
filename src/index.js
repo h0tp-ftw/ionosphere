@@ -5,6 +5,7 @@ import fs from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
 import { generateConfig } from '../scripts/generate_settings.js';
+import { WebSocketController } from './WebSocketController.js';
 
 const app = express();
 app.use(express.json());
@@ -366,7 +367,10 @@ app.get('/health', (req, res) => {
     res.json({ status: "ok" });
 });
 
-app.listen(PORT, '0.0.0.0', () => {
+const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`\nIonosphere Orchestrator HTTP Interface listening on port ${PORT}`);
     console.log(`Example: curl -X POST http://localhost:${PORT}/v1/chat/completions -H "Content-Type: application/json" -d '{"messages":[{"role":"user","content":"Hello"}]}'\n`);
 });
+
+// Attach the Native Pi-AI WebSocket Provider Pipe
+const wsController = new WebSocketController(server, baseTempDir);

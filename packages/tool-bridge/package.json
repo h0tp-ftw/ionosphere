@@ -1,0 +1,10 @@
+{
+    "name": "@ionosphere/tool-bridge",
+    "version": "1.0.0",
+    "type": "module",
+    "description": "Ephemeral MCP stdio server that proxies OpenAI tool definitions to the Gemini CLI and signals calls back over IPC.",
+    "main": "index.js",
+    "dependencies": {
+        "@modelcontextprotocol/sdk": "^1.9.0"
+    }
+}

@@ -9,6 +9,7 @@
         "test": "node --test"
     },
     "dependencies": {
+        "@modelcontextprotocol/sdk": "^1.26.0",
         "chai": "^6.2.2",
         "express": "^5.2.1",
         "mocha": "^11.7.5",

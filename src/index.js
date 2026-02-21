@@ -1,10 +1,18 @@
 import express from 'express';
 import multer from 'multer';
+import net from 'net';
 import { GeminiController } from './GeminiController.js';
 import fs from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
+import { fileURLToPath } from 'url';
 import { generateConfig } from '../scripts/generate_settings.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Absolute path to the tool-bridge MCP server entry point
+const TOOL_BRIDGE_PATH = path.resolve(__dirname, '..', 'packages', 'tool-bridge', 'index.js');
 
 const app = express();
 app.use(express.json());
@@ -180,7 +188,9 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                     // Explicitly narrate the tool call so the CLI remembers its action
                     if (msg.tool_calls && msg.tool_calls.length > 0) {
                         for (const tc of msg.tool_calls) {
-                            content += `\n[ACTION: Called tool '${tc.function.name}' with args: ${tc.function.arguments}]`;
+                            const name = tc.function?.name || tc.name || 'unknown';
+                            const args = tc.function?.arguments || tc.arguments || '{}';
+                            content += `\n[ACTION: Called tool '${name}' with args: ${args}]`;
                         }
                     }
                     conversationPrompt += `ASSISTANT: ${content.trim()}\n\n`;
@@ -209,6 +219,119 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             } catch (e) {
                 console.warn(`[API] Failed to parse mcpServers block: ${e.message}`);
             }
+        }
+
+        // Parse OpenAI tool definitions — if present, the ToolBridge MCP server
+        // will be injected into settings so the Gemini CLI can call them natively.
+        const openAiTools = req.body.tools || null;
+
+        // Per-turn IPC socket for ToolBridge ↔ Bridge communication
+        // On Windows: named pipe; on Unix: domain socket in the turn workspace.
+        const ipcPath = process.platform === 'win32'
+            ? `\\\\.\\pipe\\ionosphere-${turnId}`
+            : path.join(turnTempDir, 'tool_ipc.sock');
+
+        // pendingToolCalls: maps a unique tool call key to its resolve/reject pair.
+        // When the ToolBridge signals a tool_call over IPC, the bridge pends it here
+        // and immediately emits the SSE chunk. When the client's next request arrives
+        // with a matching tool result, it resolves the pending promise so the bridge
+        // can reply to the ToolBridge, which then returns the result to the CLI.
+        //
+        // NOTE: In the stateless request-boundary model the CLI turn *ends* after the
+        // tool call SSE is sent. The IPC server is kept alive between turns so that
+        // if the CLI somehow keeps running (e.g. multi-step agentic loops), it can
+        // receive the result without restarting.
+        const pendingToolCalls = new Map();
+
+        // IPC server — each connection is one tool dispatch from the ToolBridge.
+        const ipcServer = net.createServer((socket) => {
+            let buf = '';
+            socket.on('data', (chunk) => {
+                buf += chunk.toString();
+                const nl = buf.indexOf('\n');
+                if (nl === -1) return;
+                const line = buf.slice(0, nl).trim();
+                buf = buf.slice(nl + 1);
+
+                let msg;
+                try { msg = JSON.parse(line); } catch (e) {
+                    console.error('[IPC] Malformed message:', line);
+                    return;
+                }
+
+                if (msg.event === 'tool_call') {
+                    const callKey = randomUUID();
+                    console.log(`[IPC] Tool call received: ${msg.name} (key=${callKey})`);
+
+                    // Emit SSE tool_call chunk to client immediately
+                    onToolCall({
+                        id: `call_${callKey.substring(0, 8)}`,
+                        name: msg.name,
+                        arguments: typeof msg.arguments === 'string'
+                            ? msg.arguments
+                            : JSON.stringify(msg.arguments ?? {})
+                    });
+
+                    // Store the socket so we can reply when the result arrives
+                    pendingToolCalls.set(callKey, { socket, name: msg.name });
+
+                    // Surface the pending call key in the response so that
+                    // the NEXT request can include it in role:tool messages
+                    // (the OpenAI client handles this automatically via tool_call_id)
+                }
+            });
+
+            socket.on('error', (err) => {
+                console.error('[IPC] Socket error:', err.message);
+            });
+        });
+
+        // Helper: resolve a pending tool call with a result string.
+        // Called from the conversation parser when a role:tool message is encountered
+        // whose tool_call_id matches a live pending call.
+        const resolveToolCall = (callKey, result) => {
+            const pending = pendingToolCalls.get(callKey);
+            if (!pending) return false;
+            pendingToolCalls.delete(callKey);
+            try {
+                pending.socket.write(JSON.stringify({ event: 'tool_result', result: String(result) }) + '\n');
+                pending.socket.end();
+            } catch (e) {
+                console.error('[IPC] Failed to write tool result:', e.message);
+            }
+            return true;
+        };
+
+        // Attempt to listen; if socket already exists (crash recovery), remove it first
+        await new Promise((res, rej) => {
+            ipcServer.listen(ipcPath, res);
+            ipcServer.on('error', (err) => {
+                if (err.code === 'EADDRINUSE' && process.platform !== 'win32') {
+                    fs.unlinkSync(ipcPath);
+                    ipcServer.listen(ipcPath, res);
+                } else {
+                    rej(err);
+                }
+            });
+        });
+        console.log(`[API] IPC server listening at ${ipcPath}`);
+
+        // If the client sent OpenAI tool definitions, write them to a temp file
+        // and inject the ToolBridge as an MCP server for this turn.
+        if (openAiTools && openAiTools.length > 0) {
+            const toolsFilePath = path.join(turnTempDir, 'tools.json');
+            fs.writeFileSync(toolsFilePath, JSON.stringify(openAiTools), 'utf-8');
+
+            mcpServers = mcpServers || {};
+            mcpServers['ionosphere-tool-bridge'] = {
+                command: 'node',
+                args: [TOOL_BRIDGE_PATH],
+                env: {
+                    TOOL_BRIDGE_TOOLS: toolsFilePath,
+                    TOOL_BRIDGE_IPC: ipcPath
+                }
+            };
+            console.log(`[API] Injected ToolBridge for ${openAiTools.length} tool(s) into settings.`);
         }
 
         // Parse optional custom settings payload (e.g. modelConfigs)
@@ -318,13 +441,25 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
         const onToolCall = (info) => {
             console.log(`\n[Tool Call] ${JSON.stringify(info)}`);
+            // Map Gemini CLI toolCall to strict OpenAI delta schema
             sendChunk({
                 id: `chatcmpl-${turnId}`,
                 object: 'chat.completion.chunk',
+                created: Math.floor(Date.now() / 1000),
                 model: 'gemini-cli',
                 choices: [{
                     index: 0,
-                    delta: { tool_calls: [info] }
+                    delta: {
+                        tool_calls: [{
+                            index: 0,
+                            id: info.id || `call_${randomUUID().substring(0, 8)}`,
+                            type: 'function',
+                            function: {
+                                name: info.name,
+                                arguments: info.arguments
+                            }
+                        }]
+                    }
                 }]
             });
         };
@@ -353,6 +488,18 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
         const removeListeners = () => {
             clearInterval(heartbeatInterval);
+            // Tear down IPC server — reject any pending tool calls
+            if (ipcServer.listening) {
+                ipcServer.close(() => {
+                    if (process.platform !== 'win32' && fs.existsSync(ipcPath)) {
+                        try { fs.unlinkSync(ipcPath); } catch (_) { }
+                    }
+                });
+            }
+            for (const [key, pending] of pendingToolCalls.entries()) {
+                try { pending.socket.destroy(); } catch (_) { }
+            }
+            pendingToolCalls.clear();
         };
 
         const cleanupWorkspace = (retryCount = 0) => {

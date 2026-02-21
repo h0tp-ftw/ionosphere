@@ -181,7 +181,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         }
 
         let prompt = conversationPrompt.trim();
-        let system = systemMessage.trim() || null;
+        let system = systemMessage.trim() || "";
 
         if (!prompt) {
             return res.status(400).json({ error: "No user messages provided in conversation" });

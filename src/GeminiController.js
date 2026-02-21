@@ -118,13 +118,13 @@ export class GeminiController {
 
             // Handle System Prompt if provided
             let systemPromptPath = null;
-            if (systemPrompt) {
+            if (systemPrompt !== null) {
                 systemPromptPath = path.join(workspacePath, 'system.md');
                 fs.writeFileSync(systemPromptPath, systemPrompt, 'utf-8');
             }
 
             console.log(`[GeminiController] Spawning CLI [${this.sessionMode}]: ${cliPath} ${args.join(' ')}`);
-            if (systemPrompt) console.log(`[GeminiController] System Prompt: ${systemPrompt.length} chars`);
+            if (systemPrompt !== null) console.log(`[GeminiController] System Prompt: ${systemPrompt.length} chars`);
             console.log(`[GeminiController] Session: ${isNew ? 'NEW' : sessionId}, Delta: ${delta.length} chars`);
             console.log(`[GeminiController] Workspace: ${workspacePath}`);
 

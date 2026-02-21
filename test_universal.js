@@ -25,8 +25,8 @@ async function runTest() {
         console.dir(messages, { depth: null, colors: true });
 
         const stream = await openai.chat.completions.create({
-            model: 'gemini-1.5-flash',
-            temperature: 0.1,
+            model: 'gemini-2.5-flash',
+            temperature: 2,
             max_tokens: 100,
             stream: true,
             messages: messages

@@ -34,7 +34,7 @@ async function checkDependencies() {
 
     if (dockerStatus.error && podmanStatus.error) {
         console.warn("⚠️ Neither Docker nor Podman is installed.");
-        console.warn("  (Note: Containerization is optional. You can still run Ionosphere natively using Node.js & Python)");
+        console.warn("  (Note: Containerization is RECOMMENDED. You can still run Ionosphere natively for development.)");
     }
     console.log("✅ Dependencies check complete.\n");
 }
@@ -117,7 +117,7 @@ async function main() {
         await checkDependencies();
 
         console.log("\n--- Setup Environment ---");
-        const envChoice = await question("How will you run Ionosphere?\n[1] Native (Node.js)\n[2] Docker\n[3] Podman\nSelect [1/2/3] (default: 1): ");
+        const envChoice = await question("How will you run Ionosphere?\n[1] Native (Node.js) - NOT RECOMMENDED for production\n[2] Docker (RECOMMENDED)\n[3] Podman\nSelect [1/2/3] (default: 1): ");
         const isNative = envChoice === '1' || envChoice === '';
         const isDocker = envChoice === '2';
         const isPodman = envChoice === '3';

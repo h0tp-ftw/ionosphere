@@ -216,26 +216,13 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         if (req.body.temperature !== undefined || req.body.top_p !== undefined || req.body.max_tokens !== undefined) {
             customSettings = customSettings || {};
             const reqModel = req.body.model || 'gemini-2.5-flash-lite';
-
-            customSettings.modelConfigs = {
-                customAliases: {
-                    "request-override": {
-                        extends: "chat-base",
-                        modelConfig: {
-                            generateContentConfig: {
-                                ...(req.body.temperature !== undefined && { temperature: req.body.temperature }),
-                                ...(req.body.top_p !== undefined && { topP: req.body.top_p }),
-                                ...(req.body.max_tokens !== undefined && { maxOutputTokens: req.body.max_tokens })
-                            }
-                        }
-                    }
-                },
-                overrides: [
-                    {
-                        match: { model: reqModel },
-                        modelConfig: { model: "request-override" }
-                    }
-                ]
+            customSettings.model = {
+                name: reqModel,
+                generateContentConfig: {
+                    ...(req.body.temperature !== undefined && { temperature: req.body.temperature }),
+                    ...(req.body.top_p !== undefined && { topP: req.body.top_p }),
+                    ...(req.body.max_tokens !== undefined && { maxOutputTokens: req.body.max_tokens })
+                }
             };
         }
 
@@ -288,6 +275,11 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         }).join('\n');
 
         const finalPrompt = injectedFiles + sanitizedPrompt;
+        if (process.env.DEBUG_IONOSPHERE) {
+            console.log(`[DEBUG] Final Prompt:\n${finalPrompt}`);
+            console.log(`[DEBUG] Settings Path: ${settingsPath}`);
+            console.log(`[DEBUG] Settings Content:\n${fs.readFileSync(settingsPath, 'utf8')}`);
+        }
 
         // Helper to format SSE
         const sendChunk = (chunk) => {
@@ -339,7 +331,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 res.write('data: [DONE]\n\n');
                 res.end();
             }
-            cleanup();
+            removeListeners();
         };
 
         const onEvent = (json) => {
@@ -353,6 +345,10 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         const cleanupWorkspace = () => {
             // Clean up the isolated workspace after the turn finishes
             try {
+                if (process.env.DEBUG_IONOSPHERE) {
+                    console.log(`[DEBUG] Skipping cleanup for turn ${turnId} to allow inspection of ${turnTempDir}`);
+                    return;
+                }
                 if (fs.existsSync(turnTempDir)) {
                     fs.rmSync(turnTempDir, { recursive: true, force: true });
                 }
@@ -363,7 +359,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
         const cleanup = () => {
             removeListeners();
-            cleanupWorkspace();
+            // Don't call cleanupWorkspace here as it will be called in the finally block of executeTask
         };
 
         // Handle client drops mid-generation.

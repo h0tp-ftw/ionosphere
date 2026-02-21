@@ -57,3 +57,57 @@ test('GeminiController - in stateful mode, exposes a SessionRouter instance', (t
     assert.strictEqual(controller.sessionMode, 'stateful');
     delete process.env.SESSION_MODE;
 });
+
+// ─── Real CLI event type routing ──────────────────────────────────────────────
+
+test('JsonlAccumulator - tool_use event is parsed and fields are accessible', (t) => {
+    const accumulator = new JsonlAccumulator();
+    const toolUseEvents = [];
+
+    accumulator.on('line', (json) => {
+        if (json.type === 'tool_use') toolUseEvents.push(json);
+    });
+
+    // Real event format from CLI -o stream-json output
+    accumulator.push(JSON.stringify({
+        type: 'tool_use',
+        timestamp: '2026-02-21T21:29:57.242Z',
+        tool_name: 'resolve-library-id',
+        tool_id: 'resolve-library-id-001',
+        parameters: { query: 'openai', libraryName: 'openai' }
+    }) + '\n');
+
+    assert.strictEqual(toolUseEvents.length, 1);
+    assert.strictEqual(toolUseEvents[0].tool_name, 'resolve-library-id');
+    assert.strictEqual(toolUseEvents[0].tool_id, 'resolve-library-id-001');
+    assert.deepStrictEqual(toolUseEvents[0].parameters, { query: 'openai', libraryName: 'openai' });
+});
+
+test('JsonlAccumulator - result event with stats is parsed with full stats block', (t) => {
+    const accumulator = new JsonlAccumulator();
+    const resultEvents = [];
+
+    accumulator.on('line', (json) => {
+        if (json.type === 'result') resultEvents.push(json);
+    });
+
+    // Real stats from live CLI run
+    accumulator.push(JSON.stringify({
+        type: 'result',
+        status: 'success',
+        stats: {
+            total_tokens: 34392,
+            input_tokens: 32504,
+            output_tokens: 746,
+            cached: 12426,
+            duration_ms: 32949,
+            tool_calls: 3
+        }
+    }) + '\n');
+
+    assert.strictEqual(resultEvents.length, 1);
+    assert.strictEqual(resultEvents[0].stats.total_tokens, 34392);
+    assert.strictEqual(resultEvents[0].stats.output_tokens, 746);
+    assert.strictEqual(resultEvents[0].stats.tool_calls, 3);
+});
+

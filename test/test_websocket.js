@@ -49,17 +49,15 @@ describe('WebSocket Framed Pipe (Native Pi-AI Provider)', function () {
 
         ws.on('open', () => {
             // Send the INIT payload
+            // This mirrors the pi-provider initialization payload
             ws.send(JSON.stringify({
-                execution_id: 'test-exec-1',
                 type: 'init',
-                data: {
-                    prompt: 'Call the echo tool now.',
-                    // Hack to override the args inside WebSocketController to point to the mock CLI file
-                    mcpServers: {
-                        dummy: {
-                            command: path.resolve(__dirname, 'mock_cli.js'),
-                            args: []
-                        }
+                prompt: 'Call the echo tool now.',
+                // Hack to override the args inside WebSocketController to point to the mock CLI file
+                mcpServers: {
+                    dummy: {
+                        command: path.resolve(__dirname, 'mock_cli.js'),
+                        args: []
                     }
                 }
             }));
@@ -69,26 +67,22 @@ describe('WebSocket Framed Pipe (Native Pi-AI Provider)', function () {
             const rawFrame = data.toString();
             console.log(`[TEST WS RCVD] ${rawFrame}`);
 
-            // Verify envelope integrity
-            let envelope;
+            // Verify NDJSON integrity: Ensure it is parseable
+            let parsed;
             try {
-                envelope = JSON.parse(rawFrame);
+                parsed = JSON.parse(rawFrame);
             } catch (e) {
                 return done(new Error(`Received malformed JSON frame: ${rawFrame}`));
             }
 
-            if (envelope.execution_id !== 'test-exec-1') return;
-
-            const parsed = envelope.data || {};
-            framesReceived.push({ type: envelope.type, data: parsed });
+            framesReceived.push(parsed);
 
             // Phase 1: Wait for the CLI to emit a toolCall
-            if (envelope.type === 'frame' && parsed.type === 'toolCall' && parsed.functionCall && parsed.functionCall.name === 'echo') {
+            if (parsed.type === 'toolCall' && parsed.functionCall && parsed.functionCall.name === 'echo') {
                 toolCallId = parsed.toolCallId;
 
                 // Phase 2: Simulate Pi-AI returning the reverse-tunnel Tool Result
                 const toolResultPayload = {
-                    execution_id: 'test-exec-1',
                     type: 'tool_result',
                     data: {
                         type: 'toolResult',
@@ -101,12 +95,12 @@ describe('WebSocket Framed Pipe (Native Pi-AI Provider)', function () {
             }
 
             // Phase 3: Wait for the CLI to gracefully exit
-            if (envelope.type === 'done') {
+            if (parsed.type === 'done') {
                 expect(parsed.code).to.equal(0);
 
                 // Verify we saw the tool call and some text emission
-                const hasToolCall = framesReceived.some(f => f.type === 'frame' && f.data?.type === 'toolCall');
-                const hasText = framesReceived.some(f => f.type === 'frame' && f.data?.type === 'text');
+                const hasToolCall = framesReceived.some(f => f.type === 'toolCall');
+                const hasText = framesReceived.some(f => f.type === 'text');
 
                 // The AI should have called the tool and then generated text after receiving the result
                 expect(hasToolCall, 'Should have emitted a toolCall').to.be.true;
@@ -115,7 +109,7 @@ describe('WebSocket Framed Pipe (Native Pi-AI Provider)', function () {
                 done();
             }
 
-            if (envelope.type === 'error') {
+            if (parsed.type === 'error') {
                 done(new Error(`Received explicitly error over stream: ${parsed.message}`));
             }
         });

@@ -458,7 +458,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
         const onToolCall = (info) => {
             console.log(`\n[Tool Call] ${JSON.stringify(info)}`);
-            // Map Gemini CLI toolCall to strict OpenAI delta schema
+            // Emit the tool call delta
             sendChunk({
                 id: `chatcmpl-${turnId}`,
                 object: 'chat.completion.chunk',
@@ -476,7 +476,8 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                                 arguments: info.arguments
                             }
                         }]
-                    }
+                    },
+                    finish_reason: 'tool_calls'
                 }]
             });
         };
@@ -493,6 +494,21 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         const onResult = (json) => {
             console.log(`\n[Turn Result]`, json);
             if (!res.writableEnded) {
+                // Emit token usage from CLI stats if available
+                const stats = json.stats || {};
+                const usageChunk = {
+                    id: `chatcmpl-${turnId}`,
+                    object: 'chat.completion.chunk',
+                    created: Math.floor(Date.now() / 1000),
+                    model: 'gemini-cli',
+                    choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+                    usage: {
+                        prompt_tokens: stats.input_tokens ?? stats.input ?? 0,
+                        completion_tokens: stats.output_tokens ?? 0,
+                        total_tokens: stats.total_tokens ?? 0
+                    }
+                };
+                res.write(`data: ${JSON.stringify(usageChunk)}\n\n`);
                 res.write('data: [DONE]\n\n');
                 res.end();
             }

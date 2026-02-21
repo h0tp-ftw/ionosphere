@@ -160,24 +160,49 @@ export class GeminiController {
 
                 accumulator.on('line', (json) => {
                     if (json.type === 'text') {
+                        // Legacy text event (older CLI versions)
                         if (json.value && callbacks.onText) callbacks.onText(json.value);
+
                     } else if (json.type === 'message' && json.role === 'assistant') {
-                        // Modern CLI format support
+                        // Streaming delta chunks: {"type":"message","role":"assistant","content":"...","delta":true}
+                        // Also handles non-delta final message
                         const text = (typeof json.content === 'object') ? json.content.text : json.content;
                         if (text && callbacks.onText) callbacks.onText(text);
+
+                    } else if (json.type === 'tool_use') {
+                        // Real CLI event name for tool calls (was incorrectly 'toolCall')
+                        // {"type":"tool_use","tool_name":"resolve-library-id","tool_id":"...","parameters":{}}
+                        if (callbacks.onToolCall) callbacks.onToolCall({
+                            id: json.tool_id || json.id,
+                            name: json.tool_name || json.name,
+                            arguments: JSON.stringify(json.parameters ?? json.arguments ?? {})
+                        });
+
+                    } else if (json.type === 'tool_result') {
+                        // Tool execution result from CLI — informational, forwarded as an event
+                        // {"type":"tool_result","tool_id":"...","status":"success","output":"..."}
+                        if (callbacks.onEvent) callbacks.onEvent(json);
+
                     } else if (json.type === 'toolCall') {
+                        // Defensive: handle legacy/alternate 'toolCall' name just in case
                         if (callbacks.onToolCall) callbacks.onToolCall(json);
+
                     } else if (json.type === 'error') {
                         if (callbacks.onError) callbacks.onError(json);
+
                     } else if (json.type === 'result') {
+                        // {"type":"result","status":"success","stats":{"total_tokens":N,"input_tokens":N,"output_tokens":N,...}}
                         lastResultJson = json;
                         if (callbacks.onResult) callbacks.onResult(json);
+
                     } else if (json.type === 'done') {
                         if (callbacks.onDone) callbacks.onDone();
+
                     } else {
                         if (callbacks.onEvent) callbacks.onEvent(json);
                     }
                 });
+
 
                 proc.stdout.on('data', (chunk) => {
                     accumulator.push(chunk);

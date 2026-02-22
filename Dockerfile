@@ -1,21 +1,21 @@
+# Start with a slim node image
 FROM node:22-slim
 
 WORKDIR /app
 
-# Copy all application files first
-COPY . .
+# 1. Copy dependency manifests first for better layer caching
+COPY package.json package-lock.json ./
 
-# Install node deps locally. This includes @google/gemini-cli in package.json.
-# We run this AFTER copy to ensure the local node_modules is the final one.
-RUN npm install
+# 2. Install dependencies (this layer won't re-run unless package.json changes)
+RUN npm install --omit=dev && npm cache clean --force
 
-# Explicitly ensure gemini-cli is here and get version
-RUN ./node_modules/.bin/gemini --version
+# 3. Copy only the necessary source code
+COPY src/ ./src/
+COPY scripts/ ./scripts/
 
-# Ensure empty temp dir for file injections
-RUN mkdir -p temp
+# 4. Prepare environment and executable
+RUN ./node_modules/.bin/gemini --version && mkdir -p temp
 
-# Environments
 ENV GEMINI_SETTINGS_JSON="/app/settings.json"
 ENV GEMINI_CLI_PATH="/app/node_modules/.bin/gemini"
 ENV PATH="/app/node_modules/.bin:${PATH}"

@@ -74,20 +74,21 @@ async function setupEnvAndAuth(isNative, composeCmd) {
             console.log("NOTE: A browser window will open to authenticate.");
             console.log("If the CLI stays interactive, type /quit to return to this installer.\n");
 
-            const prompt = "you have been run as part of an auth script, and if you generated a response, it has succeeded. please tell the user, Auth check complete! Please type /quit to return to the installer.";
-            spawnSync('gemini', ['-p', `"${prompt}"`], { stdio: 'inherit', shell: true });
+            const prompt = "you have been run as part of an auth script, and if you generated a response, it has succeeded. please tell the user, Auth check complete! Please type /quit to return to the installer if the CLI is still interactive.";
+            // Pass command as a single string when using shell: true to avoid DEP0190
+            spawnSync(`gemini -p "${prompt}"`, { stdio: 'inherit', shell: true });
         }
     } else {
         console.log("\nContainer mode selected. Building Image...");
         // Build the image quickly so we can use its CLI.
-        spawnSync(`${composeCmd}`, ['build'], { stdio: 'inherit', shell: true });
+        spawnSync(`${composeCmd} build`, { stdio: 'inherit', shell: true });
 
         console.log("\nTriggering Isolated Container OAuth Flow...");
         console.log("The Gemini CLI will launch inside the container and open a browser link for authentication.");
         console.log("If the CLI stays interactive, type /quit to return to this installer.\n");
 
-        const prompt = "you have been run as part of an auth script, and if you generated a response, it has succeeded. please tell the user, Auth check complete! Please type /quit to return to the installer.";
-        spawnSync(`${composeCmd}`, ['run', '--rm', 'ionosphere', 'gemini', '-p', `"${prompt}"`], { stdio: 'inherit', shell: true });
+        const prompt = "you have been run as part of an auth script, and if you generated a response, it has succeeded. please tell the user, Auth check complete! Please type /quit to return to the installer if the CLI is still interactive.";
+        spawnSync(`${composeCmd} run --rm ionosphere gemini -p "${prompt}"`, { stdio: 'inherit', shell: true });
     }
 
     fs.writeFileSync(envPath, envContent, 'utf-8');

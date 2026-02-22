@@ -71,10 +71,11 @@ async function setupEnvAndAuth(isNative, composeCmd) {
             process.exit(1);
         } else {
             console.log("\n`gemini` is installed locally. Triggering Native OAuth login flow...");
-            console.log("NOTE: A browser window will open to authenticate. Once done, you will enter the interactive CLI.");
-            console.log("Type /quit in the Gemini CLI to return to this installer.\n");
+            console.log("NOTE: A browser window will open to authenticate.");
+            console.log("If the CLI stays interactive, type /quit to return to this installer.\n");
 
-            spawnSync('gemini', [], { stdio: 'inherit', shell: true });
+            const prompt = "you have been run as part of an auth script, and if you generated a response, it has succeeded. please tell the user, Auth check complete! Please type /quit to return to the installer.";
+            spawnSync('gemini', ['-p', `"${prompt}"`], { stdio: 'inherit', shell: true });
         }
     } else {
         console.log("\nContainer mode selected. Building Image...");
@@ -83,9 +84,10 @@ async function setupEnvAndAuth(isNative, composeCmd) {
 
         console.log("\nTriggering Isolated Container OAuth Flow...");
         console.log("The Gemini CLI will launch inside the container and open a browser link for authentication.");
-        console.log("Once authenticated, you will enter the interactive CLI. Type /quit to return to this installer.\n");
+        console.log("If the CLI stays interactive, type /quit to return to this installer.\n");
 
-        spawnSync(`${composeCmd}`, ['run', '--rm', 'ionosphere', 'gemini'], { stdio: 'inherit', shell: true });
+        const prompt = "you have been run as part of an auth script, and if you generated a response, it has succeeded. please tell the user, Auth check complete! Please type /quit to return to the installer.";
+        spawnSync(`${composeCmd}`, ['run', '--rm', 'ionosphere', 'gemini', '-p', `"${prompt}"`], { stdio: 'inherit', shell: true });
     }
 
     fs.writeFileSync(envPath, envContent, 'utf-8');

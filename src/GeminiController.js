@@ -226,6 +226,7 @@ export class GeminiController {
                             (/credentials/i.test(stderrText) && !/loaded cached credentials/i.test(stderrText));
                         const isResourceError = /RESOURCE_EXHAUSTED|rateLimitExceeded|429|No capacity available/i.test(stderrText);
                         const isPolicyError = /denied by policy|unauthorized tool call|not available to this agent/i.test(stderrText);
+                        const isNotFound = /Tool "([^"]+)" not found/i.test(stderrText);
 
                         if (isAuthError) {
                             const errorMsg = `Fatal: CLI Auth Expired or Missing. Raw: ${stderrText}`;
@@ -236,6 +237,19 @@ export class GeminiController {
                         } else if (isPolicyError) {
                             const errorMsg = `Fatal: Tool use or action denied by policy. Raw: ${stderrText}`;
                             if (activeCallbacks.onError) activeCallbacks.onError({ type: 'error', message: errorMsg, code: 'POLICY_DENIED' });
+                        } else if (isNotFound) {
+                            const match = stderrText.match(/Tool "([^"]+)" not found/i);
+                            const toolName = match ? match[1] : 'unknown';
+                            const errorMsg = `Error: Tool "${toolName}" not found in this environment. Please use available tools or respond with text.`;
+                            console.log(`[GeminiController] Breaking loop: Tool '${toolName}' not found.`);
+                            if (activeCallbacks.onEvent) {
+                                activeCallbacks.onEvent({
+                                    type: 'tool_result',
+                                    tool_name: toolName,
+                                    result: errorMsg,
+                                    is_error: true
+                                });
+                            }
                         }
                     }
                 });

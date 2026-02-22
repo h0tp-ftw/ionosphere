@@ -2,6 +2,9 @@
     "name": "gemini-ionosphere",
     "version": "1.0.0",
     "type": "module",
+    "workspaces": [
+        "packages/*"
+    ],
     "scripts": {
         "start": "node src/index.js",
         "generate-settings": "node scripts/generate_settings.js",

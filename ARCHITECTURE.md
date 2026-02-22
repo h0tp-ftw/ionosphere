@@ -124,8 +124,22 @@ temp/
 | `PORT` | `3000` | HTTP server port |
 | `API_KEY` | *(none)* | Bearer token validation |
 | `GEMINI_CLI_PATH` | `gemini` | Path/command to invoke the Gemini CLI |
-| `GEMINI_MODEL` | `gemini-2.0-flash-exp` | Default model |
+| `GEMINI_MODEL` | `gemini-2.5-flash-lite` | Default model |
 | `MAX_CONCURRENT_CLI` | `5` | Max simultaneous CLI processes |
+
+---
+
+## Available Models
+
+Any of the following model identifiers can be passed in the `model` field of the API request:
+
+- `auto-gemini-3` (Auto-selecting Gemini 3)
+- `auto-gemini-2.5` (Auto-selecting Gemini 2.5)
+- `gemini-3-pro-preview`
+- `gemini-3-flash-preview`
+- `gemini-2.5-flash`
+- `gemini-2.5-pro`
+- `gemini-2.5-flash-lite` (Default)
 
 ---
 

@@ -7,9 +7,14 @@ Ionosphere is designed for workflows with:
 - Search grounding (built-in Google search tool)
 - Long contexts (Gemini CLI has generous context length)
 
-Ionosphere is NOT designed for workflows with:
-- Persistent state or storage (Ionosphere is stateless)
-- High frequency / parallel requests (Latency is high)
+
+```markdown
+### Known Limitations
+- **OAuth Reliability**: CLI OAuth depends on server availability; API keys are preferred for stable uptime.
+- **Infinite Looping**: Known to occasionally "mess up" or enter infinite loops during complex tool interactions.
+- **Process Overhead**: High latency due to the containerized I/O and Node.js process spawning stack compared to direct API usage. Bad for high frequency or parallel executions.
+- **Stateless**: Ionosphere is stateless, meaning it does not persist state between requests.
+```
 
 ---
 
@@ -36,28 +41,9 @@ Ionosphere is NOT designed for workflows with:
 
 ## Quick Start
 
-### 1. Interactive Setup
-
 ```bash
 npm run setup
 ```
-
-This script generates your `.env` and `settings.json` based on your preferred auth (OAuth, API Key, or Vertex).
-
-### 2. Run Natively (Development)
-
-```bash
-npm install
-npm start
-```
-
-### 3. Run via Docker (Production)
-
-```bash
-docker-compose up --build
-```
-
-The Docker image includes the Gemini CLI and provides a secure, isolated environment for your agentic loops.
 
 ---
 
@@ -67,9 +53,21 @@ The Docker image includes the Gemini CLI and provides a secure, isolated environ
 |---|---|---|
 | `GEMINI_CLI_PATH` | `gemini` | Path to the Gemini CLI binary |
 | `API_KEY` | — | Bearer token for bridge security |
-| `GEMINI_MODEL` | `gemini-2.0-flash-exp` | Default model |
+| `GEMINI_MODEL` | `gemini-2.5-flash-lite` | Default model |
 | `MAX_CONCURRENT_CLI` | `5` | Max simultaneous CLI processes |
 | `PORT` | `3000` | Express server port |
+
+## Available Models
+
+Any of the following model identifiers can be passed in the `model` field of the API request:
+
+- `auto-gemini-3` (Auto-selecting Gemini 3)
+- `auto-gemini-2.5` (Auto-selecting Gemini 2.5)
+- `gemini-3-pro-preview`
+- `gemini-3-flash-preview`
+- `gemini-2.5-flash`
+- `gemini-2.5-pro`
+- `gemini-2.5-flash-lite` (Default)
 
 ---
 

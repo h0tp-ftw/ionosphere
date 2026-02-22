@@ -6,7 +6,6 @@ temp
 container_logs.txt
 sample_output.txt
 test_output*.txt
-*.js
 !src/
 !scripts/
 !packages/

@@ -102,7 +102,7 @@ test('api_compliance - response has text/event-stream content type', async () =>
     await startBridge('text');
     try {
         const { headers } = await postCompletion({
-            model: 'gemini-cli',
+            model: 'gemini-2.5-flash-lite',
             messages: [{ role: 'user', content: 'hi' }],
             stream: true
         });
@@ -116,7 +116,7 @@ test('api_compliance - all data lines are valid JSON (except [DONE])', async () 
     await startBridge('text');
     try {
         const { body } = await postCompletion({
-            model: 'gemini-cli',
+            model: 'gemini-2.5-flash-lite',
             messages: [{ role: 'user', content: 'hi' }],
             stream: true
         });
@@ -135,7 +135,7 @@ test('api_compliance - text chunks have choices[0].delta.content', async () => {
     await startBridge('text');
     try {
         const { body } = await postCompletion({
-            model: 'gemini-cli',
+            model: 'gemini-2.5-flash-lite',
             messages: [{ role: 'user', content: 'hi' }],
             stream: true
         });
@@ -157,7 +157,7 @@ test('api_compliance - final chunk has finish_reason: stop and usage fields', as
     await startBridge('text');
     try {
         const { body } = await postCompletion({
-            model: 'gemini-cli',
+            model: 'gemini-2.5-flash-lite',
             messages: [{ role: 'user', content: 'hi' }],
             stream: true
         });
@@ -181,7 +181,7 @@ test('api_compliance - stream ends with data: [DONE]', async () => {
     await startBridge('text');
     try {
         const { body } = await postCompletion({
-            model: 'gemini-cli',
+            model: 'gemini-2.5-flash-lite',
             messages: [{ role: 'user', content: 'hi' }],
             stream: true
         });
@@ -197,7 +197,7 @@ test('api_compliance - tool call chunks have correct OpenAI structure', async ()
     await startBridge('tool_use');
     try {
         const { body } = await postCompletion({
-            model: 'gemini-cli',
+            model: 'gemini-2.5-flash-lite',
             messages: [{ role: 'user', content: 'use a tool' }],
             stream: true,
             tools: [{
@@ -233,7 +233,7 @@ test('api_compliance - chunk structure has required OpenAI fields', async () => 
     await startBridge('text');
     try {
         const { body } = await postCompletion({
-            model: 'gemini-cli',
+            model: 'gemini-2.5-flash-lite',
             messages: [{ role: 'user', content: 'hi' }],
             stream: true
         });

@@ -145,6 +145,97 @@ Emitted if the orchestrator's stderr monitor detects authentication failure keyw
 
 ---
 
+### `GET /v1/models`
+
+Retrieve a list of available models. This endpoint returns all models supported by the Ionosphere bridge, all owned by `google`.
+
+#### Example Request
+
+```bash
+curl http://localhost:3000/v1/models -H "Authorization: Bearer <your-api-key>"
+```
+
+#### Example Response
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "auto-gemini-3",
+      "object": "model",
+      "created": 1686935002,
+      "owned_by": "google"
+    },
+    {
+      "id": "auto-gemini-2.5",
+      "object": "model",
+      "created": 1686935002,
+      "owned_by": "google"
+    },
+    {
+      "id": "gemini-3-pro-preview",
+      "object": "model",
+      "created": 1686935002,
+      "owned_by": "google"
+    },
+    {
+      "id": "gemini-3-flash-preview",
+      "object": "model",
+      "created": 1686935002,
+      "owned_by": "google"
+    },
+    {
+      "id": "gemini-2.5-pro",
+      "object": "model",
+      "created": 1686935002,
+      "owned_by": "google"
+    },
+    {
+      "id": "gemini-2.5-flash",
+      "object": "model",
+      "created": 1686935002,
+      "owned_by": "google"
+    },
+    {
+      "id": "gemini-2.5-flash-lite",
+      "object": "model",
+      "created": 1686935002,
+      "owned_by": "google"
+    },
+    {
+      "id": "gemini-2.0-flash",
+      "object": "model",
+      "created": 1686935002,
+      "owned_by": "google"
+    }
+  ]
+}
+```
+
+### `GET /v1/models/:model`
+
+Retrieve details for a specific model.
+
+#### Example Request
+
+```bash
+curl http://localhost:3000/v1/models/gemini-2.5-flash-lite -H "Authorization: Bearer <your-api-key>"
+```
+
+#### Example Response
+
+```json
+{
+  "id": "gemini-2.5-flash-lite",
+  "object": "model",
+  "created": 1686935002,
+  "owned_by": "google"
+}
+```
+
+---
+
 ## Connection Resilience
 
 ### Infinite Socket Timeout

@@ -201,13 +201,15 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             if (!res.writableEnded) res.write(': ping\n\n');
         }, 15000) : null;
 
+        const responseModel = req.body.model || process.env.GEMINI_MODEL || "gemini-2.5-flash-lite";
+
         const onText = (text) => {
             if (isStreaming) {
                 sendChunk({
                     id: `chatcmpl-stream`,
                     object: 'chat.completion.chunk',
                     created: Math.floor(Date.now() / 1000),
-                    model: 'gemini-cli',
+                    model: responseModel,
                     choices: [{ index: 0, delta: { content: text } }]
                 });
             } else {
@@ -221,7 +223,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                     id: `chatcmpl-stream`,
                     object: 'chat.completion.chunk',
                     created: Math.floor(Date.now() / 1000),
-                    model: 'gemini-cli',
+                    model: responseModel,
                     choices: [{
                         index: 0,
                         delta: {
@@ -249,7 +251,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                     id: `chatcmpl-${randomUUID()}`,
                     object: 'chat.completion',
                     created: Math.floor(Date.now() / 1000),
-                    model: 'gemini-cli',
+                    model: responseModel,
                     choices: [{
                         index: 0,
                         message: { role: 'assistant', content: null, tool_calls: accumulatedToolCalls },
@@ -284,7 +286,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                     id: `chatcmpl-stream`,
                     object: 'chat.completion.chunk',
                     created: Math.floor(Date.now() / 1000),
-                    model: 'gemini-cli',
+                    model: responseModel,
                     choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
                     usage: {
                         prompt_tokens: finalStats.input_tokens || 0,
@@ -302,7 +304,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                         id: `chatcmpl-${randomUUID()}`,
                         object: 'chat.completion',
                         created: Math.floor(Date.now() / 1000),
-                        model: 'gemini-cli',
+                        model: responseModel,
                         choices: [{
                             index: 0,
                             message: { role: 'assistant', content: accumulatedText },
@@ -397,10 +399,10 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             }
         }
 
-        // Per-turn IPC
+        // Per-turn IPC: Use /tmp for Unix sockets to avoid host-mount incompatibilities (ENOTSUP)
         const ipcPath = process.platform === 'win32'
             ? `\\\\.\\pipe\\ionosphere-${turnId}`
-            : path.join(turnTempDir, 'tool_ipc.sock');
+            : path.join('/tmp', `ionosphere-${turnId}.sock`);
 
         const ipcServer = net.createServer((socket) => {
             let buf = '';
@@ -438,7 +440,17 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
         await new Promise((resolve) => {
             ipcServer.listen(ipcPath, () => resolve());
-            ipcServer.on('error', () => { if (process.platform !== 'win32') fs.unlinkSync(ipcPath); ipcServer.listen(ipcPath, () => resolve()); });
+            ipcServer.on('error', (err) => {
+                if (process.platform !== 'win32') {
+                    try { if (fs.existsSync(ipcPath)) fs.unlinkSync(ipcPath); } catch (_) { }
+                }
+                if (err.code === 'EADDRINUSE') {
+                    console.warn(`[IPC] Address in use, retrying after cleanup: ${ipcPath}`);
+                    ipcServer.listen(ipcPath, () => resolve());
+                } else {
+                    console.error(`[IPC] Server error: ${err.message}`);
+                }
+            });
         });
 
         // Config
@@ -495,6 +507,60 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         if (!res.headersSent) res.status(500).json({ error: err.message });
         else res.end();
     }
+});
+
+app.get('/v1/models', (req, res) => {
+    const models = [
+        "auto-gemini-3",
+        "auto-gemini-2.5",
+        "gemini-3-pro-preview",
+        "gemini-3-flash-preview",
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-2.0-flash"
+    ];
+    res.json({
+        object: "list",
+        data: models.map(id => ({
+            id,
+            object: "model",
+            created: 1686935002,
+            owned_by: "google"
+        }))
+    });
+});
+
+app.get('/v1/models/:model', (req, res) => {
+    const models = [
+        "auto-gemini-3",
+        "auto-gemini-2.5",
+        "gemini-3-pro-preview",
+        "gemini-3-flash-preview",
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-2.0-flash"
+    ];
+    const modelId = req.params.model;
+
+    if (models.includes(modelId)) {
+        return res.json({
+            id: modelId,
+            object: "model",
+            created: 1686935002,
+            owned_by: "google"
+        });
+    }
+
+    res.status(404).json({
+        error: {
+            message: `The model '${modelId}' does not exist`,
+            type: "invalid_request_error",
+            param: "model",
+            code: "model_not_found"
+        }
+    });
 });
 
 app.get('/health', (req, res) => res.json({ status: "ok" }));

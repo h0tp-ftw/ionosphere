@@ -76,7 +76,7 @@ test('OpenAI Compliance Suite', async (t) => {
     await t.test('Streaming Text Completion', async () => {
         console.log('[Test] Requesting Streaming Completion...');
         const stream = await client.chat.completions.create({
-            model: 'gemini-cli',
+            model: 'gemini-2.5-flash-lite',
             messages: [{ role: 'user', content: 'hello' }],
             stream: true,
         });
@@ -92,7 +92,7 @@ test('OpenAI Compliance Suite', async (t) => {
     await t.test('Non-streaming Text Completion', async () => {
         console.log('[Test] Requesting Non-streaming Completion...');
         const response = await client.chat.completions.create({
-            model: 'gemini-cli',
+            model: 'gemini-2.5-flash-lite',
             messages: [{ role: 'user', content: 'hello non-stream' }],
             stream: false,
         });
@@ -104,7 +104,7 @@ test('OpenAI Compliance Suite', async (t) => {
 
     await t.test('Usage Metrics (Streaming)', async () => {
         const stream = await client.chat.completions.create({
-            model: 'gemini-cli',
+            model: 'gemini-2.5-flash-lite',
             messages: [{ role: 'user', content: 'hello' }],
             stream: true,
         });
@@ -120,7 +120,7 @@ test('OpenAI Compliance Suite', async (t) => {
         await startSharedBridge('vision');
         console.log('[Test] Requesting Vision Completion...');
         const response = await client.chat.completions.create({
-            model: 'gemini-cli',
+            model: 'gemini-2.5-flash-lite',
             messages: [{
                 role: 'user',
                 content: [
@@ -144,7 +144,7 @@ test('OpenAI Compliance Suite', async (t) => {
 
         try {
             await badClient.chat.completions.create({
-                model: 'gemini-cli',
+                model: 'gemini-2.5-flash-lite',
                 messages: [{ role: 'user', content: 'hi' }]
             });
             assert.fail('Should have thrown 401');
@@ -158,7 +158,7 @@ test('OpenAI Compliance Suite', async (t) => {
         await startSharedBridge('error');
         try {
             await client.chat.completions.create({
-                model: 'gemini-cli',
+                model: 'gemini-2.5-flash-lite',
                 messages: [{ role: 'user', content: 'fail please' }]
             });
             assert.fail('Should have thrown 500');
@@ -171,7 +171,7 @@ test('OpenAI Compliance Suite', async (t) => {
     await t.test('System Prompt Propagation', async () => {
         await startSharedBridge('text');
         const response = await client.chat.completions.create({
-            model: 'gemini-cli',
+            model: 'gemini-2.5-flash-lite',
             messages: [
                 { role: 'system', content: 'You are a helpful assistant.' },
                 { role: 'user', content: 'Who are you?' }
@@ -188,7 +188,7 @@ test('OpenAI Compliance Suite', async (t) => {
     await t.test('Multi-turn Handoff', async () => {
         console.log('[Test] Step 1: Triggering tool call');
         const stream1 = await client.chat.completions.create({
-            model: 'gemini-cli',
+            model: 'gemini-2.5-flash-lite',
             messages: [{ role: 'user', content: 'use a tool' }],
             tools: [{
                 type: 'function',
@@ -206,7 +206,7 @@ test('OpenAI Compliance Suite', async (t) => {
 
         console.log('[Test] Step 2: Sending tool result (Handoff)');
         const stream2 = await client.chat.completions.create({
-            model: 'gemini-cli',
+            model: 'gemini-2.5-flash-lite',
             messages: [
                 { role: 'user', content: 'use a tool' },
                 { role: 'assistant', content: null, tool_calls: [toolCall] },

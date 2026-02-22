@@ -205,28 +205,44 @@ async function main() {
             if (isNative) {
                 console.log(`\n🚀 Starting the Ionosphere server...\n`);
                 spawnSync('npm start', { stdio: 'inherit', shell: true });
+                rl.close();
             } else {
                 console.log(`\n🏗️  Building Ionosphere image...`);
                 console.log(`⏳ (This may take a few minutes for the first build or code changes)\n`);
 
-                // First, do the build so the user sees all the progress
-                const buildResult = spawnSync(`${composeCmd} build`, { stdio: 'inherit', shell: true });
+                // Use spawn for the build to ensure real-time output streaming on all platforms
+                const buildProcess = spawn(`${composeCmd} build`, { stdio: 'inherit', shell: true });
 
-                if (buildResult.status === 0) {
-                    console.log(`\n🚀 Launching detached bridge container...`);
-                    // Now run 'up -d' which will be instant since the build is done
-                    const upResult = spawnSync(`${composeCmd} up -d`, { stdio: 'inherit', shell: true });
+                buildProcess.on('exit', (code) => {
+                    if (code === 0) {
+                        console.log(`\n🚀 Launching detached bridge container...`);
 
-                    if (upResult.status === 0) {
-                        console.log(`\n✅ Server is running in the background.`);
-                        console.log(`📝 To view logs, run: ${composeCmd} logs -f\n`);
+                        // Now run 'up -d'
+                        const upProcess = spawn(`${composeCmd} up -d`, { stdio: 'inherit', shell: true });
+
+                        upProcess.on('exit', (upCode) => {
+                            if (upCode === 0) {
+                                console.log(`\n✅ Server is running in the background.`);
+                                console.log(`📝 To view logs, run: ${composeCmd} logs -f\n`);
+
+                                // Finally close the readline and exit
+                                rl.close();
+                                process.exit(0);
+                            } else {
+                                console.error(`\n❌ Failed to launch containers (Exit code: ${upCode}).`);
+                                rl.close();
+                                process.exit(upCode);
+                            }
+                        });
                     } else {
-                        console.error(`\n❌ Failed to launch containers.`);
+                        console.error(`\n❌ Build failed (Exit code: ${code}). Please check the errors above.`);
+                        rl.close();
+                        process.exit(code);
                     }
-                } else {
-                    console.error(`\n❌ Build failed. Please check the errors above.`);
-                }
+                });
             }
+        } else {
+            rl.close();
         }
 
     } catch (err) {

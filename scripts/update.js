@@ -1,4 +1,4 @@
-import { spawnSync } from 'child_process';
+import { spawnSync, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -42,11 +42,26 @@ async function run() {
 
             if (composeCmd) {
                 console.log(`\n🏗️  Rebuilding Ionosphere image...`);
-                spawnSync(`${composeCmd} build`, { stdio: 'inherit', shell: true });
+                console.log(`⏳ (This may take a few minutes)\n`);
 
-                console.log(`\n🚀 Restarting bridge container...`);
-                spawnSync(`${composeCmd} up -d`, { stdio: 'inherit', shell: true });
-                console.log("\n✅ Containers updated and restarted.");
+                const buildProcess = spawn(`${composeCmd} build`, { stdio: 'inherit', shell: true });
+
+                buildProcess.on('exit', (code) => {
+                    if (code === 0) {
+                        console.log(`\n🚀 Restarting bridge container...`);
+                        const upProcess = spawn(`${composeCmd} up -d`, { stdio: 'inherit', shell: true });
+
+                        upProcess.on('exit', (upCode) => {
+                            if (upCode === 0) {
+                                console.log("\n✅ Containers updated and restarted.");
+                            } else {
+                                console.error(`\n❌ Restart failed (Exit code: ${upCode}).`);
+                            }
+                        });
+                    } else {
+                        console.error(`\n❌ Build failed (Exit code: ${code}).`);
+                    }
+                });
             } else {
                 console.log("\n⚠️ No container engine found. Skipping container rebuild.");
             }

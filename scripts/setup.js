@@ -125,6 +125,45 @@ async function main() {
     console.log("=========================================\n");
 
     try {
+        if (fs.existsSync(path.join(process.cwd(), '.env'))) {
+            console.log("--- Maintenance Option ---");
+            console.log("An existing .env was detected.");
+            const maintenance = await question("Would you like to enter the Maintenance Menu? (y/N): ");
+
+            if (maintenance.toLowerCase() === 'y') {
+                console.log("\n[1] Recover/View existing API Key");
+                console.log("[2] Fresh Build (Nuke containers, volumes, and images)");
+                console.log("[3] Back to Main Setup");
+                const mChoice = await question("Select Choice [1/2/3]: ");
+
+                if (mChoice === '1') {
+                    const currentEnv = fs.readFileSync(path.join(process.cwd(), '.env'), 'utf-8');
+                    const match = currentEnv.match(/^API_KEY=(.*)$/m);
+                    if (match) {
+                        console.log("\n🔑 YOUR CURRENT IONOSPHERE API KEY:");
+                        console.log(`   ${match[1]}\n`);
+                    } else {
+                        console.log("❌ API_KEY not found in .env.");
+                    }
+                    rl.close();
+                    return;
+                }
+
+                if (mChoice === '2') {
+                    console.log("\n🧨 Nuking current container state...");
+                    // Try to detect compose command
+                    const dockerStatus = spawnSync('docker', ['--version']);
+                    const podmanStatus = spawnSync('podman', ['--version']);
+                    let cCmd = dockerStatus.error ? 'podman compose' : 'docker-compose';
+                    if (!podmanStatus.error && spawnSync('podman-compose', ['--version']).status === 0) cCmd = 'podman-compose';
+
+                    spawnSync(cCmd, ['down', '--volumes', '--rmi', 'all'], { stdio: 'inherit', shell: true });
+                    console.log("✅ State purged. Proceeding with fresh setup...\n");
+                }
+                // Option 3 just continues to standard flow
+            }
+        }
+
         await checkTermsOfService();
         await checkDependencies();
 

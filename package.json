@@ -6,6 +6,7 @@
         "start": "node src/index.js",
         "generate-settings": "node scripts/generate_settings.js",
         "setup": "node scripts/setup.js",
+        "update": "node scripts/update.js",
         "test": "node --test"
     },
     "dependencies": {

@@ -154,8 +154,20 @@ async function main() {
         rl.close();
 
         if (startNow.toLowerCase() === 'y') {
-            const cmd = isNative ? 'npm start' : `${composeCmd} up --build`;
-            console.log(`\nRun the following command to start the server:\n\n  ${cmd}\n`);
+            const cmd = isNative ? 'npm start' : `${composeCmd} up -d --build`;
+            console.log(`\n🚀 Starting the Ionosphere server...\n`);
+
+            // Execute the command
+            const parts = cmd.split(' ');
+            const exe = parts[0];
+            const args = parts.slice(1);
+
+            spawnSync(exe, args, { stdio: 'inherit', shell: true });
+
+            if (!isNative) {
+                console.log(`\n✅ Server is running in the background.`);
+                console.log(`📝 To view logs, run: ${composeCmd} logs -f\n`);
+            }
         }
 
     } catch (err) {

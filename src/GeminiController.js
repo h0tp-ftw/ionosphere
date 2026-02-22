@@ -70,7 +70,7 @@ export class GeminiController {
         try {
             this.callbacksByTurn.set(turnId, callbacks);
 
-            const args = ['-o', 'stream-json'];
+            const args = ['-y', '-o', 'stream-json'];
 
             // Write prompt to a temp file
             const tempPromptPath = path.join(workspacePath, `prompt-${randomUUID()}.txt`);
@@ -136,7 +136,23 @@ export class GeminiController {
 
                     if (json.type === 'message' && json.role === 'assistant') {
                         const content = (typeof json.content === 'object') ? json.content.text : json.content;
-                        if (content && activeCallbacks.onText) activeCallbacks.onText(content);
+                        if (content) {
+                            // Intercept "leaked" tool calls that the model might write as text heritage
+                            const actionMatch = content.match(/\[ACTION: Called tool '([^']+)' with args: (.*)\]/s);
+                            if (actionMatch) {
+                                const [_, toolName, argsStr] = actionMatch;
+                                console.log(`[GeminiController] Intercepted leaked tool call in text: ${toolName}`);
+                                if (activeCallbacks.onToolCall) {
+                                    activeCallbacks.onToolCall({
+                                        id: `leak_${randomUUID().substring(0, 8)}`,
+                                        name: toolName,
+                                        arguments: argsStr.trim()
+                                    });
+                                }
+                            } else {
+                                if (activeCallbacks.onText) activeCallbacks.onText(content);
+                            }
+                        }
 
                     } else if (json.type === 'tool_use' || json.type === 'toolCall') {
                         const toolName = json.tool_name || json.name;

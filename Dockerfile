@@ -18,6 +18,7 @@ RUN mkdir -p temp
 # Environments
 ENV GEMINI_SETTINGS_JSON="/app/settings.json"
 ENV GEMINI_CLI_PATH="/app/node_modules/.bin/gemini"
+ENV PATH="/app/node_modules/.bin:${PATH}"
 
 # Default Command: First generate settings, then start orchestrator
 CMD ["sh", "-c", "node scripts/generate_settings.js && node src/index.js"]

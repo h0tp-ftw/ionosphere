@@ -176,7 +176,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
         // 2. Identify "Handoff" (Warm Stateless Continuity)
         // If the last message is a TOOL result, check if we have a parked turn for it.
-        const lastMsg = messages[messages.length - 1];
+        let lastMsg = messages[messages.length - 1];
         let hijackedTurnId = null;
         if (lastMsg && (lastMsg.role === 'tool' || lastMsg.role === 'function')) {
             const callId = lastMsg.tool_call_id;
@@ -392,38 +392,45 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         let conversationPrompt = "";
         let imageCounter = 0;
 
-        for (const msg of messages) {
-            if (msg.role === 'system') {
-                systemMessage += sanitizePromptText(msg.content) + "\n\n";
-            } else {
-                let text = msg.content;
-                if (Array.isArray(text)) {
-                    text = text.map(p => {
-                        if (p.type === 'text') return sanitizePromptText(p.text);
-                        if (p.type === 'image_url') {
-                            const b64 = p.image_url.url.split(',')[1];
-                            const ext = p.image_url.url.split(';')[0].split('/')[1] || 'png';
-                            const imgPath = path.join(turnTempDir, `image_${++imageCounter}.${ext}`);
-                            fs.writeFileSync(imgPath, Buffer.from(b64, 'base64'));
-                            return `@${imgPath}`;
-                        }
-                        return '';
-                    }).join('\n');
-                } else {
-                    text = sanitizePromptText(text || "");
-                }
+        // Check if the last message is a slash command (for probing)
+        lastMsg = messages[messages.length - 1];
+        const isSlash = lastMsg && lastMsg.role === 'user' && typeof lastMsg.content === 'string' && lastMsg.content.trim().startsWith('/');
 
-                if (msg.role === 'user') conversationPrompt += `USER: ${text}\n\n`;
-                else if (msg.role === 'assistant') {
-                    let content = text;
-                    if (msg.tool_calls) {
-                        for (const tc of msg.tool_calls) {
-                            content += `\n[ACTION: Called tool '${tc.function?.name || tc.name}' with args: ${tc.function?.arguments || tc.arguments}]`;
-                        }
+        if (isSlash) {
+            conversationPrompt = lastMsg.content.trim();
+        } else {
+            for (const msg of req.body.messages) {
+                if (msg.role === 'system') systemMessage += (msg.content || "") + "\n";
+                else {
+                    let text = msg.content;
+                    if (Array.isArray(text)) {
+                        text = text.map(p => {
+                            if (p.type === 'text') return sanitizePromptText(p.text);
+                            if (p.type === 'image_url') {
+                                const b64 = p.image_url.url.split(',')[1];
+                                const ext = p.image_url.url.split(';')[0].split('/')[1] || 'png';
+                                const imgPath = path.join(turnTempDir, `image_${++imageCounter}.${ext}`);
+                                fs.writeFileSync(imgPath, Buffer.from(b64, 'base64'));
+                                return `@${imgPath}`;
+                            }
+                            return '';
+                        }).join('\n');
+                    } else {
+                        text = sanitizePromptText(text || "");
                     }
-                    conversationPrompt += `ASSISTANT: ${content.trim()}\n\n`;
-                } else if (msg.role === 'tool' || msg.role === 'function') {
-                    conversationPrompt += `[TOOL RESULT (${msg.name || msg.tool_call_id})]:\n${text}\n\n`;
+
+                    if (msg.role === 'user') conversationPrompt += `USER: ${text}\n\n`;
+                    else if (msg.role === 'assistant') {
+                        let content = text;
+                        if (msg.tool_calls) {
+                            for (const tc of msg.tool_calls) {
+                                content += `\n[ACTION: Called tool '${tc.function?.name || tc.name}' with args: ${tc.function?.arguments || tc.arguments}]`;
+                            }
+                        }
+                        conversationPrompt += `ASSISTANT: ${content.trim()}\n\n`;
+                    } else if (msg.role === 'tool' || msg.role === 'function') {
+                        conversationPrompt += `[TOOL RESULT (${msg.name || msg.tool_call_id})]:\n${text}\n\n`;
+                    }
                 }
             }
         }
@@ -498,7 +505,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 fs.writeFileSync(mcpPath, JSON.stringify(req.body.mcpServers));
                 toolBridgeEnv.TOOL_BRIDGE_MCP_SERVERS = mcpPath;
             }
-            mcpServers = { 'ionosphere-tool-bridge': { command: 'node', args: [TOOL_BRIDGE_PATH], env: toolBridgeEnv } };
+            mcpServers = { 'ionosphere-tool-bridge': { command: 'node', args: [TOOL_BRIDGE_PATH], env: toolBridgeEnv, trust: true } };
         }
 
         const onEvent = (json) => {

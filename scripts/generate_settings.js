@@ -29,25 +29,42 @@ export function generateConfig(options = {}) {
         },
         tools: {
             exclude: (() => {
-                const excludeList = [];
-                const disableTools = process.env.GEMINI_DISABLE_TOOLS !== 'false';
-                const disableSearch = process.env.GEMINI_DISABLE_WEB_SEARCH === 'true';
+                let excludeList = [];
+                const hardened = process.env.GEMINI_HARDENED === 'true' || process.env.GEMINI_DISABLE_TOOLS === 'true';
+                const extraExcludes = process.env.GEMINI_EXCLUDE_TOOLS ? process.env.GEMINI_EXCLUDE_TOOLS.split(',') : [];
 
-                if (disableTools) {
-                    excludeList.push(
-                        "list_directory",
-                        "read_file",
-                        "write_file",
+                if (hardened) {
+                    // Exclude all native tools except Google Search and read_many_files
+                    excludeList = [
                         "glob",
                         "grep_search",
+                        "list_directory",
+                        "read_file",
+                        "run_shell_command",
+                        "write_file",
                         "replace",
-                        "run_shell_command"
-                    );
+                        "edit",
+                        "write_todos",
+                        "web_fetch",
+                        "save_memory",
+                        "activate_skill",
+                        "activate-skill",
+                        "ask_user",
+                        "enter_plan_mode",
+                        "exit_plan_mode",
+                        "get_internal_docs"
+                    ];
                 }
-                if (disableSearch) {
+
+                // Merge in extra excludes from env
+                excludeList = [...new Set([...excludeList, ...extraExcludes])];
+
+                // Legacy flags
+                if (process.env.GEMINI_DISABLE_WEB_SEARCH === 'true') {
                     excludeList.push("google_web_search");
                 }
-                return excludeList;
+
+                return excludeList.length > 0 ? [...new Set(excludeList)] : undefined;
             })()
         }
     };

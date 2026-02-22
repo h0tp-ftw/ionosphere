@@ -72,7 +72,8 @@ async function setupEnvAndAuth(isNative, composeCmd) {
         } else {
             console.log("\n`gemini` is installed locally. Triggering Native OAuth login flow...");
             console.log("NOTE: A browser window will open to authenticate. Once done, type /quit to return to this installer.");
-            spawnSync('gemini', ['-p', 'Auth check complete! Please tell the user that authentication was successful and they can type /quit to exit and return to the Ionosphere installer.'], { stdio: 'inherit', shell: true });
+            // Use positional prompt instead of -p to avoid flag conflicts in some shells
+            spawnSync('gemini', ['"Auth check complete! Please type /quit to return to the installer."'], { stdio: 'inherit', shell: true });
         }
     } else {
         console.log("\nContainer mode selected. Building Image...");
@@ -82,7 +83,8 @@ async function setupEnvAndAuth(isNative, composeCmd) {
         console.log("\nTriggering Isolated Container OAuth Flow...");
         console.log("The Gemini CLI will launch inside the container and open a browser link for authentication.");
         console.log("Once authenticated, type /quit to exit the CLI and return to this installer.");
-        spawnSync(`${composeCmd}`, ['run', '--rm', 'ionosphere', 'gemini', '-p', 'Auth check complete! Please tell the user that authentication was successful and they can type /quit to exit and return to the Ionosphere installer.'], { stdio: 'inherit', shell: true });
+        // Use positional prompt instead of -p to avoid flag conflicts
+        spawnSync(`${composeCmd}`, ['run', '--rm', 'ionosphere', 'gemini', '"Auth check complete! Please type /quit to return to the installer."'], { stdio: 'inherit', shell: true });
     }
 
     fs.writeFileSync(envPath, envContent, 'utf-8');
@@ -124,7 +126,7 @@ async function main() {
         await checkDependencies();
 
         console.log("\n--- Setup Environment ---");
-        const envChoice = await question("How will you run Ionosphere?\n[1] Native (Node.js) - NOT RECOMMENDED for production\n[2] Docker (RECOMMENDED)\n[3] Podman\nSelect [1/2/3] (default: 1): ");
+        const envChoice = await question("How will you run Ionosphere?\n[1] Native (Node.js) - NOT RECOMMENDED for production\n[2] Docker\n[3] Podman\nSelect [1/2/3] (default: 1): ");
         const isNative = envChoice === '1' || envChoice === '';
         const isDocker = envChoice === '2';
         const isPodman = envChoice === '3';
@@ -155,7 +157,8 @@ async function main() {
 
         if (startNow.toLowerCase() === 'y') {
             const cmd = isNative ? 'npm start' : `${composeCmd} up -d --build`;
-            console.log(`\n🚀 Starting the Ionosphere server...\n`);
+            console.log(`\n🚀 Starting the Ionosphere server...`);
+            if (!isNative) console.log(`⏳ (This may take a minute if the image needs building)\n`);
 
             // Execute the command
             const parts = cmd.split(' ');

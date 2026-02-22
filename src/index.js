@@ -75,9 +75,13 @@ const requestQueue = [];
 // If the callKey matches a parked turn, it unblocks the CLI logic.
 const resolveToolCall = (callKey, result) => {
     const pending = pendingToolCalls.get(callKey);
-    if (!pending) return false;
+    if (!pending) {
+        console.warn(`[IPC] resolveToolCall: No pending call for ${callKey}`);
+        return false;
+    }
     pendingToolCalls.delete(callKey);
     try {
+        console.log(`[IPC] Sending result to turn ${pending.turnId} for tool ${callKey}`);
         pending.socket.write(JSON.stringify({ event: 'tool_result', result: String(result) }) + '\n');
         pending.socket.end();
         console.log(`[IPC] Resolved tool call ${callKey} for turn ${pending.turnId}`);
@@ -92,6 +96,7 @@ async function enqueueControllerPrompt(executeTask) {
         await new Promise(resolve => requestQueue.push(resolve));
     }
     currentlyRunning++;
+    console.log(`[Queue] CLI started. Active: ${currentlyRunning}/${MAX_CONCURRENT_CLI}, Parked: ${parkedTurns.size}, Queue: ${requestQueue.length}`);
     try {
         await executeTask();
     } finally {
@@ -173,8 +178,12 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             for (const [callKey, pending] of pendingToolCalls.entries()) {
                 if (callKey.startsWith(shortKey)) {
                     hijackedTurnId = pending.turnId;
+                    console.log(`[API] Hijack discovery: Match found for ${callId} -> Turn ${hijackedTurnId}`);
                     break;
                 }
+            }
+            if (!hijackedTurnId) {
+                console.log(`[API] Hijack discovery: NO match for ${callId} in ${pendingToolCalls.size} pending calls`);
             }
         }
 
@@ -218,6 +227,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         };
 
         const onToolCall = (info) => {
+            console.log(`[Turn ${turnId}] Dispatching Tool Call: ${info.name} (${info.id})`);
             if (isStreaming) {
                 sendChunk({
                     id: `chatcmpl-stream`,
@@ -323,7 +333,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
         // --- HANDOFF CASE ---
         if (hijackedTurnId && parkedTurns.has(hijackedTurnId)) {
-            console.log(`[API] Warm Handoff: Hijacking turn ${hijackedTurnId} for tool result`);
+            console.log(`[API] Warm Handoff: Hijacking turn ${hijackedTurnId} for tool result. Active slots: ${currentlyRunning}/${MAX_CONCURRENT_CLI}`);
             const parked = parkedTurns.get(hijackedTurnId);
 
             // 1. Update callbacks to pipe output to THIS response
@@ -491,6 +501,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 });
             } finally {
                 parkedTurns.delete(turnId);
+                console.log(`[Turn ${turnId}] Concluded. Active: ${currentlyRunning}/${MAX_CONCURRENT_CLI}, Parked: ${parkedTurns.size}`);
                 taskResolve();
                 ipcServer.close();
                 if (process.platform !== 'win32') {

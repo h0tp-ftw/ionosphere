@@ -76,7 +76,7 @@ async function setupEnvAndAuth(isNative, composeCmd) {
 
             const prompt = "you have been run as part of an auth script, and if you generated a response, it has succeeded. please tell the user, Auth check complete! Please type /quit to return to the installer if the CLI is still interactive.";
             // Pass command as a single string when using shell: true to avoid DEP0190
-            spawnSync(`gemini -p "${prompt}"`, { stdio: 'inherit', shell: true });
+            spawnSync(`gemini "${prompt}"`, { stdio: 'inherit', shell: true });
         }
     } else {
         console.log("\nContainer mode selected. Building Image...");

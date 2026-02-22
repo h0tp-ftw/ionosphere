@@ -138,9 +138,12 @@ export class GeminiController {
                         const content = (typeof json.content === 'object') ? json.content.text : json.content;
                         if (content) {
                             // Intercept "leaked" tool calls that the model might write as text heritage
-                            const actionMatch = content.match(/\[ACTION: Called tool '([^']+)' with args: (.*)\]/s);
-                            if (actionMatch) {
-                                const [_, toolName, argsStr] = actionMatch;
+                            const actionRegex = /\[ACTION: Called tool '([^']+)' with args: (.*?)\]/gs;
+                            let match;
+                            let cleanedContent = content;
+
+                            while ((match = actionRegex.exec(content)) !== null) {
+                                const [fullMatch, toolName, argsStr] = match;
                                 console.log(`[GeminiController] Intercepted leaked tool call in text: ${toolName}`);
                                 if (activeCallbacks.onToolCall) {
                                     activeCallbacks.onToolCall({
@@ -149,8 +152,12 @@ export class GeminiController {
                                         arguments: argsStr.trim()
                                     });
                                 }
-                            } else {
-                                if (activeCallbacks.onText) activeCallbacks.onText(content);
+                            }
+
+                            // Remove the leaked tool calls from the text before sending it to the client
+                            cleanedContent = content.replace(actionRegex, '').trim();
+                            if (cleanedContent && activeCallbacks.onText) {
+                                activeCallbacks.onText(cleanedContent);
                             }
                         }
 
@@ -162,11 +169,11 @@ export class GeminiController {
                             console.log(`[GeminiController] Transparently executing native tool: ${toolName}`);
                             if (activeCallbacks.onEvent) activeCallbacks.onEvent(json);
                         } else {
-                            if (activeCallbacks.onToolCall) activeCallbacks.onToolCall({
-                                id: json.tool_id || json.id || `call_${randomUUID().substring(0, 8)}`,
-                                name: toolName,
-                                arguments: JSON.stringify(json.parameters ?? json.arguments ?? {})
-                            });
+                            // Non-transparent tools (MCP tools) are handled via the ionosphere-tool-bridge and IPC.
+                            // We do NOT dispatch onToolCall here to avoid double-dispatching to the client.
+                            // The IPC server in index.js will handle the actual dispatch and hijacking.
+                            console.log(`[GeminiController] Suppressing redundant JSON-stream dispatch for tool: ${toolName}`);
+                            if (activeCallbacks.onEvent) activeCallbacks.onEvent(json);
                         }
 
                     } else if (json.type === 'error') {

@@ -388,28 +388,55 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
         // --- HANDOFF CASE ---
         if (hijackedTurnId && parkedTurns.has(hijackedTurnId)) {
-            console.log(`[API] Warm Handoff: Hijacking turn ${hijackedTurnId} for tool result. Active slots: ${currentlyRunning}/${MAX_CONCURRENT_CLI}`);
             const parked = parkedTurns.get(hijackedTurnId);
+            const isToolContinuation = lastMsg && (lastMsg.role === 'tool' || lastMsg.role === 'function');
+
+            if (isToolContinuation) {
+                console.log(`[API] Warm Handoff: Hijacking turn ${hijackedTurnId} for tool result resolution.`);
+            } else {
+                console.log(`[API] Warm Handoff: Hijacking turn ${hijackedTurnId} as Proxy (Retry).`);
+            }
 
             // 1. Update callbacks to pipe output to THIS response
             controller.updateCallbacks(hijackedTurnId, { onText, onToolCall, onError, onResult });
 
-            // 2. Unblock the CLI via IPC
-            const toolContent = lastMsg.content;
-            const callId = lastMsg.tool_call_id;
-            const shortKey = callId?.startsWith('call_') ? callId.substring(5) : callId;
-            let resolved = false;
-            for (const [callKey] of pendingToolCalls.entries()) {
-                if (callKey.startsWith(shortKey)) {
-                    resolveToolCall(callKey, toolContent);
-                    resolved = true;
-                    break;
+            // 2. Resolve or Re-emit
+            if (isToolContinuation) {
+                const toolContent = lastMsg.content;
+                const callId = lastMsg.tool_call_id;
+                const shortKey = callId?.startsWith('call_') ? callId.substring(5) : callId;
+                let resolved = false;
+                for (const [callKey] of pendingToolCalls.entries()) {
+                    if (callKey.startsWith(shortKey)) {
+                        resolveToolCall(callKey, toolContent);
+                        resolved = true;
+                        break;
+                    }
                 }
-            }
 
-            if (!resolved) {
-                console.warn(`[API] Could not find pending tool call for ID ${callId}`);
-                return res.status(404).json({ error: "Tool call not found or already resolved" });
+                if (!resolved) {
+                    console.warn(`[API] Could not find pending tool call for ID ${callId}`);
+                    return res.status(404).json({ error: "Tool call not found or already resolved" });
+                }
+            } else {
+                // Proxy Hijack: Re-emit the pending tool call to the NEW requester
+                let reemitted = false;
+                for (const [callKey, pending] of pendingToolCalls.entries()) {
+                    if (pending.turnId === hijackedTurnId) {
+                        const callId = `call_${callKey.substring(0, 8)}`;
+                        console.log(`[API] Proxy Hijack: Re-emitting call ${callId} (${pending.name})`);
+                        onToolCall({
+                            id: callId,
+                            name: pending.name,
+                            arguments: pending.arguments
+                        });
+                        reemitted = true;
+                        break;
+                    }
+                }
+                if (!reemitted) {
+                    console.warn(`[API] Proxy Hijack: No pending tool call found for Turn ${hijackedTurnId}. Falling back to wait.`);
+                }
             }
 
             // 3. Await the conclusion of the TASK from the new request side
@@ -497,7 +524,12 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                         if (msg.event === 'tool_call') {
                             const callKey = randomUUID();
                             const callId = `call_${callKey.substring(0, 8)}`;
-                            pendingToolCalls.set(callKey, { socket, turnId });
+                            pendingToolCalls.set(callKey, {
+                                socket,
+                                turnId,
+                                name: msg.name,
+                                arguments: msg.arguments
+                            });
 
                             // Map the turn to 'parked' so next request can hijack it
                             const currentParked = parkedTurns.get(turnId);

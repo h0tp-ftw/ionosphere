@@ -44,6 +44,41 @@ Ionosphere is designed for workflows with:
 ```bash
 npm run setup
 ```
+---
+
+## Authentication
+
+Configure authentication before running. The setup script handles this interactively.
+
+### OAuth (Google Account - Gemini CLI / Code Assist limits)
+
+```bash
+gemini auth login
+# or trigger inline:
+gemini -p "Hi"
+```
+
+For settings.json enforcement, the setup injects:
+```json
+{ "auth": { "enforcedAuthType": "oauth-personal" } }
+```
+
+### API Key (Google AI Studio)
+
+Set in `.env`:
+```env
+GEMINI_API_KEY=your-key-here
+```
+
+### Vertex AI (Google Cloud)
+
+Set in `.env`:
+```env
+GOOGLE_API_KEY=your-key-here
+GOOGLE_GENAI_USE_VERTEXAI=true
+GOOGLE_CLOUD_PROJECT=your-project
+GOOGLE_CLOUD_LOCATION=us-central1
+```
 
 ---
 
@@ -65,8 +100,8 @@ Any of the following model identifiers can be passed in the `model` field of the
 - `auto-gemini-2.5` (Auto-selecting Gemini 2.5)
 - `gemini-3-pro-preview`
 - `gemini-3-flash-preview`
-- `gemini-2.5-flash`
 - `gemini-2.5-pro`
+- `gemini-2.5-flash`
 - `gemini-2.5-flash-lite` (Default)
 
 ---

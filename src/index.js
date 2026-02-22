@@ -44,8 +44,21 @@ const getHistoryHash = (messages) => {
  */
 const getConversationFingerprint = (messages) => {
     // Stable Thread ID: based on the FIRST user message and system prompt
-    const system = messages.find(m => m.role === 'system')?.content || "";
-    const firstUser = messages.find(m => m.role === 'user')?.content || "";
+    const systemMsg = messages.find(m => m.role === 'system');
+    const firstUserMsg = messages.find(m => m.role === 'user');
+
+    const extractText = (content) => {
+        if (!content) return "";
+        if (typeof content === 'string') return content;
+        if (Array.isArray(content)) {
+            return content.map(p => (typeof p === 'object' && p.type === 'text') ? p.text : "").join("");
+        }
+        return "";
+    };
+
+    const system = extractText(systemMsg?.content);
+    const firstUser = extractText(firstUserMsg?.content);
+
     return createHash('sha256').update(`${system.substring(0, 100)}:${firstUser.substring(0, 500)}`).digest('hex').substring(0, 12);
 };
 

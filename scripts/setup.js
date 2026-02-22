@@ -51,7 +51,9 @@ async function setupEnvAndAuth(isNative, composeCmd) {
         console.log(`✅ .env file already exists at ${envPath}.`);
         const overwrite = await question("Do you want to overwrite it? (y/N): ");
         if (overwrite.toLowerCase() !== 'y') {
-            return;
+            const currentEnv = fs.readFileSync(envPath, 'utf-8');
+            const match = currentEnv.match(/^API_KEY=(.*)$/m);
+            return match ? match[1] : undefined;
         }
     }
 

@@ -43,12 +43,10 @@ const getHistoryHash = (messages) => {
  * Useful for catching retries that might have slightly different history.
  */
 const getConversationFingerprint = (messages) => {
-    // Look for the last 3 user messages
-    const userMsgs = messages.filter(m => m.role === 'user');
-    const lastUser = userMsgs[userMsgs.length - 1]?.content || "";
-    const msgCount = messages.length;
-    // Hash the last user message and the message count
-    return createHash('sha256').update(`${msgCount}:${lastUser}`).digest('hex').substring(0, 12);
+    // Stable Thread ID: based on the FIRST user message and system prompt
+    const system = messages.find(m => m.role === 'system')?.content || "";
+    const firstUser = messages.find(m => m.role === 'user')?.content || "";
+    return createHash('sha256').update(`${system.substring(0, 100)}:${firstUser.substring(0, 500)}`).digest('hex').substring(0, 12);
 };
 
 const logRequestForensics = (req) => {
@@ -260,10 +258,10 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         if (!hijackedTurnId) {
             let waitAttempts = 0;
             const MAX_WAIT_ATTEMPTS = 60; // 30 seconds max
-            while (activeTurnsByHash.has(historyHash)) {
-                const existingTurnId = activeTurnsByHash.get(historyHash);
+            while (activeTurnsByHash.has(fingerprint) || activeTurnsByHash.has(historyHash)) {
+                const existingTurnId = activeTurnsByHash.get(fingerprint) || activeTurnsByHash.get(historyHash);
                 if (process.env.GEMINI_DEBUG_HANDOFF === 'true') {
-                    console.log(`[Queue] Conversation ${historyHash} already has active turn ${existingTurnId}. Waiting... (${waitAttempts})`);
+                    console.log(`[Queue] Thread ${fingerprint} already has active turn ${existingTurnId}. Waiting... (${waitAttempts})`);
                 }
 
                 // If it parks while we are waiting, we can hijack it!
@@ -321,6 +319,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         const responseModel = req.body.model || process.env.GEMINI_MODEL || "gemini-2.5-flash-lite";
 
         const onText = (text) => {
+            if (responseSent) return;
             if (process.env.GEMINI_DEBUG_RESPONSES === 'true') {
                 console.log(`[Turn ${turnId}] SSE Text Chunk: ${text.substring(0, 50)}...`);
             }
@@ -338,6 +337,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         };
 
         const onToolCall = (info) => {
+            if (responseSent) return;
             console.log(`[Turn ${turnId}] Dispatching Tool Call: ${info.name} (${info.id})`);
             if (isStreaming) {
                 sendChunk({
@@ -378,6 +378,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         };
 
         const onError = (err) => {
+            if (responseSent) return;
             const errorObj = {
                 message: typeof err === 'string' ? err : (err.message || "Unknown error"),
                 type: "internal_error",
@@ -394,6 +395,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         };
 
         const onResult = (json) => {
+            if (responseSent) return;
             finalStats = json.stats || {};
             if (isStreaming) {
                 sendChunk({
@@ -448,21 +450,30 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
             if (byHash) {
                 hijackedTurnId = byHash;
-                console.log(`[API] Handoff Match: Exact History (Hash=${historyHash.substring(0, 8)}) -> Turn ${hijackedTurnId}`);
+                console.log(`[HIJACK] Exact Hash Match (Thread Safe): Turn ${hijackedTurnId}`);
             } else if (byFinger) {
                 hijackedTurnId = byFinger;
-                console.log(`[API] Handoff Match: Stable Fingerprint (${fingerprint}) -> Turn ${hijackedTurnId}`);
+                console.log(`[HIJACK] Fingerprint Anchor Match (Stable Continuity): Turn ${hijackedTurnId}`);
+            } else {
+                if (process.env.GEMINI_DEBUG_HANDOFF === 'true') {
+                    console.log(`[HIJACK] No match for Fingerprint=${fingerprint} or Hash=${historyHash.substring(0, 8)}`);
+                }
             }
         }
 
         // --- WAIT-AND-HIJACK CASE ---
         // If a turn is active but NOT yet parked, wait for it to park.
         if (hijackedTurnId && !parkedTurns.has(hijackedTurnId)) {
-            console.log(`[API] Wait-and-Hijack: Turn ${hijackedTurnId} is running but not parked. Polling via ${fingerprint}...`);
+            console.log(`[API] Wait-and-Hijack: Turn ${hijackedTurnId} is running. Polling for parking...`);
             let waitStart = Date.now();
             while (hijackedTurnId && !parkedTurns.has(hijackedTurnId) && (Date.now() - waitStart < 30000)) {
                 await new Promise(r => setTimeout(r, 500));
-                // Re-check if it's still active (might have finished instead of parking)
+                // If it parks while we wait, we are good to go
+                if (parkedTurns.has(hijackedTurnId)) {
+                    console.log(`[HIJACK] Wait-and-Hijack: Turn ${hijackedTurnId} parked! Proceeding to Handoff.`);
+                    break;
+                }
+                // Refresh our view of who is active for this thread
                 hijackedTurnId = activeTurnsByHash.get(historyHash) || activeTurnsByHash.get(fingerprint);
             }
         }
@@ -626,11 +637,17 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                             }
 
                             // Trigger dispatcher (Handoff logic will pick this up when the CLIENT calls back)
-                            controller.callbacksByTurn.get(turnId)?.onToolCall({
-                                id: callId,
-                                name: msg.name,
-                                arguments: msg.arguments
-                            });
+                            const callbacks = controller.callbacksByTurn.get(turnId);
+                            if (callbacks) {
+                                if (callbacks.onPark) {
+                                    callbacks.onPark({ id: callId, name: msg.name, arguments: msg.arguments });
+                                }
+                                callbacks.onToolCall({
+                                    id: callId,
+                                    name: msg.name,
+                                    arguments: msg.arguments
+                                });
+                            }
                         }
                     } catch (e) {
                         console.error(`[IPC] Parse error on turn ${turnId}:`, e);
@@ -684,6 +701,51 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
         generateConfig({ targetPath: settingsPath, mcpServers, modelName: req.body.model });
 
+        const onPark = (msg) => {
+            if (responseSent) return;
+            console.log(`[Turn ${turnId}] Yielding response on Parked state.`);
+            if (isStreaming) {
+                sendChunk({
+                    id: `chatcmpl-stream`,
+                    choices: [{
+                        index: 0,
+                        delta: {
+                            tool_calls: [{
+                                id: msg.id,
+                                name: msg.name,
+                                arguments: msg.arguments
+                            }]
+                        },
+                        finish_reason: "tool_calls"
+                    }]
+                });
+                res.write('data: [DONE]\n\n');
+                res.end();
+            } else {
+                res.json({
+                    id: `chatcmpl-${turnId}`,
+                    object: "chat.completion",
+                    created: Math.floor(Date.now() / 1000),
+                    model: responseModel,
+                    choices: [{
+                        index: 0,
+                        message: {
+                            role: "assistant",
+                            content: accumulatedText,
+                            tool_calls: [{
+                                id: msg.id,
+                                type: "function",
+                                function: { name: msg.name, arguments: msg.arguments }
+                            }]
+                        },
+                        finish_reason: "tool_calls"
+                    }],
+                    usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+                });
+            }
+            responseSent = true;
+        };
+
         const executeTask = async () => {
             let taskResolve;
             const executePromise = new Promise(r => taskResolve = r);
@@ -695,7 +757,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 console.log(`[Turn ${turnId}] Executing for fingerprint: ${fingerprint}`);
 
                 await controller.sendPrompt(turnId, (conversationPromptSection || conversationPrompt).trim(), turnTempDir, settingsPath, systemMessage.trim(), {
-                    onText, onToolCall, onError, onResult, onEvent
+                    onText, onToolCall, onError, onResult, onEvent, onPark
                 }, {
                     IONOSPHERE_IPC: ipcPath,
                     IONOSPHERE_HISTORY_HASH: historyHash

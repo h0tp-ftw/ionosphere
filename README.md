@@ -61,6 +61,9 @@ API_KEY=iono_sk_...
 
 The setup script displays this key. Copy it into your AI app's **API Key** field and set the **Base URL** to `http://localhost:3000/v1`.
 
+> [!TIP]
+> Lost your key? Simply run `npm run setup` again and choose **not** to overwrite your `.env` file. The script will retrieve and display your current API key.
+
 ### 2. Provider Authentication (Ionosphere to Google)
 
 Ionosphere supports three ways to authenticate the underlying Gemini CLI with Google:

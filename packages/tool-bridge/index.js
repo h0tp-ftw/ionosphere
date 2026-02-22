@@ -100,10 +100,11 @@ function dispatchToolCall(name, args) {
 
         client.on('error', (err) => reject(new Error(`[ToolBridge] IPC error: ${err.message}`)));
 
+        const TURN_TIMEOUT_MS = parseInt(process.env.TURN_TIMEOUT_MS) || 120 * 60 * 1000;
         const t = setTimeout(() => {
             client.destroy();
-            reject(new Error('[ToolBridge] IPC reply timed out after 10 minutes.'));
-        }, 10 * 60 * 1000);
+            reject(new Error(`[ToolBridge] IPC reply timed out after ${TURN_TIMEOUT_MS / 60000} minutes.`));
+        }, TURN_TIMEOUT_MS);
 
         client.on('close', () => clearTimeout(t));
     });

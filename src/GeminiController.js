@@ -124,12 +124,13 @@ export class GeminiController {
 
                 this.processes.set(turnId, proc);
 
-                // 10-minute timeout for ReAct loops
+                // 2-hour timeout for ReAct loops (human-in-the-loop scale)
+                const TURN_TIMEOUT_MS = parseInt(process.env.TURN_TIMEOUT_MS) || 120 * 60 * 1000;
                 const timeout = setTimeout(() => {
-                    console.error(`[GeminiController] Turn ${turnId} timed out. Killing.`);
+                    console.error(`[GeminiController] Turn ${turnId} timed out after ${TURN_TIMEOUT_MS / 60000}m. Killing.`);
                     proc.kill();
                     reject(new Error('Turn timed out'));
-                }, 10 * 60 * 1000);
+                }, TURN_TIMEOUT_MS);
 
                 accumulator.on('line', (json) => {
                     const activeCallbacks = this.callbacksByTurn.get(turnId) || {};

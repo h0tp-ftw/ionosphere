@@ -41,8 +41,11 @@ async function run() {
             }
 
             if (composeCmd) {
-                console.log(`Executing: ${composeCmd} up -d --build`);
-                spawnSync(composeCmd, ['up', '-d', '--build'], { stdio: 'inherit', shell: true });
+                console.log(`\n🏗️  Rebuilding Ionosphere image...`);
+                spawnSync(`${composeCmd} build`, { stdio: 'inherit', shell: true });
+
+                console.log(`\n🚀 Restarting bridge container...`);
+                spawnSync(`${composeCmd} up -d`, { stdio: 'inherit', shell: true });
                 console.log("\n✅ Containers updated and restarted.");
             } else {
                 console.log("\n⚠️ No container engine found. Skipping container rebuild.");

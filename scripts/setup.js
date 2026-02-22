@@ -199,30 +199,33 @@ async function main() {
         rl.close();
 
         if (startNow.toLowerCase() === 'y') {
-            const cmd = isNative ? 'npm start' : `${composeCmd} up -d --build`;
             console.log(`\n🚀 Starting the Ionosphere server...`);
-            if (!isNative) console.log(`⏳ (This may take a minute if the image needs building)\n`);
 
-            // Execute the command in the background for containers, or synchronously for native
+            // Start the server
             if (isNative) {
-                spawnSync(cmd, { stdio: 'inherit', shell: true });
+                console.log(`\n🚀 Starting the Ionosphere server...\n`);
+                spawnSync('npm start', { stdio: 'inherit', shell: true });
             } else {
-                console.log(`⏳ Launching Podman build & start...`);
-                // Using spawn for the final background start to avoid terminal blocking
-                const child = spawn(cmd, {
-                    stdio: 'inherit',
-                    shell: true,
-                    detached: false // Keep it attached to see the initial build output if any
-                });
+                console.log(`\n🏗️  Building Ionosphere image...`);
+                console.log(`⏳ (This may take a few minutes for the first build or code changes)\n`);
 
-                child.on('exit', (code) => {
-                    if (code === 0) {
-                        console.log(`\n✅ Server is starting up in the background.`);
+                // First, do the build so the user sees all the progress
+                const buildResult = spawnSync(`${composeCmd} build`, { stdio: 'inherit', shell: true });
+
+                if (buildResult.status === 0) {
+                    console.log(`\n🚀 Launching detached bridge container...`);
+                    // Now run 'up -d' which will be instant since the build is done
+                    const upResult = spawnSync(`${composeCmd} up -d`, { stdio: 'inherit', shell: true });
+
+                    if (upResult.status === 0) {
+                        console.log(`\n✅ Server is running in the background.`);
                         console.log(`📝 To view logs, run: ${composeCmd} logs -f\n`);
                     } else {
-                        console.error(`\n❌ Startup command exited with code ${code}.`);
+                        console.error(`\n❌ Failed to launch containers.`);
                     }
-                });
+                } else {
+                    console.error(`\n❌ Build failed. Please check the errors above.`);
+                }
             }
         }
 

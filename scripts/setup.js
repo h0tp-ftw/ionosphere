@@ -71,9 +71,10 @@ async function setupEnvAndAuth(isNative, composeCmd) {
             process.exit(1);
         } else {
             console.log("\n`gemini` is installed locally. Triggering Native OAuth login flow...");
-            console.log("NOTE: A browser window will open to authenticate. Once done, type /quit to return to this installer.");
-            // Use positional prompt instead of -p to avoid flag conflicts in some shells
-            spawnSync('gemini', ['"Auth check complete! Please type /quit to return to the installer."'], { stdio: 'inherit', shell: true });
+            console.log("NOTE: A browser window will open to authenticate. Once done, you will enter the interactive CLI.");
+            console.log("Type /quit in the Gemini CLI to return to this installer.\n");
+
+            spawnSync('gemini', [], { stdio: 'inherit', shell: true });
         }
     } else {
         console.log("\nContainer mode selected. Building Image...");
@@ -82,9 +83,9 @@ async function setupEnvAndAuth(isNative, composeCmd) {
 
         console.log("\nTriggering Isolated Container OAuth Flow...");
         console.log("The Gemini CLI will launch inside the container and open a browser link for authentication.");
-        console.log("Once authenticated, type /quit to exit the CLI and return to this installer.");
-        // Use positional prompt instead of -p to avoid flag conflicts
-        spawnSync(`${composeCmd}`, ['run', '--rm', 'ionosphere', 'gemini', '"Auth check complete! Please type /quit to return to the installer."'], { stdio: 'inherit', shell: true });
+        console.log("Once authenticated, you will enter the interactive CLI. Type /quit to return to this installer.\n");
+
+        spawnSync(`${composeCmd}`, ['run', '--rm', 'ionosphere', 'gemini'], { stdio: 'inherit', shell: true });
     }
 
     fs.writeFileSync(envPath, envContent, 'utf-8');

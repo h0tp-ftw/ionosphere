@@ -179,10 +179,18 @@ export class GeminiController {
 
                         const isAuthError = (/(please log in|auth|authorization)/i.test(stderrText) && !/unauthorized tool call/i.test(stderrText)) ||
                             (/credentials/i.test(stderrText) && !/loaded cached credentials/i.test(stderrText));
+                        const isResourceError = /RESOURCE_EXHAUSTED|rateLimitExceeded|429|No capacity available/i.test(stderrText);
+                        const isPolicyError = /denied by policy|unauthorized tool call|not available to this agent/i.test(stderrText);
 
                         if (isAuthError) {
                             const errorMsg = `Fatal: CLI Auth Expired or Missing. Raw: ${stderrText}`;
                             if (activeCallbacks.onError) activeCallbacks.onError({ type: 'error', message: errorMsg, code: 'AUTH_EXPIRED' });
+                        } else if (isResourceError) {
+                            const errorMsg = `Fatal: Gemini API Quota/Capacity Exhausted (429). Raw: ${stderrText}`;
+                            if (activeCallbacks.onError) activeCallbacks.onError({ type: 'error', message: errorMsg, code: 'RATE_LIMIT' });
+                        } else if (isPolicyError) {
+                            const errorMsg = `Fatal: Tool use or action denied by policy. Raw: ${stderrText}`;
+                            if (activeCallbacks.onError) activeCallbacks.onError({ type: 'error', message: errorMsg, code: 'POLICY_DENIED' });
                         }
                     }
                 });

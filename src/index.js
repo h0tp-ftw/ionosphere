@@ -31,10 +31,43 @@ const sanitizePromptText = (text) => {
 
 /**
  * Computes a hash of the conversation messages to identify a thread.
+ * Traditional hash is very sensitive.
  */
 const getHistoryHash = (messages) => {
     const serialized = JSON.stringify(messages.map(m => ({ role: m.role, content: m.content, name: m.name, tool_call_id: m.tool_call_id })));
     return createHash('sha256').update(serialized).digest('hex');
+};
+
+/**
+ * A more stable identifier that ignores slight metadata or "thinking" changes.
+ * Useful for catching retries that might have slightly different history.
+ */
+const getConversationFingerprint = (messages) => {
+    // Look for the last 3 user messages
+    const userMsgs = messages.filter(m => m.role === 'user');
+    const lastUser = userMsgs[userMsgs.length - 1]?.content || "";
+    const msgCount = messages.length;
+    // Hash the last user message and the message count
+    return createHash('sha256').update(`${msgCount}:${lastUser}`).digest('hex').substring(0, 12);
+};
+
+const logRequestForensics = (req) => {
+    if (process.env.GEMINI_DEBUG_HANDOFF !== 'true') return;
+    const { method, url, headers, body } = req;
+    const msgCount = body.messages?.length || 0;
+    const lastMsg = body.messages?.[msgCount - 1];
+    console.log(`[FORENSICS] ${method} ${url}`);
+    console.log(`[FORENSICS] Headers: ${JSON.stringify({
+        'user-agent': headers['user-agent'],
+        'x-request-id': headers['x-request-id'],
+        'content-length': headers['content-length']
+    })}`);
+    console.log(`[FORENSICS] Message Count: ${msgCount}`);
+    if (lastMsg) {
+        console.log(`[FORENSICS] Last Msg Role: ${lastMsg.role}`);
+        const contentStr = typeof lastMsg.content === 'string' ? lastMsg.content : JSON.stringify(lastMsg.content);
+        console.log(`[FORENSICS] Last Msg Content (first 100 chars): ${contentStr.substring(0, 100)}...`);
+    }
 };
 
 // Ensure base temp directory exists
@@ -179,12 +212,29 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             return res.status(400).json({ error: "Missing 'messages' array" });
         }
 
+        logRequestForensics(req);
+
         const historyHash = getHistoryHash(messages);
+        const fingerprint = getConversationFingerprint(messages);
+        const conversationPrompt = messages.map(m => {
+            if (m.role === 'user') return `USER: ${m.content}`;
+            if (m.role === 'assistant') return `ASSISTANT: ${m.content}`;
+            if (m.role === 'tool') return `[TOOL RESULT]: ${m.content}`;
+            return `${m.role.toUpperCase()}: ${m.content}`;
+        }).join('\n\n');
 
         // 2. Identify "Handoff" (Warm Stateless Continuity)
-        // If the last message is a TOOL result, check if we have a parked turn for it.
         let lastMsg = messages[messages.length - 1];
         let hijackedTurnId = null;
+
+        // NEW: Check if this fingerprint already has an active turn
+        if (!hijackedTurnId) {
+            hijackedTurnId = activeTurnsByHash.get(fingerprint);
+            if (hijackedTurnId) {
+                console.log(`[API] Fingerprint match! ${fingerprint} -> Turn ${hijackedTurnId}`);
+            }
+        }
+
         if (lastMsg && (lastMsg.role === 'tool' || lastMsg.role === 'function')) {
             const callId = lastMsg.tool_call_id;
             const shortKey = callId?.startsWith('call_') ? callId.substring(5) : callId;
@@ -271,6 +321,9 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         const responseModel = req.body.model || process.env.GEMINI_MODEL || "gemini-2.5-flash-lite";
 
         const onText = (text) => {
+            if (process.env.GEMINI_DEBUG_RESPONSES === 'true') {
+                console.log(`[Turn ${turnId}] SSE Text Chunk: ${text.substring(0, 50)}...`);
+            }
             if (isStreaming) {
                 sendChunk({
                     id: `chatcmpl-stream`,
@@ -389,21 +442,28 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         };
 
         // --- CONCURRENCY GATING ---
-        // historyHash and hijackedTurnId are already declared at the top of the request handler.
-        // We update/refine them here.
         if (!hijackedTurnId) {
-            hijackedTurnId = activeTurnsByHash.get(historyHash);
+            const byHash = activeTurnsByHash.get(historyHash);
+            const byFinger = activeTurnsByHash.get(fingerprint);
+
+            if (byHash) {
+                hijackedTurnId = byHash;
+                console.log(`[API] Handoff Match: Exact History (Hash=${historyHash.substring(0, 8)}) -> Turn ${hijackedTurnId}`);
+            } else if (byFinger) {
+                hijackedTurnId = byFinger;
+                console.log(`[API] Handoff Match: Stable Fingerprint (${fingerprint}) -> Turn ${hijackedTurnId}`);
+            }
         }
 
         // --- WAIT-AND-HIJACK CASE ---
         // If a turn is active but NOT yet parked, wait for it to park.
         if (hijackedTurnId && !parkedTurns.has(hijackedTurnId)) {
-            console.log(`[API] Wait-and-Hijack: Turn ${hijackedTurnId} is running but not parked. Waiting...`);
+            console.log(`[API] Wait-and-Hijack: Turn ${hijackedTurnId} is running but not parked. Polling via ${fingerprint}...`);
             let waitStart = Date.now();
             while (hijackedTurnId && !parkedTurns.has(hijackedTurnId) && (Date.now() - waitStart < 30000)) {
                 await new Promise(r => setTimeout(r, 500));
                 // Re-check if it's still active (might have finished instead of parking)
-                hijackedTurnId = activeTurnsByHash.get(historyHash);
+                hijackedTurnId = activeTurnsByHash.get(historyHash) || activeTurnsByHash.get(fingerprint);
             }
         }
 
@@ -594,6 +654,11 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             });
         });
 
+        // Write raw request JSON for offline forensics
+        if (process.env.GEMINI_DEBUG_PROMPTS === 'true') {
+            fs.writeFileSync(path.join(turnTempDir, 'request.json'), JSON.stringify(req.body, null, 2));
+        }
+
         // Config
         const settingsPath = path.join(turnTempDir, '.gemini', 'settings.json');
         const openAiTools = req.body.tools || null;
@@ -625,7 +690,10 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             globalPromiseMap.set(turnId, executePromise);
 
             try {
-                activeTurnsByHash.set(historyHash, turnId);
+                // Use fingerprint for concurrency gating to catch retries/metadata shifts
+                activeTurnsByHash.set(fingerprint, turnId);
+                console.log(`[Turn ${turnId}] Executing for fingerprint: ${fingerprint}`);
+
                 await controller.sendPrompt(turnId, (conversationPromptSection || conversationPrompt).trim(), turnTempDir, settingsPath, systemMessage.trim(), {
                     onText, onToolCall, onError, onResult, onEvent
                 }, {
@@ -640,9 +708,11 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                     }
                 }
             } finally {
-                console.log(`[Turn ${turnId}] Concluded. Active: ${currentlyRunning}/${MAX_CONCURRENT_CLI}, Parked: ${parkedTurns.size}`);
-                if (activeTurnsByHash.get(historyHash) === turnId) {
-                    activeTurnsByHash.delete(historyHash);
+                const parkedCount = parkedTurns.size;
+                console.log(`[Turn ${turnId}] Concluded. Active: ${currentlyRunning}/${MAX_CONCURRENT_CLI}, Parked: ${parkedCount}`);
+
+                if (activeTurnsByHash.get(fingerprint) === turnId) {
+                    activeTurnsByHash.delete(fingerprint);
                 }
                 parkedTurns.delete(turnId);
                 globalPromiseMap.delete(turnId);

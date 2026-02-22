@@ -187,7 +187,7 @@ export class GeminiController {
                                         });
                                     }
                                 } else {
-                                    console.log(`[GeminiController] Suppressing echo-leak for tool: ${toolName} (already active)`);
+                                    console.log(`[GeminiController] Suppressing echo-leak for tool: ${toolName}. Current turn toolUsage: [${Array.from(this.processes.get(turnId)?.toolUsage || []).join(', ')}]`);
                                 }
                             }
 

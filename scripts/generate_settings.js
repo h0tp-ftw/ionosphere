@@ -23,6 +23,13 @@ export function generateConfig(options = {}) {
         telemetry: {
             enabled: false
         },
+        skills: {
+            enabled: false
+        },
+        experimental: {
+            enableAgents: false,
+            previewFeatures: process.env.GEMINI_ENABLE_PREVIEW !== 'false'
+        },
         model: {
             name: modelName || process.env.GEMINI_MODEL || "gemini-2.5-flash-lite",
             maxSessionTurns: -1  // Unlimited — prevents CLI from truncating session history
@@ -52,7 +59,9 @@ export function generateConfig(options = {}) {
                         "ask_user",
                         "enter_plan_mode",
                         "exit_plan_mode",
-                        "get_internal_docs"
+                        "get_internal_docs",
+                        "codebase_investigator",
+                        "cli_help_agent"
                     ];
                 }
 

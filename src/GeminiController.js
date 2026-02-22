@@ -108,6 +108,8 @@ export class GeminiController {
                 const spawnEnv = {
                     ...process.env,
                     GEMINI_SETTINGS_JSON: settingsPath,
+                    GEMINI_PROMPT_AGENTSKILLS: '0',
+                    GEMINI_PROMPT_AGENTCONTEXTS: '0',
                     ...extraEnv
                 };
 

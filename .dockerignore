@@ -1,4 +1,4 @@
-packages/
+packages/gemini-cli-repo/
 node_modules/
 **/node_modules/
 **/.git/

@@ -49,6 +49,8 @@ Ionosphere prioritizes both **Privacy** (no persistent state) and **Performance*
 
 This allows the Gemini CLI to keep its internal context "warm" during a tool loop without ever writing that context to a database.
 
+5. **Wait-and-Hijack**: If a second request (e.g., a timeout retry) arrives for a conversation that already has an active process but hasn't "parked" yet, the bridge will **WAIT** (polling for up to 30s) for the first process to park or finish instead of spawning a redundant context-heavy process. This prevents "Double Spawn" token usage spikes.
+
 ---
 
 ## Request Lifecycle

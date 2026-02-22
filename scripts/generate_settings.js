@@ -32,7 +32,7 @@ export function generateConfig(options = {}) {
         },
         model: {
             name: modelName || process.env.GEMINI_MODEL || "gemini-2.5-flash-lite",
-            maxSessionTurns: -1  // Unlimited — prevents CLI from truncating session history
+            maxSessionTurns: parseInt(process.env.GEMINI_MAX_TURNS) || 12
         },
         tools: {
             exclude: (() => {

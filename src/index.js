@@ -77,6 +77,8 @@ const pendingToolCalls = new Map();
 const parkedTurns = new Map();
 // activeTurnsByHash: historyHash -> turnId (to prevent duplicate CLI for same thread)
 const activeTurnsByHash = new Map();
+// globalPromiseMap: turnId -> executePromise
+const globalPromiseMap = new Map();
 
 const MAX_CONCURRENT_CLI = parseInt(process.env.MAX_CONCURRENT_CLI) || 5;
 let currentlyRunning = 0;
@@ -386,6 +388,25 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             if (heartbeatInterval) clearInterval(heartbeatInterval);
         };
 
+        // --- CONCURRENCY GATING ---
+        // historyHash and hijackedTurnId are already declared at the top of the request handler.
+        // We update/refine them here.
+        if (!hijackedTurnId) {
+            hijackedTurnId = activeTurnsByHash.get(historyHash);
+        }
+
+        // --- WAIT-AND-HIJACK CASE ---
+        // If a turn is active but NOT yet parked, wait for it to park.
+        if (hijackedTurnId && !parkedTurns.has(hijackedTurnId)) {
+            console.log(`[API] Wait-and-Hijack: Turn ${hijackedTurnId} is running but not parked. Waiting...`);
+            let waitStart = Date.now();
+            while (hijackedTurnId && !parkedTurns.has(hijackedTurnId) && (Date.now() - waitStart < 30000)) {
+                await new Promise(r => setTimeout(r, 500));
+                // Re-check if it's still active (might have finished instead of parking)
+                hijackedTurnId = activeTurnsByHash.get(historyHash);
+            }
+        }
+
         // --- HANDOFF CASE ---
         if (hijackedTurnId && parkedTurns.has(hijackedTurnId)) {
             const parked = parkedTurns.get(hijackedTurnId);
@@ -416,7 +437,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
                 if (!resolved) {
                     console.warn(`[API] Could not find pending tool call for ID ${callId}`);
-                    return res.status(404).json({ error: "Tool call not found or already resolved" });
+                    // If we can't find the tool call, it might be a race. Fallback to wait.
                 }
             } else {
                 // Proxy Hijack: Re-emit the pending tool call to the NEW requester
@@ -452,7 +473,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
         // Serialize history (Strict Stateless Narrator)
         let systemMessage = "";
-        let conversationPrompt = "";
+        let conversationPromptSection = ""; // Renamed to avoid shadowed top-level historyHash if any
         let imageCounter = 0;
 
         // Check if the last message is a slash command (for probing)
@@ -460,7 +481,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         const isSlash = lastMsg && lastMsg.role === 'user' && typeof lastMsg.content === 'string' && lastMsg.content.trim().startsWith('/');
 
         if (isSlash) {
-            conversationPrompt = lastMsg.content.trim();
+            conversationPromptSection = lastMsg.content.trim();
         } else {
             for (const msg of req.body.messages) {
                 if (msg.role === 'system') systemMessage += (msg.content || "") + "\n";
@@ -482,23 +503,25 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                         text = sanitizePromptText(text || "");
                     }
 
-                    if (msg.role === 'user') conversationPrompt += `USER: ${text}\n\n`;
+                    if (msg.role === 'user') conversationPromptSection += `USER: ${text}\n\n`;
                     else if (msg.role === 'assistant') {
                         let content = text;
                         if (msg.tool_calls) {
                             for (const tc of msg.tool_calls) {
-                                content += `\n[ACTION: Called tool '${tc.function?.name || tc.name}' with args: ${tc.function?.arguments || tc.arguments}]`;
+                                const callId = tc.id || tc.tool_call_id || 'unknown';
+                                content += `\n<action id="${callId}">Called tool '${tc.function?.name || tc.name}' with args: ${tc.function?.arguments || tc.arguments}</action>`;
                             }
                         }
-                        conversationPrompt += `ASSISTANT: ${content.trim()}\n\n`;
+                        conversationPromptSection += `ASSISTANT: ${content.trim()}\n\n`;
                     } else if (msg.role === 'tool' || msg.role === 'function') {
-                        conversationPrompt += `[TOOL RESULT (${msg.name || msg.tool_call_id})]:\n${text}\n\n`;
+                        const callId = msg.tool_call_id || 'unknown';
+                        conversationPromptSection += `<result id="${callId}">\n${text}\n</result>\n\n`;
                     }
                 }
             }
         }
 
-        console.log(`[API] turnId: ${turnId} - Prompt Stats: System=${systemMessage.length} chars, History=${conversationPrompt.length} chars`);
+        console.log(`[API] turnId: ${turnId} - Prompt Stats: System=${systemMessage.length} chars, History=${conversationPromptSection.length} chars`);
 
         // Debug Persistence: Create directory if needed
         if (process.env.GEMINI_DEBUG_PROMPTS === 'true') {
@@ -531,21 +554,27 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                                 arguments: msg.arguments
                             });
 
-                            // Map the turn to 'parked' so next request can hijack it
-                            const currentParked = parkedTurns.get(turnId);
-                            if (currentParked) {
-                                // Already parked, just need to update tool callback
-                                controller.callbacksByTurn.get(turnId)?.onToolCall({
-                                    id: callId, name: msg.name, arguments: msg.arguments
-                                });
-                            } else {
-                                // This tool call will end the current TURN's HTTP response
-                                controller.callbacksByTurn.get(turnId)?.onToolCall({
-                                    id: callId, name: msg.name, arguments: msg.arguments
+                            // Ensure the turn is marked as PARKED if it wasn't already
+                            if (!parkedTurns.has(turnId)) {
+                                console.log(`[Turn ${turnId}] Parking via IPC tool call: ${msg.name}`);
+                                parkedTurns.set(turnId, {
+                                    controller,
+                                    executePromise: globalPromiseMap.get(turnId), // Use a global map to find the promise
+                                    cleanupWorkspace: () => fs.rmSync(turnTempDir, { recursive: true, force: true }),
+                                    historyHash
                                 });
                             }
+
+                            // Trigger dispatcher (Handoff logic will pick this up when the CLIENT calls back)
+                            controller.callbacksByTurn.get(turnId)?.onToolCall({
+                                id: callId,
+                                name: msg.name,
+                                arguments: msg.arguments
+                            });
                         }
-                    } catch (e) { }
+                    } catch (e) {
+                        console.error(`[IPC] Parse error on turn ${turnId}:`, e);
+                    }
                 }
             });
         });
@@ -593,19 +622,15 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         const executeTask = async () => {
             let taskResolve;
             const executePromise = new Promise(r => taskResolve = r);
-            parkedTurns.set(turnId, {
-                controller,
-                executePromise,
-                cleanupWorkspace: () => fs.rmSync(turnTempDir, { recursive: true, force: true }),
-                historyHash
-            });
+            globalPromiseMap.set(turnId, executePromise);
 
             try {
                 activeTurnsByHash.set(historyHash, turnId);
-                await controller.sendPrompt(turnId, conversationPrompt.trim(), turnTempDir, settingsPath, systemMessage.trim(), {
+                await controller.sendPrompt(turnId, (conversationPromptSection || conversationPrompt).trim(), turnTempDir, settingsPath, systemMessage.trim(), {
                     onText, onToolCall, onError, onResult, onEvent
                 }, {
-                    IONOSPHERE_IPC: ipcPath
+                    IONOSPHERE_IPC: ipcPath,
+                    IONOSPHERE_HISTORY_HASH: historyHash
                 });
 
                 // Final safety for non-streaming multi-tool or parked turns
@@ -620,6 +645,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                     activeTurnsByHash.delete(historyHash);
                 }
                 parkedTurns.delete(turnId);
+                globalPromiseMap.delete(turnId);
                 taskResolve();
                 ipcServer.close();
                 if (process.platform !== 'win32') {

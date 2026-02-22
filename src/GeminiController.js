@@ -132,6 +132,14 @@ export class GeminiController {
                     spawnEnv.GEMINI_SYSTEM_MD = systemPromptPath;
                 }
 
+                if (process.env.GEMINI_DEBUG_PROMPTS === 'true') {
+                    console.log(`[GeminiController] TURN=${turnId} PROMPT_FILE=${tempPromptPath} HASH=${extraEnv.IONOSPHERE_HISTORY_HASH || 'none'}`);
+                    try {
+                        const raw = fs.readFileSync(tempPromptPath, 'utf8');
+                        console.log(`[GeminiController] RAW PROMPT (First 500 chars):\n${raw.substring(0, 500)}...`);
+                    } catch (_) { }
+                }
+
                 const proc = spawn(executable, finalArgs, {
                     cwd: workspacePath,
                     env: spawnEnv,
@@ -139,6 +147,7 @@ export class GeminiController {
                     shell: process.platform === 'win32',
                 });
 
+                proc.toolUsage = new Set(); // Track real tool calls in this turn
                 this.processes.set(turnId, proc);
 
                 // 2-hour timeout for ReAct loops (human-in-the-loop scale)
@@ -156,19 +165,29 @@ export class GeminiController {
                         const content = (typeof json.content === 'object') ? json.content.text : json.content;
                         if (content) {
                             // Intercept "leaked" tool calls that the model might write as text heritage
-                            const actionRegex = /\[ACTION: Called tool '([^']+)' with args: (.*?)\]/gs;
+                            // NEW FORMAT: <action id="...">Called tool '...' with args: ...</action>
+                            const actionRegex = /<action id="([^"]*)">Called tool '([^']+)' with args: (.*?)<\/action>/gs;
                             let match;
                             let cleanedContent = content;
 
                             while ((match = actionRegex.exec(content)) !== null) {
-                                const [fullMatch, toolName, argsStr] = match;
-                                console.log(`[GeminiController] Intercepted leaked tool call in text: ${toolName}`);
-                                if (activeCallbacks.onToolCall) {
-                                    activeCallbacks.onToolCall({
-                                        id: `leak_${randomUUID().substring(0, 8)}`,
-                                        name: toolName,
-                                        arguments: argsStr.trim()
-                                    });
+                                const [fullMatch, callId, toolName, argsStr] = match;
+
+                                // HACK: Only dispatch the leak if we HAVEN'T already seen a real tool call for this name in this turn
+                                // This prevents the "Echo Loop" where history narration triggers a new call.
+                                const alreadySeen = Array.from(this.processes.get(turnId)?.toolUsage || []).includes(toolName);
+
+                                if (!alreadySeen) {
+                                    console.log(`[GeminiController] Intercepted leaked tool call in text: ${toolName} (${callId})`);
+                                    if (activeCallbacks.onToolCall) {
+                                        activeCallbacks.onToolCall({
+                                            id: callId.startsWith('leak_') ? callId : `leak_${callId}`,
+                                            name: toolName,
+                                            arguments: argsStr.trim()
+                                        });
+                                    }
+                                } else {
+                                    console.log(`[GeminiController] Suppressing echo-leak for tool: ${toolName} (already active)`);
                                 }
                             }
 
@@ -181,8 +200,30 @@ export class GeminiController {
 
                     } else if (json.type === 'tool_use' || json.type === 'toolCall') {
                         const toolName = json.tool_name || json.name;
-                        const transparentTools = ['google_web_search'];
+                        const toolArgs = JSON.stringify(json.arguments || {});
 
+                        // Track real usage to suppress "echo leaks"
+                        this.processes.get(turnId)?.toolUsage.add(toolName);
+
+                        // Repeat Breaker Logic (Global per historyHash)
+                        if (extraEnv.IONOSPHERE_HISTORY_HASH) {
+                            const hash = extraEnv.IONOSPHERE_HISTORY_HASH;
+                            if (!this.repeatTracker) this.repeatTracker = new Map();
+                            const key = `${hash}:${toolName}:${toolArgs}`;
+                            const count = (this.repeatTracker.get(key) || 0) + 1;
+                            this.repeatTracker.set(key, count);
+
+                            if (count >= 3) {
+                                console.warn(`[GeminiController] Repeat Breaker: Tool '${toolName}' called 3 times with same args. Terminating loop.`);
+                                const errorMsg = `Loop detected: Model repeated tool '${toolName}' with same arguments 3 times. Terminating for safety.`;
+                                if (activeCallbacks.onError) activeCallbacks.onError({ type: 'error', message: errorMsg, code: 'LOOP_DETECTED' });
+                                if (activeCallbacks.onResult) activeCallbacks.onResult({ type: 'result', text: errorMsg, stats: {} });
+                                proc.kill();
+                                return;
+                            }
+                        }
+
+                        const transparentTools = ['google_web_search'];
                         if (transparentTools.includes(toolName)) {
                             console.log(`[GeminiController] Transparently executing native tool: ${toolName}`);
                             if (activeCallbacks.onEvent) activeCallbacks.onEvent(json);
@@ -240,8 +281,10 @@ export class GeminiController {
                         } else if (isNotFound) {
                             const match = stderrText.match(/Tool "([^"]+)" not found/i);
                             const toolName = match ? match[1] : 'unknown';
-                            const errorMsg = `Error: Tool "${toolName}" not found in this environment. Please use available tools or respond with text.`;
-                            console.log(`[GeminiController] Breaking loop: Tool '${toolName}' not found.`);
+                            const errorMsg = `Fatal: Tool "${toolName}" not found. This environment does not support ${toolName}.`;
+                            console.log(`[GeminiController] Aggressively breaking loop: Tool '${toolName}' not found.`);
+
+                            // 1. Send the result back to the CLI so it doesn't hang
                             if (activeCallbacks.onEvent) {
                                 activeCallbacks.onEvent({
                                     type: 'tool_result',
@@ -249,6 +292,20 @@ export class GeminiController {
                                     result: errorMsg,
                                     is_error: true
                                 });
+                            }
+
+                            // 2. But ALSO signal a fatal error to the Bridge so it concludes the TURN
+                            if (activeCallbacks.onError) {
+                                activeCallbacks.onError({
+                                    type: 'error',
+                                    message: errorMsg,
+                                    code: 'TOOL_NOT_FOUND'
+                                });
+                            }
+
+                            // 3. Force end of turn
+                            if (activeCallbacks.onResult) {
+                                activeCallbacks.onResult({ type: 'result', text: `Terminated: ${errorMsg}`, stats: {} });
                             }
                         }
                     }

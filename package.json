@@ -3,7 +3,7 @@
     "version": "1.0.0",
     "type": "module",
     "workspaces": [
-        "packages/*"
+        "packages/tool-bridge"
     ],
     "scripts": {
         "start": "node src/index.js",

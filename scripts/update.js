@@ -26,10 +26,12 @@ async function run() {
 
         // 3. Container Rebuild (if .env exists)
         const envPath = path.join(process.cwd(), '.env');
-        if (fs.existsSync(envPath)) {
-            console.log("\n🐳 Rebuilding containers...");
+        const isClean = process.argv.includes('--clean') || process.argv.includes('-c');
 
-            // Determine compose command (reusing logic from setup.js)
+        if (fs.existsSync(envPath)) {
+            console.log(isClean ? "\n🧹 Performing deep clean and rebuild..." : "\n🐳 Rebuilding containers...");
+
+            // Determine compose command
             const dockerStatus = spawnSync('docker', ['--version']);
             const podmanStatus = spawnSync('podman', ['--version']);
 
@@ -41,10 +43,16 @@ async function run() {
             }
 
             if (composeCmd) {
+                if (isClean) {
+                    console.log("🗑️  Removing existing images and volumes...");
+                    spawnSync(`${composeCmd} down --rmi local -v --remove-orphans`, { stdio: 'inherit', shell: true });
+                }
+
                 console.log(`\n🏗️  Rebuilding Ionosphere image...`);
+                const buildArgs = isClean ? 'build --no-cache' : 'build';
                 console.log(`⏳ (This may take a few minutes)\n`);
 
-                const buildProcess = spawn(`${composeCmd} build`, { stdio: 'inherit', shell: true });
+                const buildProcess = spawn(`${composeCmd} ${buildArgs}`, { stdio: 'inherit', shell: true });
 
                 buildProcess.on('exit', (code) => {
                     if (code === 0) {
@@ -53,7 +61,7 @@ async function run() {
 
                         upProcess.on('exit', (upCode) => {
                             if (upCode === 0) {
-                                console.log("\n✅ Containers updated and restarted.");
+                                console.log(`\n✅ Containers updated${isClean ? ' (clean build)' : ''} and restarted.`);
                             } else {
                                 console.error(`\n❌ Restart failed (Exit code: ${upCode}).`);
                             }

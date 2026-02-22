@@ -235,7 +235,15 @@ export class GeminiController {
     cancelCurrentTurn(turnId) {
         const proc = this.processes.get(turnId);
         if (proc) {
+            console.log(`[GeminiController] Cancelling turn ${turnId}`);
             proc.kill('SIGINT');
+            // Fallback for unresponsive CLI
+            setTimeout(() => {
+                if (this.processes.has(turnId)) {
+                    console.warn(`[GeminiController] Turn ${turnId} unresponsive to SIGINT, sending SIGKILL.`);
+                    try { proc.kill('SIGKILL'); } catch (_) { }
+                }
+            }, 2000);
             this.processes.delete(turnId);
             this.callbacksByTurn.delete(turnId);
         }

@@ -4,7 +4,7 @@ import net from 'net';
 import { GeminiController } from './GeminiController.js';
 import fs from 'fs';
 import path from 'path';
-import { randomUUID } from 'crypto';
+import { randomUUID, createHash } from 'crypto';
 import { fileURLToPath } from 'url';
 import { generateConfig } from '../scripts/generate_settings.js';
 
@@ -26,6 +26,14 @@ const sanitizePromptText = (text) => {
         }
         return line;
     }).join('\n');
+};
+
+/**
+ * Computes a hash of the conversation messages to identify a thread.
+ */
+const getHistoryHash = (messages) => {
+    const serialized = JSON.stringify(messages.map(m => ({ role: m.role, content: m.content, name: m.name, tool_call_id: m.tool_call_id })));
+    return createHash('sha256').update(serialized).digest('hex');
 };
 
 // Ensure base temp directory exists
@@ -64,7 +72,7 @@ const controller = new GeminiController();
 // Global state for Warm Stateless Handoff
 // pendingToolCalls: callKey -> { socket, turnId }
 const pendingToolCalls = new Map();
-// parkedTurns: turnId -> { controller, executePromise, resolveTask, cleanupWorkspace }
+// parkedTurns: turnId -> { controller, executePromise, resolveTask, cleanupWorkspace, historyHash }
 const parkedTurns = new Map();
 
 const MAX_CONCURRENT_CLI = parseInt(process.env.MAX_CONCURRENT_CLI) || 5;
@@ -187,10 +195,22 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             }
         }
 
+        const historyHash = getHistoryHash(messages);
+
+        // Preemption: Kill any old turns for the same conversation that aren't being hijacked right now
+        for (const [pTurnId, parked] of parkedTurns.entries()) {
+            if (parked.historyHash === historyHash && pTurnId !== hijackedTurnId) {
+                console.log(`[API] Preemption: Killing old parked turn ${pTurnId} for same conversation thread.`);
+                parked.controller.cancelCurrentTurn(pTurnId);
+                // The Turn conclusion logic (finally block in executeTask) will cleanup parkedTurns and workspace
+            }
+        }
+
         const isStreaming = req.body.stream === true;
         let accumulatedText = '';
         let accumulatedToolCalls = [];
         let finalStats = null;
+        let responseSent = false;
 
         if (isStreaming) {
             res.setHeader('Content-Type', 'text/event-stream');
@@ -250,6 +270,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 if (!res.writableEnded) {
                     res.write('data: [DONE]\n\n');
                     res.end();
+                    responseSent = true;
                 }
             } else {
                 accumulatedToolCalls.push({
@@ -257,18 +278,10 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                     type: 'function',
                     function: { name: info.name, arguments: info.arguments }
                 });
-                res.json({
-                    id: `chatcmpl-${randomUUID()}`,
-                    object: 'chat.completion',
-                    created: Math.floor(Date.now() / 1000),
-                    model: responseModel,
-                    choices: [{
-                        index: 0,
-                        message: { role: 'assistant', content: null, tool_calls: accumulatedToolCalls },
-                        finish_reason: 'tool_calls'
-                    }],
-                    usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } // Stats not yet available
-                });
+                // In non-streaming mode, we don't send the response yet.
+                // We wait for the 'done' or 'result' event or process exit if we expect others.
+                // However, the current CLI implementation often sends one tool use and parks.
+                // If it hits a "done" or parks, onResult or the end of sendPrompt will trigger.
             }
             if (heartbeatInterval) clearInterval(heartbeatInterval);
         };
@@ -307,6 +320,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 if (!res.writableEnded) {
                     res.write('data: [DONE]\n\n');
                     res.end();
+                    responseSent = true;
                 }
             } else {
                 if (!res.headersSent) {
@@ -317,8 +331,12 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                         model: responseModel,
                         choices: [{
                             index: 0,
-                            message: { role: 'assistant', content: accumulatedText },
-                            finish_reason: 'stop'
+                            message: {
+                                role: 'assistant',
+                                content: accumulatedText,
+                                tool_calls: accumulatedToolCalls.length > 0 ? accumulatedToolCalls : undefined
+                            },
+                            finish_reason: accumulatedToolCalls.length > 0 ? 'tool_calls' : 'stop'
                         }],
                         usage: {
                             prompt_tokens: finalStats.input_tokens || 0,
@@ -326,6 +344,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                             total_tokens: finalStats.total_tokens || 0
                         }
                     });
+                    responseSent = true;
                 }
             }
             if (heartbeatInterval) clearInterval(heartbeatInterval);
@@ -491,7 +510,12 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         const executeTask = async () => {
             let taskResolve;
             const executePromise = new Promise(r => taskResolve = r);
-            parkedTurns.set(turnId, { controller, executePromise, cleanupWorkspace: () => fs.rmSync(turnTempDir, { recursive: true, force: true }) });
+            parkedTurns.set(turnId, {
+                controller,
+                executePromise,
+                cleanupWorkspace: () => fs.rmSync(turnTempDir, { recursive: true, force: true }),
+                historyHash
+            });
 
             try {
                 await controller.sendPrompt(turnId, conversationPrompt.trim(), turnTempDir, settingsPath, systemMessage.trim(), {
@@ -499,6 +523,13 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 }, {
                     IONOSPHERE_IPC: ipcPath
                 });
+
+                // Final safety for non-streaming multi-tool or parked turns
+                if (!isStreaming && !responseSent) {
+                    if (accumulatedToolCalls.length > 0) {
+                        onResult({ stats: {} }); // Force completion with gathered tools
+                    }
+                }
             } finally {
                 parkedTurns.delete(turnId);
                 console.log(`[Turn ${turnId}] Concluded. Active: ${currentlyRunning}/${MAX_CONCURRENT_CLI}, Parked: ${parkedTurns.size}`);

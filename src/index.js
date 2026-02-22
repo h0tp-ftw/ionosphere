@@ -15,7 +15,8 @@ const __dirname = path.dirname(__filename);
 const TOOL_BRIDGE_PATH = path.resolve(__dirname, '..', 'packages', 'tool-bridge', 'index.js');
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // Helper to sanitize user-provided text: escape lines starting with @ or !
 const sanitizePromptText = (text) => {

@@ -160,14 +160,12 @@ async function main() {
             console.log(`\n🚀 Starting the Ionosphere server...`);
             if (!isNative) console.log(`⏳ (This may take a minute if the image needs building)\n`);
 
-            // Execute the command
-            const parts = cmd.split(' ');
-            const exe = parts[0];
-            const args = parts.slice(1);
+            // Execute the command directly as a string with shell: true for best compatibility on Windows
+            const result = spawnSync(cmd, { stdio: 'inherit', shell: true });
 
-            spawnSync(exe, args, { stdio: 'inherit', shell: true });
-
-            if (!isNative) {
+            if (result.error) {
+                console.error(`❌ Failed to start the server: ${result.error.message}`);
+            } else if (!isNative) {
                 console.log(`\n✅ Server is running in the background.`);
                 console.log(`📝 To view logs, run: ${composeCmd} logs -f\n`);
             }

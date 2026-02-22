@@ -1,11 +1,15 @@
-# Ionosphere
+# 🌠 Ionosphere
 
-**Ionosphere** is a strictly stateless HTTP bridge for the [Google Gemini CLI](https://github.com/google-gemini/gemini-cli). It allows you to use the Gemini CLI as a backend reasoning engine for any OpenAI-compatible application while maintaining high-efficiency tool loops via a **Warm Stateless Handoff** strategy.
+**Ionosphere** is a stateless HTTP bridge for the [Google Gemini CLI](https://github.com/google-gemini/gemini-cli), allowing Gemini CLI usage in any OpenAI-compatible application.
 
-Ionosphere is ideal for workflows where:
-- Tools are defined as MCP servers (stdio).
-- Multi-step reasoning (ReAct) is handled by the model.
-- Privacy is a priority (no server-side conversation storage).
+Ionosphere is designed for workflows with:
+- Agentic work / Multi-step / tool call ReAct workflows
+- Search grounding (built-in Google search tool)
+- Long contexts (Gemini CLI has generous context length)
+
+Ionosphere is NOT designed for workflows with:
+- Persistent state or storage (Ionosphere is stateless)
+- High frequency / parallel requests (Latency is high)
 
 ---
 
@@ -14,9 +18,9 @@ Ionosphere is ideal for workflows where:
 | Feature | Description |
 |---|---|
 | **Warm Stateless Handoff** | Keeps CLI processes "warm" during tool loops in-memory without persistent state. |
-| **Strictly Stateless** | No local database or session files. Every request is a clean slate from a storage perspective. |
+| **Gemini CLI Based** | Easily use any Gemini CLI auth method (OAuth, API Key, Vertex). Use your Google AI subscription for higher limits. |
 | **Isolated Workspaces** | Every turn gets a throwaway `temp/` workspace for images, logs, and IPC sockets. |
-| **Wait-Free Queuing** | Internal concurrency management to prevent CPU starvation under high load. |
+| **Containerized** | Run with Docker or Podman with garbage collection of session info. |
 | **MCP Aggregation** | Automatically namespaces and routes multiple upstream MCP servers through a single bridge. |
 
 ---
@@ -85,4 +89,11 @@ gemini-ionosphere/
 │   └── ipc_bridge.test.js  # IPC socket verification
 ├── Dockerfile              # Node.js + Gemini CLI image
 └── .env.example            # Environment template
+```
+```markdown
+## Motivation
+
+I have been using the Gemini CLI since its launch and have worked with it extensively. Knowing firsthand how powerful this tool is, I built this project to enable others to easily integrate it into their own workflows and agentic loops. In the past, I have used the Gemini CLI in a number of projects, but I found that I needed to build a lot of the same functionality over and over again. I also found that the Gemini CLI was not as easy to use as I would have liked, and I wanted to make it easier for others to use it.
+
+Before the OpenClaw times, I had a whole personal assistant running via Gemini CLI (jeeves). I found that Gemini CLI was not easy to develop with for novel use cases, which is why I bridged it via an OpenAI compatible API.
 ```

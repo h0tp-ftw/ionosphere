@@ -147,9 +147,11 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         if (expectedApiKey) {
             const authHeader = req.headers['authorization'];
             if (!authHeader || !authHeader.startsWith('Bearer ')) {
+                console.log("[API] Auth Failed: Missing header");
                 return res.status(401).json({ error: { message: "Missing or formatted improperly Authorization header." } });
             }
             if (authHeader.substring(7) !== expectedApiKey) {
+                console.log("[API] Auth Failed: Invalid key");
                 return res.status(401).json({ error: { message: "Invalid API Key" } });
             }
         }
@@ -176,82 +178,145 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             }
         }
 
-        // SSE Setup
-        res.setHeader('Content-Type', 'text/event-stream');
-        res.setHeader('Cache-Control', 'no-cache');
-        res.setHeader('Connection', 'keep-alive');
+        const isStreaming = req.body.stream === true;
+        let accumulatedText = '';
+        let accumulatedToolCalls = [];
+        let finalStats = null;
+
+        if (isStreaming) {
+            res.setHeader('Content-Type', 'text/event-stream');
+            res.setHeader('Cache-Control', 'no-cache');
+            res.setHeader('Connection', 'keep-alive');
+        }
         req.setTimeout(0);
         res.setTimeout(0);
 
         const sendChunk = (chunk) => {
-            if (!res.writableEnded) res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+            if (isStreaming && !res.writableEnded) {
+                res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+            }
         };
 
-        const heartbeatInterval = setInterval(() => {
+        const heartbeatInterval = isStreaming ? setInterval(() => {
             if (!res.writableEnded) res.write(': ping\n\n');
-        }, 15000);
+        }, 15000) : null;
 
         const onText = (text) => {
-            sendChunk({
-                id: `chatcmpl-stream`,
-                object: 'chat.completion.chunk',
-                created: Math.floor(Date.now() / 1000),
-                model: 'gemini-cli',
-                choices: [{ index: 0, delta: { content: text } }]
-            });
+            if (isStreaming) {
+                sendChunk({
+                    id: `chatcmpl-stream`,
+                    object: 'chat.completion.chunk',
+                    created: Math.floor(Date.now() / 1000),
+                    model: 'gemini-cli',
+                    choices: [{ index: 0, delta: { content: text } }]
+                });
+            } else {
+                accumulatedText += text;
+            }
         };
 
         const onToolCall = (info) => {
-            sendChunk({
-                id: `chatcmpl-stream`,
-                object: 'chat.completion.chunk',
-                created: Math.floor(Date.now() / 1000),
-                model: 'gemini-cli',
-                choices: [{
-                    index: 0,
-                    delta: {
-                        tool_calls: [{
-                            index: 0,
-                            id: info.id,
-                            type: 'function',
-                            function: { name: info.name, arguments: info.arguments }
-                        }]
-                    },
-                    finish_reason: 'tool_calls'
-                }]
-            });
-            if (!res.writableEnded) {
-                res.write('data: [DONE]\n\n');
-                res.end();
+            if (isStreaming) {
+                sendChunk({
+                    id: `chatcmpl-stream`,
+                    object: 'chat.completion.chunk',
+                    created: Math.floor(Date.now() / 1000),
+                    model: 'gemini-cli',
+                    choices: [{
+                        index: 0,
+                        delta: {
+                            tool_calls: [{
+                                index: 0,
+                                id: info.id,
+                                type: 'function',
+                                function: { name: info.name, arguments: info.arguments }
+                            }]
+                        },
+                        finish_reason: 'tool_calls'
+                    }]
+                });
+                if (!res.writableEnded) {
+                    res.write('data: [DONE]\n\n');
+                    res.end();
+                }
+            } else {
+                accumulatedToolCalls.push({
+                    id: info.id,
+                    type: 'function',
+                    function: { name: info.name, arguments: info.arguments }
+                });
+                res.json({
+                    id: `chatcmpl-${randomUUID()}`,
+                    object: 'chat.completion',
+                    created: Math.floor(Date.now() / 1000),
+                    model: 'gemini-cli',
+                    choices: [{
+                        index: 0,
+                        message: { role: 'assistant', content: null, tool_calls: accumulatedToolCalls },
+                        finish_reason: 'tool_calls'
+                    }],
+                    usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } // Stats not yet available
+                });
             }
-            clearInterval(heartbeatInterval);
+            if (heartbeatInterval) clearInterval(heartbeatInterval);
         };
 
         const onError = (err) => {
-            sendChunk({ error: err });
-            if (!res.writableEnded) res.end();
-            clearInterval(heartbeatInterval);
+            const errorObj = {
+                message: typeof err === 'string' ? err : (err.message || "Unknown error"),
+                type: "internal_error",
+                code: "cli_failure"
+            };
+
+            if (isStreaming) {
+                sendChunk({ error: errorObj });
+                if (!res.writableEnded) res.end();
+            } else {
+                if (!res.headersSent) res.status(500).json({ error: errorObj });
+            }
+            if (heartbeatInterval) clearInterval(heartbeatInterval);
         };
 
         const onResult = (json) => {
-            const stats = json.stats || {};
-            sendChunk({
-                id: `chatcmpl-stream`,
-                object: 'chat.completion.chunk',
-                created: Math.floor(Date.now() / 1000),
-                model: 'gemini-cli',
-                choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
-                usage: {
-                    prompt_tokens: stats.input_tokens || 0,
-                    completion_tokens: stats.output_tokens || 0,
-                    total_tokens: stats.total_tokens || 0
+            finalStats = json.stats || {};
+            if (isStreaming) {
+                sendChunk({
+                    id: `chatcmpl-stream`,
+                    object: 'chat.completion.chunk',
+                    created: Math.floor(Date.now() / 1000),
+                    model: 'gemini-cli',
+                    choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+                    usage: {
+                        prompt_tokens: finalStats.input_tokens || 0,
+                        completion_tokens: finalStats.output_tokens || 0,
+                        total_tokens: finalStats.total_tokens || 0
+                    }
+                });
+                if (!res.writableEnded) {
+                    res.write('data: [DONE]\n\n');
+                    res.end();
                 }
-            });
-            if (!res.writableEnded) {
-                res.write('data: [DONE]\n\n');
-                res.end();
+            } else {
+                if (!res.headersSent) {
+                    res.json({
+                        id: `chatcmpl-${randomUUID()}`,
+                        object: 'chat.completion',
+                        created: Math.floor(Date.now() / 1000),
+                        model: 'gemini-cli',
+                        choices: [{
+                            index: 0,
+                            message: { role: 'assistant', content: accumulatedText },
+                            finish_reason: 'stop'
+                        }],
+                        usage: {
+                            prompt_tokens: finalStats.input_tokens || 0,
+                            completion_tokens: finalStats.output_tokens || 0,
+                            total_tokens: finalStats.total_tokens || 0
+                        }
+                    });
+                }
             }
-            clearInterval(heartbeatInterval);
+            if (heartbeatInterval) clearInterval(heartbeatInterval);
         };
 
         // --- HANDOFF CASE ---
@@ -409,6 +474,8 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             try {
                 await controller.sendPrompt(turnId, conversationPrompt.trim(), turnTempDir, settingsPath, systemMessage.trim(), {
                     onText, onToolCall, onError, onResult, onEvent
+                }, {
+                    IONOSPHERE_IPC: ipcPath
                 });
             } finally {
                 parkedTurns.delete(turnId);

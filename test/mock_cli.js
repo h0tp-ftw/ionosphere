@@ -1,15 +1,8 @@
 /**
- * test/mock_cli.js — Updated Mock CLI
- *
- * Emits the real Gemini CLI stream-json event types so tests reflect
- * actual CLI behavior discovered from live output.
- *
- * Usage: controlled by CLI_SCENARIO env var
- *   text        — simple text response (default)
- *   tool_use    — emits a tool_use + tool_result + text
- *   error       — emits an error event
- *   slow        — emits text with a delay (for concurrency tests)
+ * test/mock_cli.js — Exhaustive Mock CLI
  */
+import net from 'net';
+import fs from 'fs';
 
 const SCENARIO = process.env.CLI_SCENARIO || 'text';
 const delay = (ms) => new Promise(r => setTimeout(r, ms));
@@ -19,43 +12,41 @@ function emit(obj) {
 }
 
 async function run() {
-    // Always emit init
     emit({ type: 'init', timestamp: new Date().toISOString(), session_id: 'mock-session-001', model: 'gemini-test' });
-    emit({ type: 'message', role: 'user', content: 'mock user message' });
 
     if (SCENARIO === 'tool_use') {
-        emit({
-            type: 'tool_use',
-            timestamp: new Date().toISOString(),
-            tool_name: 'get_weather',
-            tool_id: 'get_weather-mock-001',
-            parameters: { city: 'London' }
-        });
-        emit({
-            type: 'tool_result',
-            timestamp: new Date().toISOString(),
-            tool_id: 'get_weather-mock-001',
-            status: 'success',
-            output: 'Sunny, 22°C'
-        });
-        emit({ type: 'message', role: 'assistant', content: 'The weather in London is sunny and 22°C.', delta: true });
-        emit({ type: 'result', status: 'success', stats: { total_tokens: 120, input_tokens: 80, output_tokens: 40, duration_ms: 1000, tool_calls: 1 } });
-
+        const ipcPath = process.env.IONOSPHERE_IPC || process.env.TOOL_BRIDGE_IPC;
+        if (ipcPath) {
+            const client = net.connect(ipcPath, () => {
+                client.write(JSON.stringify({ event: 'tool_call', name: 'get_weather', arguments: '{"city":"London"}' }) + '\n');
+            });
+            client.on('data', (data) => {
+                const msg = JSON.parse(data.toString());
+                if (msg.event === 'tool_result') {
+                    emit({ type: 'tool_result', timestamp: new Date().toISOString(), tool_id: 'mock_tc_1', status: 'success', output: msg.result });
+                    emit({ type: 'message', role: 'assistant', content: `The weather in London is ${msg.result}.`, delta: true });
+                    emit({ type: 'result', status: 'success', stats: { total_tokens: 100, input_tokens: 50, output_tokens: 50, duration_ms: 10, tool_calls: 1 } });
+                    process.exit(0);
+                }
+            });
+            await new Promise(() => { });
+        }
+    } else if (SCENARIO === 'vision') {
+        emit({ type: 'message', role: 'assistant', content: 'I see a beautiful landscape with mountains.', delta: true });
+        emit({ type: 'result', status: 'success', stats: { total_tokens: 150, input_tokens: 100, output_tokens: 50, duration_ms: 200, tool_calls: 0 } });
     } else if (SCENARIO === 'error') {
-        emit({ type: 'error', message: 'Mock CLI error', code: 'MOCK_ERROR' });
-
-    } else if (SCENARIO === 'slow') {
-        await delay(200);
-        emit({ type: 'message', role: 'assistant', content: 'Slow response chunk 1', delta: true });
-        await delay(200);
-        emit({ type: 'message', role: 'assistant', content: ' chunk 2', delta: true });
-        emit({ type: 'result', status: 'success', stats: { total_tokens: 50, input_tokens: 30, output_tokens: 20, duration_ms: 500, tool_calls: 0 } });
-
+        console.error('[mock_cli] Simulating a fatal error');
+        process.exit(1);
+    } else if (SCENARIO === 'long_text') {
+        for (let i = 0; i < 5; i++) {
+            emit({ type: 'message', role: 'assistant', content: `Paragraph ${i + 1}. This is some long text to test streaming stability and accumulation. `, delta: true });
+            await delay(50);
+        }
+        emit({ type: 'result', status: 'success', stats: { total_tokens: 500, input_tokens: 50, output_tokens: 450, duration_ms: 300, tool_calls: 0 } });
     } else {
-        // Default: simple text response
-        emit({ type: 'message', role: 'assistant', content: 'Hello! ', delta: true });
-        emit({ type: 'message', role: 'assistant', content: 'This is a mock response.', delta: true });
-        emit({ type: 'result', status: 'success', stats: { total_tokens: 100, input_tokens: 60, output_tokens: 40, duration_ms: 500, tool_calls: 0 } });
+        // Default text
+        emit({ type: 'message', role: 'assistant', content: 'Hello! This is a mock response.', delta: true });
+        emit({ type: 'result', status: 'success', stats: { total_tokens: 100, input_tokens: 50, output_tokens: 50, duration_ms: 10, tool_calls: 0 } });
     }
 }
 

@@ -66,14 +66,9 @@ export class GeminiController {
      * 1. Spawn `gemini -y -o stream-json -p <text> --settings <settingsPath>`
      * 2. Stream output events back via callbacks.
      */
-    async sendPrompt(turnId, text, workspacePath = this.cwd, settingsPath = process.env.GEMINI_SETTINGS_JSON || path.join(this.cwd, '.gemini', 'settings.json'), systemPrompt = null, callbacks = {}) {
+    async sendPrompt(turnId, text, workspacePath = this.cwd, settingsPath = process.env.GEMINI_SETTINGS_JSON || path.join(this.cwd, '.gemini', 'settings.json'), systemPrompt = null, callbacks = {}, extraEnv = {}) {
         try {
             this.callbacksByTurn.set(turnId, callbacks);
-
-            let cliPath = process.env.GEMINI_CLI_PATH || 'gemini';
-            if (process.platform === 'win32' && !cliPath.endsWith('.cmd') && !cliPath.endsWith('.exe')) {
-                cliPath += '.cmd';
-            }
 
             const args = ['-o', 'stream-json'];
 
@@ -88,7 +83,23 @@ export class GeminiController {
                 fs.writeFileSync(systemPromptPath, systemPrompt, 'utf-8');
             }
 
-            console.log(`[GeminiController] Spawning stateless CLI: ${cliPath} ${args.join(' ')}`);
+            let cliPath = process.env.GEMINI_CLI_PATH || 'gemini';
+            let finalArgs = [...args];
+            let executable = cliPath;
+
+            // Handle cases where cliPath contains the runner (e.g. "node cli.js")
+            if (cliPath.includes(' ')) {
+                const parts = cliPath.split(' ');
+                executable = parts[0];
+                finalArgs = [...parts.slice(1), ...finalArgs];
+            } else if (cliPath.endsWith('.js')) {
+                executable = 'node';
+                finalArgs = [cliPath, ...finalArgs];
+            } else if (process.platform === 'win32' && cliPath === 'gemini') {
+                executable = 'gemini.cmd';
+            }
+
+            console.log(`[GeminiController] Spawning stateless CLI: ${executable} ${finalArgs.join(' ')}`);
 
             const result = await new Promise((resolve, reject) => {
                 const accumulator = new JsonlAccumulator();
@@ -97,13 +108,14 @@ export class GeminiController {
                 const spawnEnv = {
                     ...process.env,
                     GEMINI_SETTINGS_JSON: settingsPath,
+                    ...extraEnv
                 };
 
                 if (systemPromptPath) {
                     spawnEnv.GEMINI_SYSTEM_MD = systemPromptPath;
                 }
 
-                const proc = spawn(cliPath, args, {
+                const proc = spawn(executable, finalArgs, {
                     cwd: workspacePath,
                     env: spawnEnv,
                     stdio: ['ignore', 'pipe', 'pipe'],
@@ -178,7 +190,7 @@ export class GeminiController {
                 proc.on('close', (code) => {
                     clearTimeout(timeout);
                     this.processes.delete(turnId);
-                    this.callbacksByTurn.delete(turnId);
+                    // Skip immediate cleanup of callbacks to allow error handlers in catch block
 
                     try {
                         if (fs.existsSync(tempPromptPath)) fs.unlinkSync(tempPromptPath);
@@ -204,6 +216,8 @@ export class GeminiController {
             console.error(`[GeminiController] Turn error: ${err.message}`);
             const activeCallbacks = this.callbacksByTurn.get(turnId) || {};
             if (activeCallbacks.onError) activeCallbacks.onError({ type: 'error', message: err.message });
+        } finally {
+            this.callbacksByTurn.delete(turnId);
         }
     }
 

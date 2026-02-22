@@ -61,7 +61,8 @@ export function generateConfig(options = {}) {
                         "exit_plan_mode",
                         "get_internal_docs",
                         "codebase_investigator",
-                        "cli_help_agent"
+                        "cli_help",
+                        "generalist"
                     ];
                 }
 

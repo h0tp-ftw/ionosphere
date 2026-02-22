@@ -2,6 +2,7 @@ import readline from 'readline';
 import fs from 'fs';
 import path from 'path';
 import { spawnSync } from 'child_process';
+import { randomBytes } from 'crypto';
 
 const rl = readline.createInterface({
     input: process.stdin,
@@ -41,7 +42,10 @@ async function checkDependencies() {
 
 async function setupEnvAndAuth(isNative, composeCmd) {
     const envPath = path.join(process.cwd(), '.env');
-    const envContent = `GEMINI_CLI_PATH=gemini\nGEMINI_SETTINGS_JSON=./settings.json\n`;
+
+    // Generate a high-entropy unique API key for the bridge
+    const ionoKey = `iono_sk_${randomBytes(24).toString('hex')}`;
+    const envContent = `GEMINI_CLI_PATH=gemini\nGEMINI_SETTINGS_JSON=./settings.json\nAPI_KEY=${ionoKey}\n`;
 
     if (fs.existsSync(envPath)) {
         console.log(`✅ .env file already exists at ${envPath}.`);
@@ -81,6 +85,7 @@ async function setupEnvAndAuth(isNative, composeCmd) {
 
     fs.writeFileSync(envPath, envContent, 'utf-8');
     console.log("✅ Created .env file.");
+    return ionoKey;
 }
 
 async function setupPreferences() {
@@ -129,13 +134,19 @@ async function main() {
             composeCmd = hasPodmanCompose ? 'podman-compose' : 'podman compose';
         }
 
-        await setupEnvAndAuth(isNative, composeCmd);
+        const ionoKey = await setupEnvAndAuth(isNative, composeCmd);
         await setupPreferences();
         await generateSettings();
 
         console.log("\n=========================================");
         console.log("🎉 Setup Complete!");
         console.log("=========================================\n");
+
+        if (ionoKey) {
+            console.log("🔑 YOUR IONOSPHERE API KEY:");
+            console.log(`   ${ionoKey}`);
+            console.log("\nCopy this key into your AI applications (Roo Code, opencode, etc.)\n");
+        }
 
         const startNow = await question("Start the server now? (y/N): ");
         rl.close();

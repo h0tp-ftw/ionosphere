@@ -1,7 +1,7 @@
 import readline from 'readline';
 import fs from 'fs';
 import path from 'path';
-import { spawnSync } from 'child_process';
+import { spawnSync, spawn } from 'child_process';
 import { randomBytes } from 'crypto';
 
 const rl = readline.createInterface({
@@ -203,14 +203,26 @@ async function main() {
             console.log(`\n🚀 Starting the Ionosphere server...`);
             if (!isNative) console.log(`⏳ (This may take a minute if the image needs building)\n`);
 
-            // Execute the command directly as a string with shell: true for best compatibility on Windows
-            const result = spawnSync(cmd, { stdio: 'inherit', shell: true });
+            // Execute the command in the background for containers, or synchronously for native
+            if (isNative) {
+                spawnSync(cmd, { stdio: 'inherit', shell: true });
+            } else {
+                console.log(`⏳ Launching Podman build & start...`);
+                // Using spawn for the final background start to avoid terminal blocking
+                const child = spawn(cmd, {
+                    stdio: 'inherit',
+                    shell: true,
+                    detached: false // Keep it attached to see the initial build output if any
+                });
 
-            if (result.error) {
-                console.error(`❌ Failed to start the server: ${result.error.message}`);
-            } else if (!isNative) {
-                console.log(`\n✅ Server is running in the background.`);
-                console.log(`📝 To view logs, run: ${composeCmd} logs -f\n`);
+                child.on('exit', (code) => {
+                    if (code === 0) {
+                        console.log(`\n✅ Server is starting up in the background.`);
+                        console.log(`📝 To view logs, run: ${composeCmd} logs -f\n`);
+                    } else {
+                        console.error(`\n❌ Startup command exited with code ${code}.`);
+                    }
+                });
             }
         }
 

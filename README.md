@@ -50,7 +50,22 @@ npm run setup
 
 Configure authentication before running. The setup script handles this interactively.
 
-### OAuth (Google Account - Gemini CLI / Code Assist limits)
+### 1. Bridge Security (Client to Ionosphere)
+
+To protect your bridge, Ionosphere uses **Bearer Token Authentication**. A unique key is generated during setup:
+
+```env
+# .env
+API_KEY=iono_sk_...
+```
+
+The setup script displays this key. Copy it into your AI app's **API Key** field and set the **Base URL** to `http://localhost:3000/v1`.
+
+### 2. Provider Authentication (Ionosphere to Google)
+
+Ionosphere supports three ways to authenticate the underlying Gemini CLI with Google:
+
+#### OAuth (Google Account)
 
 ```bash
 gemini auth login

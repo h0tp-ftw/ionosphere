@@ -1,0 +1,12 @@
+node_modules
+npm-debug.log
+temp
+.git
+.env
+container_logs.txt
+sample_output.txt
+test_output*.txt
+*.js
+!src/
+!scripts/
+!packages/

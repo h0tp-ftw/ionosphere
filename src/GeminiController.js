@@ -57,8 +57,13 @@ export class GeminiController {
      * takes over the output of a process parked from a first request.
      */
     updateCallbacks(turnId, callbacks) {
+        const previous = this.callbacksByTurn.has(turnId);
         this.callbacksByTurn.set(turnId, callbacks);
-        console.log(`[GeminiController] Callbacks updated/hijacked for turn ${turnId}`);
+        if (previous) {
+            console.log(`[GeminiController] Callbacks HIJACKED for turn ${turnId}`);
+        } else {
+            console.log(`[GeminiController] Callbacks registered for turn ${turnId}`);
+        }
     }
 
     /**
@@ -81,6 +86,16 @@ export class GeminiController {
             if (systemPrompt !== null) {
                 systemPromptPath = path.join(workspacePath, 'system.md');
                 fs.writeFileSync(systemPromptPath, systemPrompt, 'utf-8');
+            }
+
+            // Persistence for debugging
+            if (process.env.GEMINI_DEBUG_PROMPTS === 'true') {
+                const debugDir = path.join(this.cwd, 'debug_prompts');
+                if (!fs.existsSync(debugDir)) fs.mkdirSync(debugDir, { recursive: true });
+                fs.copyFileSync(tempPromptPath, path.join(debugDir, `turn-${turnId}-prompt.txt`));
+                if (systemPromptPath) {
+                    fs.copyFileSync(systemPromptPath, path.join(debugDir, `turn-${turnId}-system.md`));
+                }
             }
 
             let cliPath = process.env.GEMINI_CLI_PATH || path.join(this.cwd, 'node_modules', '.bin', 'gemini');
@@ -184,6 +199,10 @@ export class GeminiController {
 
                     } else if (json.type === 'result') {
                         lastResultJson = json;
+                        if (json.stats) {
+                            const { input_tokens, output_tokens, total_tokens } = json.stats;
+                            console.log(`[GeminiController] Turn ${turnId} Usage: In=${input_tokens || 0}, Out=${output_tokens || 0}, Total=${total_tokens || 0}`);
+                        }
                         if (activeCallbacks.onResult) activeCallbacks.onResult(json);
 
                     } else if (json.type === 'tool_result' || json.type === 'init' || json.type === 'done') {

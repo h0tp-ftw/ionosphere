@@ -75,6 +75,8 @@ const controller = new GeminiController();
 const pendingToolCalls = new Map();
 // parkedTurns: turnId -> { controller, executePromise, resolveTask, cleanupWorkspace, historyHash }
 const parkedTurns = new Map();
+// activeTurnsByHash: historyHash -> turnId (to prevent duplicate CLI for same thread)
+const activeTurnsByHash = new Map();
 
 const MAX_CONCURRENT_CLI = parseInt(process.env.MAX_CONCURRENT_CLI) || 5;
 let currentlyRunning = 0;
@@ -175,6 +177,8 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             return res.status(400).json({ error: "Missing 'messages' array" });
         }
 
+        const historyHash = getHistoryHash(messages);
+
         // 2. Identify "Handoff" (Warm Stateless Continuity)
         // If the last message is a TOOL result, check if we have a parked turn for it.
         let lastMsg = messages[messages.length - 1];
@@ -182,6 +186,10 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         if (lastMsg && (lastMsg.role === 'tool' || lastMsg.role === 'function')) {
             const callId = lastMsg.tool_call_id;
             const shortKey = callId?.startsWith('call_') ? callId.substring(5) : callId;
+
+            if (process.env.GEMINI_DEBUG_HANDOFF === 'true') {
+                console.log(`[Handoff] Attempting match for callId: ${callId}, shortKey: ${shortKey}, pending: ${pendingToolCalls.size}`);
+            }
 
             // Find the full callKey in pendingToolCalls
             for (const [callKey, pending] of pendingToolCalls.entries()) {
@@ -196,7 +204,34 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             }
         }
 
-        const historyHash = getHistoryHash(messages);
+        // 2.5 Concurrency Gating: Wait if there's already an active (unparked) turn for this conversation
+        if (!hijackedTurnId) {
+            let waitAttempts = 0;
+            const MAX_WAIT_ATTEMPTS = 60; // 30 seconds max
+            while (activeTurnsByHash.has(historyHash)) {
+                const existingTurnId = activeTurnsByHash.get(historyHash);
+                if (process.env.GEMINI_DEBUG_HANDOFF === 'true') {
+                    console.log(`[Queue] Conversation ${historyHash} already has active turn ${existingTurnId}. Waiting... (${waitAttempts})`);
+                }
+
+                // If it parks while we are waiting, we can hijack it!
+                for (const [callKey, pending] of pendingToolCalls.entries()) {
+                    if (pending.turnId === existingTurnId) {
+                        hijackedTurnId = existingTurnId;
+                        console.log(`[API] Hijack discovery (WFI): Turn ${hijackedTurnId} parked while waiting. Hijacking!`);
+                        break;
+                    }
+                }
+                if (hijackedTurnId) break;
+
+                await new Promise(r => setTimeout(r, 500));
+                waitAttempts++;
+                if (waitAttempts > MAX_WAIT_ATTEMPTS) {
+                    console.warn(`[Queue] Timeout waiting for active turn ${existingTurnId}. Proceeding with new turn.`);
+                    break;
+                }
+            }
+        }
 
         // Preemption: Kill any old turns for the same conversation that aren't being hijacked right now
         for (const [pTurnId, parked] of parkedTurns.entries()) {
@@ -436,6 +471,14 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             }
         }
 
+        console.log(`[API] turnId: ${turnId} - Prompt Stats: System=${systemMessage.length} chars, History=${conversationPrompt.length} chars`);
+
+        // Debug Persistence: Create directory if needed
+        if (process.env.GEMINI_DEBUG_PROMPTS === 'true') {
+            const debugDir = path.join(process.cwd(), 'debug_prompts');
+            if (!fs.existsSync(debugDir)) fs.mkdirSync(debugDir, { recursive: true });
+        }
+
         // Per-turn IPC: Use /tmp for Unix sockets to avoid host-mount incompatibilities (ENOTSUP)
         const ipcPath = process.platform === 'win32'
             ? `\\\\.\\pipe\\ionosphere-${turnId}`
@@ -526,6 +569,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             });
 
             try {
+                activeTurnsByHash.set(historyHash, turnId);
                 await controller.sendPrompt(turnId, conversationPrompt.trim(), turnTempDir, settingsPath, systemMessage.trim(), {
                     onText, onToolCall, onError, onResult, onEvent
                 }, {
@@ -539,8 +583,11 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                     }
                 }
             } finally {
-                parkedTurns.delete(turnId);
                 console.log(`[Turn ${turnId}] Concluded. Active: ${currentlyRunning}/${MAX_CONCURRENT_CLI}, Parked: ${parkedTurns.size}`);
+                if (activeTurnsByHash.get(historyHash) === turnId) {
+                    activeTurnsByHash.delete(historyHash);
+                }
+                parkedTurns.delete(turnId);
                 taskResolve();
                 ipcServer.close();
                 if (process.platform !== 'win32') {
@@ -561,45 +608,48 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
 app.get('/v1/models', (req, res) => {
     const models = [
-        "auto-gemini-3",
-        "auto-gemini-2.5",
-        "gemini-3-pro-preview",
-        "gemini-3-flash-preview",
-        "gemini-2.5-pro",
-        "gemini-2.5-flash",
-        "gemini-2.5-flash-lite",
-        "gemini-2.0-flash"
+        { id: "auto-gemini-3", context_window: 1000000 },
+        { id: "auto-gemini-2.5", context_window: 1000000 },
+        { id: "gemini-3-pro-preview", context_window: 1000000 },
+        { id: "gemini-3-flash-preview", context_window: 1000000 },
+        { id: "gemini-2.5-pro", context_window: 1000000 },
+        { id: "gemini-2.5-flash", context_window: 1000000 },
+        { id: "gemini-2.5-flash-lite", context_window: 1000000 },
+        { id: "gemini-2.0-flash", context_window: 1000000 }
     ];
     res.json({
         object: "list",
-        data: models.map(id => ({
-            id,
+        data: models.map(m => ({
+            id: m.id,
             object: "model",
             created: 1686935002,
-            owned_by: "google"
+            owned_by: "google",
+            context_window: m.context_window
         }))
     });
 });
 
 app.get('/v1/models/:model', (req, res) => {
     const models = [
-        "auto-gemini-3",
-        "auto-gemini-2.5",
-        "gemini-3-pro-preview",
-        "gemini-3-flash-preview",
-        "gemini-2.5-pro",
-        "gemini-2.5-flash",
-        "gemini-2.5-flash-lite",
-        "gemini-2.0-flash"
+        { id: "auto-gemini-3", context_window: 1000000 },
+        { id: "auto-gemini-2.5", context_window: 1000000 },
+        { id: "gemini-3-pro-preview", context_window: 1000000 },
+        { id: "gemini-3-flash-preview", context_window: 1000000 },
+        { id: "gemini-2.5-pro", context_window: 1000000 },
+        { id: "gemini-2.5-flash", context_window: 1000000 },
+        { id: "gemini-2.5-flash-lite", context_window: 1000000 },
+        { id: "gemini-2.0-flash", context_window: 1000000 }
     ];
     const modelId = req.params.model;
+    const model = models.find(m => m.id === modelId);
 
-    if (models.includes(modelId)) {
+    if (model) {
         return res.json({
-            id: modelId,
+            id: model.id,
             object: "model",
             created: 1686935002,
-            owned_by: "google"
+            owned_by: "google",
+            context_window: model.context_window
         });
     }
 

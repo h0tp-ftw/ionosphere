@@ -10,6 +10,7 @@
         "test": "node --test"
     },
     "dependencies": {
+        "@google/gemini-cli": "latest",
         "@modelcontextprotocol/sdk": "^1.26.0",
         "express": "^5.2.1",
         "multer": "^2.0.2",

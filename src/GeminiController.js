@@ -83,7 +83,7 @@ export class GeminiController {
                 fs.writeFileSync(systemPromptPath, systemPrompt, 'utf-8');
             }
 
-            let cliPath = process.env.GEMINI_CLI_PATH || 'gemini';
+            let cliPath = process.env.GEMINI_CLI_PATH || path.join(this.cwd, 'node_modules', '.bin', 'gemini');
             let finalArgs = [...args];
             let executable = cliPath;
 

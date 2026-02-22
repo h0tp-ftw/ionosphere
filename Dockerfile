@@ -2,24 +2,22 @@ FROM node:22-slim
 
 WORKDIR /app
 
-# Copy package info and install node deps
-COPY package*.json ./
+# Copy all application files first
+COPY . .
+
+# Install node deps locally. This includes @google/gemini-cli in package.json.
+# We run this AFTER copy to ensure the local node_modules is the final one.
 RUN npm install
 
-# Install the Gemini CLI globally
-# Tag defaults to `latest` (stable weekly release).
-# Override at build time: docker-compose build --build-arg GEMINI_CLI_TAG=preview
-ARG GEMINI_CLI_TAG=latest
-RUN npm install -g @google/gemini-cli@${GEMINI_CLI_TAG}
-
-# Copy application files
-COPY . .
+# Explicitly ensure gemini-cli is here and get version
+RUN ./node_modules/.bin/gemini --version
 
 # Ensure empty temp dir for file injections
 RUN mkdir -p temp
 
 # Environments
 ENV GEMINI_SETTINGS_JSON="/app/settings.json"
+ENV GEMINI_CLI_PATH="/app/node_modules/.bin/gemini"
 
 # Default Command: First generate settings, then start orchestrator
 CMD ["sh", "-c", "node scripts/generate_settings.js && node src/index.js"]

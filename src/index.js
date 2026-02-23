@@ -278,15 +278,15 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 const isHashMatch = activeTurnsByHash.get(historyHash) === hijackedTurnId;
 
                 if (!isHashMatch) {
-                     // Hash mismatch + Fingerprint match + No Tool ID match = New Instruction on same thread.
-                     // If the last message is USER, we assume interruption and preempt.
+                    // Hash mismatch + Fingerprint match + No Tool ID match = New Instruction on same thread.
+                    // If the last message is USER, we assume interruption and preempt.
 
-                     if (lastMsg && lastMsg.role === 'user') {
-                         console.log(`[API] One Session Rule: Preempting old turn ${hijackedTurnId} for new instruction on fingerprint ${fingerprint}`);
-                         controller.cancelCurrentTurn(hijackedTurnId);
-                         await new Promise(r => setTimeout(r, 200));
-                         hijackedTurnId = null; // Proceed to NEW TURN
-                     }
+                    if (lastMsg && lastMsg.role === 'user') {
+                        console.log(`[API] One Session Rule: Preempting old turn ${hijackedTurnId} for new instruction on fingerprint ${fingerprint}`);
+                        controller.cancelCurrentTurn(hijackedTurnId);
+                        await new Promise(r => setTimeout(r, 200));
+                        hijackedTurnId = null; // Proceed to NEW TURN
+                    }
                 }
             }
         }
@@ -930,14 +930,33 @@ app.get('/v1/models', (req, res) => {
         { id: "gemini-2.5-flash-lite", context_window: 1000000 },
         { id: "gemini-2.0-flash", context_window: 1000000 }
     ];
+    // Baseline timestamp for "modern" Gemini models
+    const created = 1715731200; // May 15, 2024 (Gemini 1.5 stable)
+
     res.json({
         object: "list",
         data: models.map(m => ({
             id: m.id,
             object: "model",
-            created: 1686935002,
+            created: created,
             owned_by: "google",
-            context_window: m.context_window
+            context_window: m.context_window,
+            permission: [
+                {
+                    id: `modelperm-${randomUUID()}`,
+                    object: "model_permission",
+                    created: created,
+                    allow_create_engine: false,
+                    allow_sampling: true,
+                    allow_logprobs: true,
+                    allow_search_indices: false,
+                    allow_view: true,
+                    allow_fine_tuning: false,
+                    organization: "*",
+                    group: null,
+                    is_blocking: false
+                }
+            ]
         }))
     });
 });
@@ -953,6 +972,7 @@ app.get('/v1/models/:model', (req, res) => {
         { id: "gemini-2.5-flash-lite", context_window: 1000000 },
         { id: "gemini-2.0-flash", context_window: 1000000 }
     ];
+    const created = 1715731200;
     const modelId = req.params.model;
     const model = models.find(m => m.id === modelId);
 
@@ -960,9 +980,25 @@ app.get('/v1/models/:model', (req, res) => {
         return res.json({
             id: model.id,
             object: "model",
-            created: 1686935002,
+            created: created,
             owned_by: "google",
-            context_window: model.context_window
+            context_window: model.context_window,
+            permission: [
+                {
+                    id: `modelperm-${randomUUID()}`,
+                    object: "model_permission",
+                    created: created,
+                    allow_create_engine: false,
+                    allow_sampling: true,
+                    allow_logprobs: true,
+                    allow_search_indices: false,
+                    allow_view: true,
+                    allow_fine_tuning: false,
+                    organization: "*",
+                    group: null,
+                    is_blocking: false
+                }
+            ]
         });
     }
 

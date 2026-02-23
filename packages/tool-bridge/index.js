@@ -198,10 +198,17 @@ for (const toolDef of openAiTools) {
 
     const namespacedName = `ionosphere__${name}`;
     process.stderr.write(`[ToolBridge] Registering namespaced OpenAI tool: ${namespacedName} (original: ${name})\n`);
+
+    // In @modelcontextprotocol/sdk v1.x, the tool() method takes 3 args: (name, schema, handler)
+    // The description should be part of the schema object.
+    const schema = {
+        ...openaiParamsToInputSchema(parameters),
+        description: description ?? `Client-side tool: ${name}`
+    };
+
     server.tool(
         namespacedName,
-        description ?? `Client-side tool: ${name}`,
-        openaiParamsToInputSchema(parameters),
+        schema,
         makeIpcHandler(name) // Still use original name for dispatch to client
     );
 }
@@ -230,10 +237,14 @@ for (const [serverName, config] of serverEntries) {
 
             process.stderr.write(`[ToolBridge] Re-registering: ${namespacedName}\n`);
 
+            const schema = {
+                ...(tool.inputSchema ?? { type: 'object', properties: {} }),
+                description: `[${serverName}] ${tool.description ?? tool.name}`
+            };
+
             server.tool(
                 namespacedName,
-                `[${serverName}] ${tool.description ?? tool.name}`,
-                tool.inputSchema ?? { type: 'object', properties: {} },
+                schema,
                 // Route via IPC → client — client is always the executor
                 makeIpcHandler(namespacedName)
             );

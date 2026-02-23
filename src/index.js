@@ -638,8 +638,10 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         const isSlash = lastMsg && lastMsg.role === 'user' && typeof lastMsg.content === 'string' && lastMsg.content.trim().startsWith('/');
 
         if (isSlash) {
+            conversationPromptSection += `[SYSTEM] This is a command instruction. Follow it literally. Always use the 'ionosphere__' prefix for any tools you call.\n\n`;
             conversationPromptSection = lastMsg.content.trim();
         } else {
+            conversationPromptSection += `[SYSTEM] Hard Handoff Mode: All tools MUST be called with the 'ionosphere__' prefix. For example, use 'ionosphere__read_file' instead of 'read_file'.\n\n`;
             for (const msg of req.body.messages) {
                 if (msg.role === 'system') systemMessage += (msg.content || "") + "\n";
                 else {
@@ -674,10 +676,10 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                                 const callId = tc.id || tc.tool_call_id || 'unknown';
                                 let toolName = tc.function?.name || tc.name || 'unknown';
 
-                                // Bare-Metal Normalization: Use stripped names in history 
-                                // to match the new bare-metal discovery state.
-                                if (toolName.startsWith('ionosphere__')) {
-                                    toolName = toolName.slice(12);
+                                // Strong Concrete Handoff: Ensure history ALWAYS uses prefixes
+                                // This primes the model to call the namespaced version.
+                                if (!toolName.startsWith('ionosphere__')) {
+                                    toolName = `ionosphere__${toolName}`;
                                 }
 
                                 // Handle both string arguments (OpenAI format) and object arguments (accumulatedToolCalls)
@@ -808,11 +810,11 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             };
             if (openAiTools) {
                 const toolsPath = path.join(turnTempDir, 'tools.json');
-                // Bare-Metal Tool Strategy: Don't prefix native Roo tools.
-                // This ensures names match the model's training and the client's expectations.
-                const bareTools = [];
+                // Strong Concrete Handoff: Strict Prefixing
+                const namespacedTools = [];
                 for (const t of openAiTools) {
                     const originalName = t.function?.name || t.name;
+                    const prefixedName = originalName.startsWith('ionosphere__') ? originalName : `ionosphere__${originalName}`;
 
                     // Relax schemas for Roo's native tools to prevent validation loops
                     const rooTools = ['read_file', 'list_files', 'apply_diff', 'search_files', 'execute_command', 'write_to_file'];
@@ -832,10 +834,13 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                         }
                     }
 
-                    // Just pass the tool exactly as it came from the client
-                    bareTools.push(t);
+                    // Always use the prefixed name for the CLI
+                    const prefixedTool = JSON.parse(JSON.stringify(t));
+                    if (prefixedTool.function) prefixedTool.function.name = prefixedName;
+                    else prefixedTool.name = prefixedName;
+                    namespacedTools.push(prefixedTool);
                 }
-                fs.writeFileSync(toolsPath, JSON.stringify(bareTools, null, 2));
+                fs.writeFileSync(toolsPath, JSON.stringify(namespacedTools, null, 2));
                 toolBridgeEnv.TOOL_BRIDGE_TOOLS = toolsPath;
             }
             if (req.body.mcpServers) {

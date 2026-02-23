@@ -210,24 +210,27 @@ for (const toolDef of openAiTools) {
     const { name, description, parameters } = fn;
     if (!name) continue;
 
+    // Namespacing: Standardize on ionosphere__ prefix.
+    const namespacedName = name.startsWith('ionosphere__') ? name : `ionosphere__${name}`;
+
     const schema = {
         ...openaiParamsToInputSchema(parameters),
         description: description ?? `Client-side tool: ${name}`
     };
 
-    process.stderr.write(`[ToolBridge] Registering OpenAI tool: ${name}\n`);
+    process.stderr.write(`[ToolBridge] Registering OpenAI tool: ${namespacedName}\n`);
     if (process.env.GEMINI_DEBUG_TOOLS === 'true') {
-        process.stderr.write(`[ToolBridge] Schema for ${name}: ${JSON.stringify(schema, null, 2)}\n`);
+        process.stderr.write(`[ToolBridge] Schema for ${namespacedName}: ${JSON.stringify(schema, null, 2)}\n`);
     }
 
     try {
         server.tool(
-            name,
+            namespacedName,
             schema,
-            makeIpcHandler(name)
+            makeIpcHandler(namespacedName) // Always use namespaced name for IPC
         );
     } catch (e) {
-        process.stderr.write(`[ToolBridge] ERROR: Failed to register tool ${name}: ${e.message}\n`);
+        process.stderr.write(`[ToolBridge] ERROR: Failed to register tool ${namespacedName}: ${e.message}\n`);
     }
 }
 

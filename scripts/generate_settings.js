@@ -35,18 +35,31 @@ export function generateConfig(options = {}) {
             maxSessionTurns: parseInt(process.env.GEMINI_MAX_TURNS) || 12
         },
         tools: {
+            core: (() => {
+                const hardened = process.env.GEMINI_HARDENED === 'true' || process.env.GEMINI_DISABLE_TOOLS === 'true';
+                if (hardened) {
+                    // Strictly allow only Google Search as a core tool.
+                    // Everything else must come from the bridge (MCP).
+                    return [
+                        "google_web_search",
+                        "google_search"
+                    ];
+                }
+                return undefined;
+            })(),
             exclude: (() => {
                 let excludeList = [];
                 const hardened = process.env.GEMINI_HARDENED === 'true' || process.env.GEMINI_DISABLE_TOOLS === 'true';
                 const extraExcludes = process.env.GEMINI_EXCLUDE_TOOLS ? process.env.GEMINI_EXCLUDE_TOOLS.split(',') : [];
 
                 if (hardened) {
-                    // Exclude all native tools except Google Search and read_many_files
+                    // Exclude all known native tools to prevent conflicts with bridge aliases.
                     excludeList = [
                         "glob",
                         "grep_search",
                         "list_directory",
                         "read_file",
+                        "read_many_files",
                         "run_shell_command",
                         "write_file",
                         "replace",
@@ -62,7 +75,8 @@ export function generateConfig(options = {}) {
                         "get_internal_docs",
                         "codebase_investigator",
                         "cli_help",
-                        "generalist"
+                        "generalist",
+                        "default_api"
                     ];
                 }
 

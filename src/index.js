@@ -571,9 +571,11 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             controller.updateCallbacks(hijackedTurnId, allCallbacks, extraEnv);
 
             // 2. Resolve or Re-emit
-            // Deep-scan: Check if ANY message in the current payload is a tool result for our pending calls
+            // Deep-scan: Check ONLY the last 5 messages in the current payload for tool results
+            // This prevents "Instant Resolution" against historical echoes in the narrations.
             let resolvedAny = false;
-            for (const msg of messages) {
+            const scanRange = messages.slice(-5);
+            for (const msg of scanRange) {
                 if (msg.role === 'tool' || msg.role === 'function') {
                     const callId = msg.tool_call_id;
                     const shortKey = callId?.startsWith('call_') ? callId.substring(5) : callId;

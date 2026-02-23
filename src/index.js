@@ -456,6 +456,56 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             if (heartbeatInterval) clearInterval(heartbeatInterval);
         };
 
+        const onEvent = (json) => {
+            console.log(`[Turn ${activeTurnId}] CLI Event: ${json.type}`);
+        };
+
+        const onPark = (msg) => {
+            if (responseSent) return;
+            console.log(`[Turn ${activeTurnId}] Yielding response on Parked state. Tool: ${msg.name}`);
+
+            if (isStreaming) {
+                // Send finish_reason if we have tool calls
+                sendChunk({
+                    id: `chatcmpl-stream`,
+                    object: 'chat.completion.chunk',
+                    created: Math.floor(Date.now() / 1000),
+                    model: responseModel,
+                    choices: [{
+                        index: 0,
+                        delta: {},
+                        finish_reason: accumulatedToolCalls.length > 0 ? "tool_calls" : "stop"
+                    }]
+                });
+                if (!res.writableEnded) {
+                    res.write('data: [DONE]\n\n');
+                    res.end();
+                }
+            } else {
+                const payload = {
+                    id: `chatcmpl-${activeTurnId}`,
+                    object: "chat.completion",
+                    created: Math.floor(Date.now() / 1000),
+                    model: responseModel,
+                    choices: [{
+                        index: 0,
+                        message: {
+                            role: "assistant",
+                            content: accumulatedText,
+                            tool_calls: accumulatedToolCalls.length > 0 ? accumulatedToolCalls : undefined
+                        },
+                        finish_reason: accumulatedToolCalls.length > 0 ? "tool_calls" : "stop"
+                    }],
+                    usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+                };
+                res.json(payload);
+            }
+            responseSent = true;
+            if (heartbeatInterval) clearInterval(heartbeatInterval);
+        };
+
+        const allCallbacks = { onText, onToolCall, onError, onResult, onEvent, onPark };
+
         // (Concurrency Gating consolidated into section 2/2.5)
 
         // --- WAIT-AND-HIJACK CASE ---
@@ -487,7 +537,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             }
 
             // 1. Update callbacks to pipe output to THIS response
-            controller.updateCallbacks(hijackedTurnId, { onText, onToolCall, onError, onResult });
+            controller.updateCallbacks(hijackedTurnId, allCallbacks);
 
             // 2. Resolve or Re-emit
             // Deep-scan: Check if ANY message in the current payload is a tool result for our pending calls
@@ -738,55 +788,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             mcpServers = { 'ionosphere-tool-bridge': { command: 'node', args: [TOOL_BRIDGE_PATH], env: toolBridgeEnv, trust: true } };
         }
 
-        const onEvent = (json) => {
-            console.log(`[Turn ${activeTurnId}] CLI Event: ${json.type}`);
-        };
-
         generateConfig({ targetPath: settingsPath, mcpServers, modelName: req.body.model });
-
-        const onPark = (msg) => {
-            if (responseSent) return;
-            console.log(`[Turn ${activeTurnId}] Yielding response on Parked state. Tool: ${msg.name}`);
-
-            if (isStreaming) {
-                // Send finish_reason if we have tool calls
-                sendChunk({
-                    id: `chatcmpl-stream`,
-                    object: 'chat.completion.chunk',
-                    created: Math.floor(Date.now() / 1000),
-                    model: responseModel,
-                    choices: [{
-                        index: 0,
-                        delta: {},
-                        finish_reason: accumulatedToolCalls.length > 0 ? "tool_calls" : "stop"
-                    }]
-                });
-                if (!res.writableEnded) {
-                    res.write('data: [DONE]\n\n');
-                    res.end();
-                }
-            } else {
-                const payload = {
-                    id: `chatcmpl-${activeTurnId}`,
-                    object: "chat.completion",
-                    created: Math.floor(Date.now() / 1000),
-                    model: responseModel,
-                    choices: [{
-                        index: 0,
-                        message: {
-                            role: "assistant",
-                            content: accumulatedText,
-                            tool_calls: accumulatedToolCalls.length > 0 ? accumulatedToolCalls : undefined
-                        },
-                        finish_reason: accumulatedToolCalls.length > 0 ? "tool_calls" : "stop"
-                    }],
-                    usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
-                };
-                res.json(payload);
-            }
-            responseSent = true;
-            if (heartbeatInterval) clearInterval(heartbeatInterval);
-        };
 
         const executeTask = async () => {
             let taskResolve;
@@ -798,9 +800,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 activeTurnsByHash.set(fingerprint, activeTurnId);
                 console.log(`[Turn ${activeTurnId}] Executing for fingerprint: ${fingerprint}`);
 
-                await controller.sendPrompt(activeTurnId, (conversationPromptSection || conversationPrompt).trim(), turnTempDir, settingsPath, systemMessage.trim(), {
-                    onText, onToolCall, onError, onResult, onEvent, onPark
-                }, {
+                await controller.sendPrompt(activeTurnId, (conversationPromptSection || conversationPrompt).trim(), turnTempDir, settingsPath, systemMessage.trim(), allCallbacks, {
                     IONOSPHERE_IPC: ipcPath,
                     IONOSPHERE_HISTORY_HASH: historyHash,
                     IONOSPHERE_HISTORY_TOOLS: historicalTools.join(',')

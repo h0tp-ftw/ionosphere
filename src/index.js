@@ -246,6 +246,22 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         const historyHash = getHistoryHash(messages);
         const fingerprint = getConversationFingerprint(messages);
 
+        const historicalTools = [];
+        for (const msg of messages) {
+            if (msg.role === 'assistant' && msg.tool_calls) {
+                for (const tc of msg.tool_calls) {
+                    let toolName = tc.function?.name || tc.name;
+                    // Uniform Namespacing: Use prefixed names for historical comparison to match bridge calls
+                    if (!toolName.includes('__') && !toolName.startsWith('ionosphere__')) {
+                        toolName = `ionosphere__${toolName}`;
+                    }
+                    const rawArgs = tc.function?.arguments || tc.arguments || "{}";
+                    const toolArgs = JSON.stringify(typeof rawArgs === 'string' ? JSON.parse(rawArgs) : rawArgs);
+                    historicalTools.push(`${historyHash}:${toolName}:${toolArgs}`);
+                }
+            }
+        }
+
         // --- TURN IDENTITY ---
         // We define activeTurnId early so it's available for all closures and hijacking logic.
         const activeTurnId = req.turnId || randomUUID();
@@ -680,21 +696,6 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             }
         }
 
-        const historicalTools = [];
-        for (const msg of messages) {
-            if (msg.role === 'assistant' && msg.tool_calls) {
-                for (const tc of msg.tool_calls) {
-                    let toolName = tc.function?.name || tc.name;
-                    // Uniform Namespacing: Use prefixed names for historical comparison to match bridge calls
-                    if (!toolName.includes('__') && !toolName.startsWith('ionosphere__')) {
-                        toolName = `ionosphere__${toolName}`;
-                    }
-                    const rawArgs = tc.function?.arguments || tc.arguments || "{}";
-                    const toolArgs = JSON.stringify(typeof rawArgs === 'string' ? JSON.parse(rawArgs) : rawArgs);
-                    historicalTools.push(`${historyHash}:${toolName}:${toolArgs}`);
-                }
-            }
-        }
 
         // Debug Persistence: Create directory if needed
         if (process.env.GEMINI_DEBUG_PROMPTS === 'true') {

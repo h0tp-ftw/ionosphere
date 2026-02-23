@@ -17,6 +17,7 @@
         "@google/gemini-cli-core": "^0.29.5",
         "@modelcontextprotocol/sdk": "^1.26.0",
         "express": "^5.2.1",
+        "inquirer": "^13.3.0",
         "multer": "^2.0.2",
         "openai": "^6.22.0"
     },

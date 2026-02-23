@@ -36,18 +36,17 @@ test('generateConfig - telemetry is disabled by default', () => {
     assert.equal(written.telemetry?.enabled, false);
 });
 
-test('generateConfig - sets maxSessionTurns to -1 (unlimited)', () => {
+test('generateConfig - sets maxSessionTurns to 12 (default)', () => {
     const { written } = generate();
-    assert.equal(written.model?.maxSessionTurns, -1);
+    assert.equal(written.model?.maxSessionTurns, 12);
 });
 
-test('generateConfig - builtin tools are excluded by default', () => {
+test('generateConfig - builtin tools are allowed by default', () => {
     const savedEnv = process.env.GEMINI_DISABLE_TOOLS;
     delete process.env.GEMINI_DISABLE_TOOLS; // let default behavior apply
     const { written } = generate();
-    const excluded = written.tools?.exclude ?? [];
-    assert.ok(excluded.includes('read_file'), 'read_file should be excluded');
-    assert.ok(excluded.includes('run_shell_command'), 'run_shell_command should be excluded');
+    const excluded = written.tools?.exclude;
+    assert.ok(excluded === undefined || excluded.length === 0, 'builtin tools should not be excluded by default');
     if (savedEnv !== undefined) process.env.GEMINI_DISABLE_TOOLS = savedEnv;
 });
 
@@ -94,7 +93,7 @@ test('generateConfig - customSettings merges without overwriting base fields', (
     const { written } = generate({ customSettings, modelName: 'gemini-test' });
     // Base field preserved
     assert.equal(written.model?.name, 'gemini-test');
-    assert.equal(written.model?.maxSessionTurns, -1);
+    assert.equal(written.model?.maxSessionTurns, 12);
     // Custom field added
     assert.equal(written.model?.someExtraField, 'extra');
 });

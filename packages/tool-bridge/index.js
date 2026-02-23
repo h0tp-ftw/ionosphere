@@ -171,7 +171,8 @@ function makeIpcHandler(toolName) {
             process.stderr.write(`[ToolBridge] → IPC dispatch: ${toolName}. Args: ${JSON.stringify(cleanArgs)}\n`);
             const result = await dispatchToolCall(toolName, cleanArgs);
             process.stderr.write(`[ToolBridge] ← IPC result received for: ${toolName}\n`);
-            return { content: [{ type: 'text', text: String(result) }] };
+            const stringified = typeof result === 'string' ? result : JSON.stringify(result);
+            return { content: [{ type: 'text', text: stringified }] };
         } catch (err) {
             process.stderr.write(`[ToolBridge] Error dispatching ${toolName}: ${err.message}\n`);
             return { content: [{ type: 'text', text: `Error: ${err.message}` }], isError: true };
@@ -214,7 +215,7 @@ for (const toolDef of openAiTools) {
     server.tool(
         namespacedName,
         schema,
-        makeIpcHandler(name) // Still use original name for dispatch to client
+        makeIpcHandler(namespacedName) // Use namespaced name for dispatch to client
     );
 }
 

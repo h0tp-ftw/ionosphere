@@ -636,18 +636,20 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                         if (msg.tool_calls) {
                             for (const tc of msg.tool_calls) {
                                 const callId = tc.id || tc.tool_call_id || 'unknown';
+                                const toolName = tc.function?.name || tc.name || 'unknown';
                                 // Handle both string arguments (OpenAI format) and object arguments (accumulatedToolCalls)
                                 const argsStr = typeof (tc.function?.arguments || tc.arguments) === 'string'
                                     ? (tc.function?.arguments || tc.arguments)
                                     : JSON.stringify(tc.function?.arguments || tc.arguments || {});
 
-                                content += `\n<action id="${callId}">Called tool '${namespacedName}' with args: ${argsStr}</action>`;
+                                content += `\n<action id="${callId}">Called tool '${toolName}' with args: ${argsStr}</action>`;
                             }
                         }
                         conversationPromptSection += `ASSISTANT: ${content.trim()}\n\n`;
                     } else if (msg.role === 'tool' || msg.role === 'function') {
                         const callId = msg.tool_call_id || 'unknown';
-                        conversationPromptSection += `<result id="${callId}">\n${text}\n</result>\n\n`;
+                        const resultStr = typeof text === 'string' ? text : JSON.stringify(text);
+                        conversationPromptSection += `<result id="${callId}">\n${resultStr}\n</result>\n\n`;
                     }
                 }
             }
@@ -694,8 +696,8 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                             const callKey = randomUUID();
                             const callId = `call_${callKey.substring(0, 8)}`;
 
-                            // Strip prefix for the CLIENT (Roo Code doesn't know about our namespacing)
-                            const clientToolName = msg.name.startsWith('ionosphere__') ? msg.name.substring(12) : msg.name;
+                            // Prefix names are now uniform across models and clients
+                            const clientToolName = msg.name;
 
                             pendingToolCalls.set(callKey, {
                                 socket,

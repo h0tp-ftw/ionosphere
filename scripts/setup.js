@@ -1,21 +1,21 @@
-import readline from 'readline';
+import inquirer from 'inquirer';
 import fs from 'fs';
 import path from 'path';
 import { spawnSync, spawn } from 'child_process';
 import { randomBytes } from 'crypto';
 
-const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout
-});
-
-const question = (query) => new Promise(resolve => rl.question(query, resolve));
-
 async function checkTermsOfService() {
     console.log("By using Ionosphere and the Gemini CLI, you agree to follow the Google API and Gemini CLI Terms of Service.");
     console.log("Please review them before proceeding.");
-    const agree = await question("Do you agree to these Terms of Service? (y/N): ");
-    if (agree.toLowerCase() !== 'y') {
+
+    const { agree } = await inquirer.prompt([{
+        type: 'confirm',
+        name: 'agree',
+        message: 'Do you agree to these Terms of Service?',
+        default: false
+    }]);
+
+    if (!agree) {
         console.error("❌ You must agree to the Terms of Service to use this software. Exiting.");
         process.exit(1);
     }
@@ -48,8 +48,15 @@ async function setupEnvAndAuth(isNative, composeCmd) {
 
     if (fs.existsSync(envPath)) {
         console.log(`✅ .env file already exists at ${envPath}.`);
-        const overwrite = await question("Do you want to overwrite it? (y/N): ");
-        if (overwrite.toLowerCase() !== 'y') {
+
+        const { overwrite } = await inquirer.prompt([{
+            type: 'confirm',
+            name: 'overwrite',
+            message: 'Do you want to overwrite it?',
+            default: false
+        }]);
+
+        if (!overwrite) {
             const currentEnv = fs.readFileSync(envPath, 'utf-8');
             const match = currentEnv.match(/^API_KEY=(.*)$/m);
             return match ? match[1] : undefined;
@@ -90,26 +97,50 @@ async function setupEnvAndAuth(isNative, composeCmd) {
         spawnSync(`${composeCmd} run --rm ionosphere gemini models list`, { stdio: 'inherit', shell: true });
     }
 
-    // We don't write the .env here anymore; we'll do it at the end of setup 
-    // to ensure all preferences are captured.
     return ionoKey;
 }
 
 async function setupPreferences() {
     console.log("\n--- Settings Configuration ---");
-    const telemetry = await question("Disable telemetry? (Y/n): ");
-    process.env.GEMINI_DISABLE_TELEMETRY = telemetry.toLowerCase() === 'n' ? 'false' : 'true';
 
-    const preview = await question("Enable preview models? (Y/n): ");
-    process.env.GEMINI_ENABLE_PREVIEW = preview.toLowerCase() === 'n' ? 'false' : 'true';
+    const answers = await inquirer.prompt([
+        {
+            type: 'confirm',
+            name: 'telemetry',
+            message: 'Disable telemetry?',
+            default: true
+        },
+        {
+            type: 'confirm',
+            name: 'preview',
+            message: 'Enable preview models?',
+            default: true
+        }
+    ]);
+
+    process.env.GEMINI_DISABLE_TELEMETRY = answers.telemetry ? 'true' : 'false';
+    process.env.GEMINI_ENABLE_PREVIEW = answers.preview ? 'true' : 'false';
 
     console.log("\n[SECURITY] Scorched Earth Hardening physically DELETES native tools from the container.");
     console.log("This is the most secure mode but may break deep CLI internal dependencies.");
-    const tools = await question("Enable physical 'Scorched Earth' tool deletion? (y/N): ");
-    process.env.GEMINI_DISABLE_TOOLS = tools.toLowerCase() === 'y' ? 'true' : 'false';
 
-    const search = await question("Disable Google Web Search tool as well? (y/N): ");
-    process.env.GEMINI_DISABLE_WEB_SEARCH = search.toLowerCase() === 'y' ? 'true' : 'false';
+    const { tools } = await inquirer.prompt([{
+        type: 'confirm',
+        name: 'tools',
+        message: "Enable physical 'Scorched Earth' tool deletion?",
+        default: false
+    }]);
+
+    process.env.GEMINI_DISABLE_TOOLS = tools ? 'true' : 'false';
+
+    const { search } = await inquirer.prompt([{
+        type: 'confirm',
+        name: 'search',
+        message: 'Disable Google Web Search tool as well?',
+        default: false
+    }]);
+
+    process.env.GEMINI_DISABLE_WEB_SEARCH = search ? 'true' : 'false';
 }
 
 async function generateSettings() {
@@ -140,13 +171,25 @@ async function main() {
         if (fs.existsSync(path.join(process.cwd(), '.env'))) {
             console.log("--- Maintenance Option ---");
             console.log("An existing .env was detected.");
-            const maintenance = await question("Would you like to enter the Maintenance Menu? (y/N): ");
 
-            if (maintenance.toLowerCase() === 'y') {
-                console.log("\n[1] Recover/View existing API Key");
-                console.log("[2] Fresh Build (Nuke containers, volumes, and images)");
-                console.log("[3] Back to Main Setup");
-                const mChoice = await question("Select Choice [1/2/3]: ");
+            const { maintenance } = await inquirer.prompt([{
+                type: 'confirm',
+                name: 'maintenance',
+                message: 'Would you like to enter the Maintenance Menu?',
+                default: false
+            }]);
+
+            if (maintenance) {
+                const { mChoice } = await inquirer.prompt([{
+                    type: 'list',
+                    name: 'mChoice',
+                    message: 'Select Choice',
+                    choices: [
+                        { name: 'Recover/View existing API Key', value: '1' },
+                        { name: 'Fresh Build (Nuke containers, volumes, and images)', value: '2' },
+                        { name: 'Back to Main Setup', value: '3' }
+                    ]
+                }]);
 
                 if (mChoice === '1') {
                     const currentEnv = fs.readFileSync(path.join(process.cwd(), '.env'), 'utf-8');
@@ -157,7 +200,6 @@ async function main() {
                     } else {
                         console.log("❌ API_KEY not found in .env.");
                     }
-                    rl.close();
                     return;
                 }
 
@@ -180,8 +222,20 @@ async function main() {
         await checkDependencies();
 
         console.log("\n--- Setup Environment ---");
-        const envChoice = await question("How will you run Ionosphere?\n[1] Native (Node.js) - NOT RECOMMENDED for production\n[2] Docker\n[3] Podman\nSelect [1/2/3] (default: 1): ");
-        const isNative = envChoice === '1' || envChoice === '';
+
+        const { envChoice } = await inquirer.prompt([{
+            type: 'list',
+            name: 'envChoice',
+            message: 'How will you run Ionosphere?',
+            choices: [
+                { name: 'Native (Node.js) - NOT RECOMMENDED for production', value: '1' },
+                { name: 'Docker', value: '2' },
+                { name: 'Podman', value: '3' }
+            ],
+            default: 0
+        }]);
+
+        const isNative = envChoice === '1';
         const isDocker = envChoice === '2';
         const isPodman = envChoice === '3';
 
@@ -231,17 +285,20 @@ async function main() {
             console.log("\nCopy this key into your AI applications (any OpenAI-compatible SDK or client)\n");
         }
 
-        const startNow = await question("Start the server now? (y/N): ");
-        rl.close();
+        const { startNow } = await inquirer.prompt([{
+            type: 'confirm',
+            name: 'startNow',
+            message: 'Start the server now?',
+            default: false
+        }]);
 
-        if (startNow.toLowerCase() === 'y') {
+        if (startNow) {
             console.log(`\n🚀 Starting the Ionosphere server...`);
 
             // Start the server
             if (isNative) {
                 console.log(`\n🚀 Starting the Ionosphere server...\n`);
                 spawnSync('npm start', { stdio: 'inherit', shell: true });
-                rl.close();
             } else {
                 console.log(`\n🏗️  Building Ionosphere image...`);
                 console.log(`⏳ (This may take a few minutes for the first build or code changes)\n`);
@@ -261,30 +318,22 @@ async function main() {
                             if (upCode === 0) {
                                 console.log(`\n✅ Server is running in the background.`);
                                 console.log(`📝 To view logs, run: ${composeCmd} logs -f\n`);
-
-                                // Finally close the readline and exit
-                                rl.close();
                                 process.exit(0);
                             } else {
                                 console.error(`\n❌ Failed to launch containers (Exit code: ${upCode}).`);
-                                rl.close();
                                 process.exit(upCode);
                             }
                         });
                     } else {
                         console.error(`\n❌ Build failed (Exit code: ${code}). Please check the errors above.`);
-                        rl.close();
                         process.exit(code);
                     }
                 });
             }
-        } else {
-            rl.close();
         }
 
     } catch (err) {
         console.error("Setup failed:", err);
-        rl.close();
     }
 }
 

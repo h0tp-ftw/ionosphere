@@ -636,7 +636,12 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                         if (msg.tool_calls) {
                             for (const tc of msg.tool_calls) {
                                 const callId = tc.id || tc.tool_call_id || 'unknown';
-                                const toolName = tc.function?.name || tc.name || 'unknown';
+                                let toolName = tc.function?.name || tc.name || 'unknown';
+                                // Ensure history identity: All our tools should be parked under ionosphere__
+                                if (!toolName.includes('__') && !toolName.startsWith('ionosphere__')) {
+                                    toolName = `ionosphere__${toolName}`;
+                                }
+
                                 // Handle both string arguments (OpenAI format) and object arguments (accumulatedToolCalls)
                                 const argsStr = typeof (tc.function?.arguments || tc.arguments) === 'string'
                                     ? (tc.function?.arguments || tc.arguments)
@@ -696,8 +701,8 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                             const callKey = randomUUID();
                             const callId = `call_${callKey.substring(0, 8)}`;
 
-                            // Prefix names are now uniform across models and clients
-                            const clientToolName = msg.name;
+                            // Prefix stripping: send ORIGINAL names to the client (Roo Code)
+                            const clientToolName = msg.name.startsWith('ionosphere__') ? msg.name.substring(12) : msg.name;
 
                             pendingToolCalls.set(callKey, {
                                 socket,

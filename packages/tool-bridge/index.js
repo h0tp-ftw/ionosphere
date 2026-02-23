@@ -251,8 +251,29 @@ for (const [serverName, config] of serverEntries) {
             server.tool(
                 namespacedName,
                 schema,
-                // Route via IPC → client — client is always the executor
-                makeIpcHandler(namespacedName)
+                async (args) => {
+                    try {
+                        process.stderr.write(`[ToolBridge] → Calling upstream tool: ${namespacedName}\n`);
+                        // Strip internal MCP SDK args if present
+                        const cleanArgs = { ...args };
+                        delete cleanArgs.signal;
+                        delete cleanArgs.requestId;
+
+                        const result = await upstreamClient.callTool({ name: tool.name, arguments: cleanArgs });
+                        process.stderr.write(`[ToolBridge] ← Upstream result received for: ${namespacedName}\n`);
+
+                        // Consolidate content blocks into a single string
+                        const text = result.content.map(c => {
+                            if (c.type === 'text') return c.text;
+                            return JSON.stringify(c);
+                        }).join('\n');
+
+                        return { content: [{ type: 'text', text: String(text) }] };
+                    } catch (err) {
+                        process.stderr.write(`[ToolBridge] Error calling upstream ${namespacedName}: ${err.message}\n`);
+                        return { content: [{ type: 'text', text: `Error: ${err.message}` }], isError: true };
+                    }
+                }
             );
         }
     } catch (err) {

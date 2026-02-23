@@ -210,6 +210,6 @@ test('ipc_bridge - socket file is removed on test cleanup (Unix only)', async ()
     assert.ok(fs.existsSync(ipcPath), 'Socket file should exist while server is listening');
 
     await new Promise(r => server.close(r));
-    if (fs.existsSync(ipcPath)) fs.unlinkSync(ipcPath);
+    try { fs.unlinkSync(ipcPath); } catch (e) { if (e.code !== 'ENOENT') throw e; }
     assert.ok(!fs.existsSync(ipcPath), 'Socket file should be removed after cleanup');
 });

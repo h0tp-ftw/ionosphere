@@ -316,12 +316,16 @@ export class GeminiController {
                 });
 
                 let lastStderr = '';
+                let lastStderrLines = [];
                 proc.stderr.on('data', (chunk) => {
                     const stderrText = chunk.toString().trim();
                     if (stderrText) {
+                        lastStderrLines.push(stderrText);
+                        if (lastStderrLines.length > 5) lastStderrLines.shift();
+
                         lastStderr = stderrText.split('\n').slice(-3).join('\n'); // Keep last 3 lines
                         const activeCallbacks = this.callbacksByTurn.get(turnId) || {};
-                        console.error(`[Gemini CLI STDERR] ${stderrText}`);
+                        console.error(`[Gemini CLI STDERR] [Turn ${turnId}] ${stderrText}`);
 
                         // ... (keep matches as they were)
                         const isAuthError = (/(please log in|auth|authorization)/i.test(stderrText) && !/unauthorized tool call/i.test(stderrText)) ||
@@ -384,7 +388,8 @@ export class GeminiController {
                     if (code === 0 || code === null) {
                         resolve(lastResultJson);
                     } else {
-                        const errorMsg = lastStderr ? `CLI failed (code ${code}): ${lastStderr}` : `CLI process exited with code ${code}`;
+                        const diagnostics = lastStderrLines.join('\n').trim();
+                        const errorMsg = diagnostics ? `CLI failed (code ${code}): ${diagnostics}` : `CLI process exited with code ${code}`;
                         reject(new Error(errorMsg));
                     }
                 });

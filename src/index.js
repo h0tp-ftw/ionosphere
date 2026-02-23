@@ -7,6 +7,7 @@ import path from 'path';
 import { randomUUID, createHash } from 'crypto';
 import { fileURLToPath } from 'url';
 import { generateConfig } from '../scripts/generate_settings.js';
+import { formatErrorResponse, getStatusCode, createError, ErrorType, ErrorCode } from './errorHandler.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -252,17 +253,19 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             const authHeader = req.headers['authorization'];
             if (!authHeader || !authHeader.startsWith('Bearer ')) {
                 console.log("[API] Auth Failed: Missing header");
-                return res.status(401).json({ error: { message: "Missing or formatted improperly Authorization header." } });
+                const err = createError("Missing or formatted improperly Authorization header.", ErrorType.AUTHENTICATION, ErrorCode.INVALID_API_KEY);
+                return res.status(401).json({ error: err });
             }
             if (authHeader.substring(7) !== expectedApiKey) {
                 console.log("[API] Auth Failed: Invalid key");
-                return res.status(401).json({ error: { message: "Invalid API Key" } });
+                const err = createError("Invalid API Key", ErrorType.AUTHENTICATION, ErrorCode.INVALID_API_KEY);
+                return res.status(401).json({ error: err });
             }
         }
 
         let messages = req.body.messages;
         if (!messages || !Array.isArray(messages)) {
-            return res.status(400).json({ error: "Missing 'messages' array" });
+            return res.status(400).json({ error: createError("Missing 'messages' array", ErrorType.INVALID_REQUEST, 'invalid_parameter') });
         }
 
         logRequestForensics(req);
@@ -457,17 +460,14 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         const onError = (err) => {
             if (responseSent || res.writableEnded) return;
             responseSent = true;
-            const errorObj = {
-                message: typeof err === 'string' ? err : (err.message || "Unknown error"),
-                type: (typeof err === 'object' && err.type) ? err.type : "internal_error",
-                code: (typeof err === 'object' && err.code) ? err.code : "cli_failure"
-            };
+
+            const errorObj = formatErrorResponse(err);
+            const status = getStatusCode(errorObj);
 
             if (isStreaming) {
                 sendChunk({ error: errorObj });
                 if (!res.writableEnded) res.end();
             } else {
-                const status = (errorObj.code === 'rate_limit_exceeded') ? 429 : 500;
                 if (!res.headersSent) res.status(status).json({ error: errorObj });
             }
             if (heartbeatInterval) clearInterval(heartbeatInterval);
@@ -689,6 +689,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         // Serialize history (Strict Stateless Narrator)
         let systemMessage = "";
         let conversationPromptSection = ""; // Renamed to avoid shadowed top-level historyHash if any
+        let imageCounter = 0;
         // Find the LAST user message to identify which one needs environment details
         const userMessages = req.body.messages.filter(m => m.role === 'user');
         const lastUserMsg = userMessages[userMessages.length - 1];
@@ -966,7 +967,8 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
     } catch (err) {
         console.error("[API Error]", err);
-        if (!res.headersSent) res.status(500).json({ error: err.message });
+        const errorObj = formatErrorResponse(err);
+        if (!res.headersSent) res.status(500).json({ error: errorObj });
         else res.end();
     }
 });

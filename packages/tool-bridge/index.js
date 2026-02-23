@@ -195,6 +195,16 @@ for (const toolDef of openAiTools) {
     const fn = toolDef.function ?? toolDef;
     const { name, description, parameters } = fn;
     if (!name) continue;
+    // Namespacing: Standardize on ionosphere__ prefix. 
+    // Guard against double-prefixing (if index.js already prefixed it in tools.json)
+    const namespacedName = name.startsWith('ionosphere__') ? name : `ionosphere__${name}`;
+
+    // In @modelcontextprotocol/sdk v1.x, the tool() method takes 3 args: (name, schema, handler)
+    // The description should be part of the schema object.
+    const schema = {
+        ...openaiParamsToInputSchema(parameters),
+        description: description ?? `Client-side tool: ${name}`
+    };
 
     process.stderr.write(`[ToolBridge] Registering OpenAI tool: ${namespacedName}\n`);
     if (process.env.GEMINI_DEBUG_TOOLS === 'true') {

@@ -195,7 +195,12 @@ async function main() {
         const ionoKey = await setupEnvAndAuth(isNative, composeCmd);
         await setupPreferences();
         await generateSettings();
-        await nukeNativeTools();
+
+        // ONLY nuke native tools on the host if we are running in Native mode.
+        // For Docker/Podman, the hardening is handled inside the image build via build-args.
+        if (isNative) {
+            await nukeNativeTools();
+        }
 
         console.log("\n=========================================");
         console.log("🎉 Setup Complete!");

@@ -40,10 +40,14 @@ const loosenSchema = (obj) => {
     if (obj.required && Array.isArray(obj.required)) {
         delete obj.required;
     }
-    // Deep Loosening: Remove type and format constraints to prevent CLI validation crashes
-    // This allows the model to send nulls/empties for fields that the bridge handles gracefully.
-    delete obj.type;
+    // Deep Loosening: Remove format constraints to prevent CLI validation crashes
     delete obj.format;
+
+    // MCP/JSON Schema requirement: type: "object" MUST stay for structural definitions.
+    // We only nuke type if it's a primitive (string, number, boolean, etc) to prevent strict-mode validation loops.
+    if (obj.type && obj.type !== 'object') {
+        delete obj.type;
+    }
 
     for (const key in obj) {
         if (typeof obj[key] === 'object') {

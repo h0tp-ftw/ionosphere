@@ -568,7 +568,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 }
                 // Refresh our view of who is active for this thread
                 // Note: We use the robust finder to ensure we track the right session even if hash shifts
-                const updatedId = findHijackedTurnId(messages, historyHash, fingerprint, activeTurnsByHash, parkedTurns, pendingToolCalls);
+                const updatedId = findHijackedTurnId(messages, historyHash, fingerprint, activeTurnsByHash, parkedTurns, pendingToolCalls, process.env.GEMINI_DEBUG_HANDOFF === 'true');
                 if (updatedId) hijackedTurnId = updatedId;
             }
         }

@@ -133,7 +133,9 @@ export class GeminiController {
                 }
 
                 if (process.env.GEMINI_DEBUG_PROMPTS === 'true') {
-                    console.log(`[GeminiController] TURN=${turnId} PROMPT_FILE=${tempPromptPath} HASH=${extraEnv.IONOSPHERE_HISTORY_HASH || 'none'}`);
+                    const hijackedFrom = this.callbacksByTurn.get(turnId)?.hijackedFrom;
+                    const context = hijackedFrom ? ` (Hijacked from ${hijackedFrom})` : "";
+                    console.log(`[GeminiController] TURN=${turnId}${context} PROMPT_FILE=${tempPromptPath} HASH=${extraEnv.IONOSPHERE_HISTORY_HASH || 'none'}`);
                     try {
                         const raw = fs.readFileSync(tempPromptPath, 'utf8');
                         console.log(`[GeminiController] RAW PROMPT (First 500 chars):\n${raw.substring(0, 500)}...`);
@@ -161,7 +163,9 @@ export class GeminiController {
                 accumulator.on('line', (json) => {
                     const activeCallbacks = this.callbacksByTurn.get(turnId) || {};
 
-                    console.log(`[Turn ${turnId}] CLI Raw Line: ${json.type}${json.role ? ' [' + json.role + ']' : ''}`);
+                    if (process.env.GEMINI_DEBUG_RAW === 'true') {
+                        console.log(`[Turn ${turnId}] CLI Raw Line: ${JSON.stringify(json).substring(0, 100)}...`);
+                    }
 
                     if (json.type === 'message' && json.role === 'assistant') {
                         const content = (typeof json.content === 'object') ? json.content.text : json.content;
@@ -179,9 +183,10 @@ export class GeminiController {
                                 // HACK: Only dispatch the leak if we HAVEN'T already seen a real tool call for this name in this turn
                                 // This prevents the "Echo Loop" where history narration triggers a new call.
                                 const alreadySeen = Array.from(this.processes.get(turnId)?.toolUsage || []).includes(toolName);
+                                const isLikelyHallucination = !argsStr || argsStr.trim() === '{}' || argsStr.trim().length < 2;
 
-                                if (!alreadySeen) {
-                                    console.log(`[GeminiController] Intercepted leaked tool call in text: ${toolName} (${callId})`);
+                                if (!alreadySeen && !isLikelyHallucination) {
+                                    console.log(`[GeminiController] Intercepted leaked tool call in text for Turn ${turnId}: ${toolName} (${callId})`);
                                     if (activeCallbacks.onToolCall) {
                                         activeCallbacks.onToolCall({
                                             id: callId.startsWith('leak_') ? callId : `leak_${callId}`,
@@ -189,8 +194,10 @@ export class GeminiController {
                                             arguments: argsStr.trim()
                                         });
                                     }
+                                } else if (isLikelyHallucination) {
+                                    console.log(`[GeminiController] Ignoring likely hallucinated tool call leak: ${toolName} with args: ${argsStr}`);
                                 } else {
-                                    console.log(`[GeminiController] Suppressing echo-leak for tool: ${toolName}. Current turn toolUsage: [${Array.from(this.processes.get(turnId)?.toolUsage || []).join(', ')}]`);
+                                    console.log(`[GeminiController] Suppressing echo-leak for tool '${toolName}' on Turn ${turnId}. (Already called in this turn)`);
                                 }
                             }
 
@@ -247,7 +254,7 @@ export class GeminiController {
                             // Non-transparent tools (MCP tools) are handled via the ionosphere-tool-bridge and IPC.
                             // We do NOT dispatch onToolCall here to avoid double-dispatching to the client.
                             // The IPC server in index.js will handle the actual dispatch and hijacking.
-                            console.log(`[GeminiController] Suppressing redundant JSON-stream dispatch for tool: ${toolName}`);
+                            console.log(`[GeminiController] Suppressing redundant JSON-stream dispatch for tool: ${toolName} (Turn: ${turnId})`);
                             if (activeCallbacks.onEvent) activeCallbacks.onEvent(json);
                         }
 
@@ -320,6 +327,8 @@ export class GeminiController {
 
                 proc.on('close', (code) => {
                     clearTimeout(timeout);
+                    const usageSummary = Array.from(this.processes.get(turnId)?.toolUsage || []).join(', ') || 'none';
+                    console.log(`[GeminiController] Process closed for turn ${turnId} with code ${code}. Tool Usage: [${usageSummary}]`);
                     this.processes.delete(turnId);
                     // Skip immediate cleanup of callbacks to allow error handlers in catch block
 

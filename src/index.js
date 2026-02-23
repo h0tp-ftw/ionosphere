@@ -144,7 +144,9 @@ const requestQueue = [];
 const resolveToolCall = (callKey, result) => {
     const pending = pendingToolCalls.get(callKey);
     if (!pending) {
-        console.warn(`[IPC] resolveToolCall: No pending call for ${callKey}`);
+        if (process.env.GEMINI_DEBUG_IPC === 'true') {
+            console.warn(`[IPC] resolveToolCall: No pending call for ${callKey}`);
+        }
         return false;
     }
     pendingToolCalls.delete(callKey);
@@ -153,7 +155,7 @@ const resolveToolCall = (callKey, result) => {
         console.log(`[IPC] Sending result to turn ${pending.turnId} for tool ${callKey}`);
         pending.socket.write(JSON.stringify({ event: 'tool_result', result: resultStr }) + '\n');
         pending.socket.end();
-        console.log(`[IPC] Resolved tool call ${callKey} for turn ${pending.turnId}`);
+        console.log(`[IPC] Resolved tool call ${callKey} (Turn: ${pending.turnId})`);
     } catch (e) {
         console.error('[IPC] Failed to write tool result:', e.message);
     }
@@ -311,7 +313,8 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             if (parked.historyHash === historyHash && pTurnId !== hijackedTurnId) {
                 console.log(`[API] Preemption: Killing old parked turn ${pTurnId} for same conversation thread.`);
                 parked.controller.cancelCurrentTurn(pTurnId);
-                // The Turn conclusion logic (finally block in executeTask) will cleanup parkedTurns and workspace
+                // Force immediate cleanup if cancellation doesn't trigger finally block fast enough
+                parkedTurns.delete(pTurnId);
             }
         }
 
@@ -343,8 +346,9 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
         const onText = (text) => {
             if (responseSent) return;
+            const contextMsg = hijackedTurnId ? `[HIJACKED from ${hijackedTurnId}] ` : "";
             if (process.env.GEMINI_DEBUG_RESPONSES === 'true') {
-                console.log(`[Turn ${activeTurnId}] SSE Text Chunk: ${text.substring(0, 50)}...`);
+                console.log(`[Turn ${activeTurnId}] ${contextMsg}SSE Text Chunk: ${text.substring(0, 50)}...`);
             }
             if (isStreaming) {
                 sendChunk({
@@ -361,12 +365,15 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
         const onToolCall = (info) => {
             if (responseSent) return;
-            console.log(`[Turn ${activeTurnId}] Dispatching Tool Call: ${info.name} (${info.id})`);
+            // Force stringification of arguments for OpenAI compatibility (Roo Code requirement)
+            const argsStr = typeof info.arguments === 'string' ? info.arguments : JSON.stringify(info.arguments || {});
+
+            console.log(`[Turn ${activeTurnId}] Dispatching Tool Call: ${info.name} (${info.id}) ARGS: ${argsStr.substring(0, 50)}...`);
 
             const toolCall = {
                 id: info.id,
                 type: 'function',
-                function: { name: info.name, arguments: info.arguments }
+                function: { name: info.name, arguments: argsStr }
             };
 
             accumulatedToolCalls.push(toolCall);
@@ -504,7 +511,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             if (heartbeatInterval) clearInterval(heartbeatInterval);
         };
 
-        const allCallbacks = { onText, onToolCall, onError, onResult, onEvent, onPark };
+        const allCallbacks = { onText, onToolCall, onError, onResult, onEvent, onPark, hijackedFrom: hijackedTurnId };
 
         // (Concurrency Gating consolidated into section 2/2.5)
 
@@ -564,10 +571,15 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 for (const [callKey, pending] of pendingToolCalls.entries()) {
                     if (pending.turnId === hijackedTurnId) {
                         const callId = `call_${callKey.substring(0, 8)}`;
-                        console.log(`[API] Proxy Hijack: Re-emitting call ${callId} (${pending.name})`);
+                        const clientToolName = pending.clientName || (pending.name.startsWith('ionosphere__') ? pending.name.substring(12) : pending.name);
+
+                        // Forensics: Log the arguments we are re-emitting
+                        const argsLog = typeof pending.arguments === 'string' ? pending.arguments : JSON.stringify(pending.arguments);
+                        console.log(`[API] Proxy Hijack: Re-emitting call ${callId} for tool '${clientToolName}' (Internal: ${pending.name}) ARGS: ${argsLog.substring(0, 50)}...`);
+
                         onToolCall({
                             id: callId,
-                            name: pending.name,
+                            name: clientToolName,
                             arguments: pending.arguments
                         });
                         reemitted = true;
@@ -704,11 +716,14 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                             // Prefix stripping: send ORIGINAL names to the client (Roo Code)
                             const clientToolName = msg.name.startsWith('ionosphere__') ? msg.name.substring(12) : msg.name;
 
+                            const argsStr = typeof msg.arguments === 'string' ? msg.arguments : JSON.stringify(msg.arguments || {});
+
                             pendingToolCalls.set(callKey, {
                                 socket,
                                 turnId: activeTurnId,
                                 name: msg.name, // Real namespaced name for the model
-                                arguments: msg.arguments
+                                clientName: clientToolName, // Stripped name for Roo Code
+                                arguments: argsStr
                             });
 
                             // Ensure the turn is marked as PARKED if it wasn't already
@@ -728,7 +743,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                                 callbacks.onToolCall({
                                     id: callId,
                                     name: clientToolName,
-                                    arguments: msg.arguments
+                                    arguments: argsStr
                                 });
                                 if (callbacks.onPark) {
                                     callbacks.onPark({ id: callId, name: clientToolName, arguments: msg.arguments });
@@ -833,7 +848,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 }
                 parkedTurns.delete(activeTurnId);
                 globalPromiseMap.delete(activeTurnId);
-                taskResolve();
+                if (taskResolve) taskResolve();
                 ipcServer.close();
                 if (process.platform !== 'win32') {
                     try { if (fs.existsSync(ipcPath)) fs.unlinkSync(ipcPath); } catch (_) { }

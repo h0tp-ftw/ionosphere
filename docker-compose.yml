@@ -10,6 +10,7 @@ services:
     restart: unless-stopped
     environment:
       - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_AUTH_TYPE=${GEMINI_AUTH_TYPE}
       - GEMINI_SETTINGS_JSON=/app/settings.json
       - GEMINI_HARDENED=true
     command: node src/index.js

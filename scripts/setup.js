@@ -45,7 +45,6 @@ async function setupEnvAndAuth(isNative, composeCmd) {
 
     // Generate a high-entropy unique API key for the bridge
     const ionoKey = `iono_sk_${randomBytes(24).toString('hex')}`;
-    const envContent = `GEMINI_CLI_PATH=gemini\nGEMINI_SETTINGS_JSON=./settings.json\nAPI_KEY=${ionoKey}\n`;
 
     if (fs.existsSync(envPath)) {
         console.log(`✅ .env file already exists at ${envPath}.`);
@@ -92,8 +91,8 @@ async function setupEnvAndAuth(isNative, composeCmd) {
         spawnSync(`${composeCmd} run --rm ionosphere gemini -p "${prompt}"`, { stdio: 'inherit', shell: true });
     }
 
-    fs.writeFileSync(envPath, envContent, 'utf-8');
-    console.log("✅ Created .env file.");
+    // We don't write the .env here anymore; we'll do it at the end of setup 
+    // to ensure all preferences are captured.
     return ionoKey;
 }
 
@@ -195,6 +194,23 @@ async function main() {
         const ionoKey = await setupEnvAndAuth(isNative, composeCmd);
         await setupPreferences();
         await generateSettings();
+
+        // Persist all captured preferences to the .env file
+        const envPath = path.join(process.cwd(), '.env');
+        const envContent = [
+            `GEMINI_CLI_PATH=gemini`,
+            `GEMINI_SETTINGS_JSON=./settings.json`,
+            `GEMINI_AUTH_TYPE=oauth-personal`,
+            `API_KEY=${ionoKey}`,
+            `GEMINI_DISABLE_TELEMETRY=${process.env.GEMINI_DISABLE_TELEMETRY}`,
+            `GEMINI_ENABLE_PREVIEW=${process.env.GEMINI_ENABLE_PREVIEW}`,
+            `GEMINI_DISABLE_TOOLS=${process.env.GEMINI_DISABLE_TOOLS}`,
+            `GEMINI_DISABLE_WEB_SEARCH=${process.env.GEMINI_DISABLE_WEB_SEARCH}`,
+            `GEMINI_HARDENED=true`
+        ].join('\n') + '\n';
+
+        fs.writeFileSync(envPath, envContent, 'utf-8');
+        console.log("✅ Finalized .env file with all preferences.");
 
         // ONLY nuke native tools on the host if we are running in Native mode.
         // For Docker/Podman, the hardening is handled inside the image build via build-args.

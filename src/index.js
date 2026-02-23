@@ -7,6 +7,7 @@ import path from 'path';
 import { randomUUID } from 'crypto';
 import { fileURLToPath } from 'url';
 import { generateConfig } from '../scripts/generate_settings.js';
+import { formatErrorResponse, getStatusCode, createError, ErrorType, ErrorCode } from './errorHandler.js';
 import { getHistoryHash, getConversationFingerprint, findHijackedTurnId } from './session_manager.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -209,17 +210,19 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             const authHeader = req.headers['authorization'];
             if (!authHeader || !authHeader.startsWith('Bearer ')) {
                 console.log("[API] Auth Failed: Missing header");
-                return res.status(401).json({ error: { message: "Missing or formatted improperly Authorization header." } });
+                const err = createError("Missing or formatted improperly Authorization header.", ErrorType.AUTHENTICATION, ErrorCode.INVALID_API_KEY);
+                return res.status(401).json({ error: err });
             }
             if (authHeader.substring(7) !== expectedApiKey) {
                 console.log("[API] Auth Failed: Invalid key");
-                return res.status(401).json({ error: { message: "Invalid API Key" } });
+                const err = createError("Invalid API Key", ErrorType.AUTHENTICATION, ErrorCode.INVALID_API_KEY);
+                return res.status(401).json({ error: err });
             }
         }
 
         let messages = req.body.messages;
         if (!messages || !Array.isArray(messages)) {
-            return res.status(400).json({ error: "Missing 'messages' array" });
+            return res.status(400).json({ error: createError("Missing 'messages' array", ErrorType.INVALID_REQUEST, 'invalid_parameter') });
         }
 
         logRequestForensics(req);
@@ -278,15 +281,15 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 const isHashMatch = activeTurnsByHash.get(historyHash) === hijackedTurnId;
 
                 if (!isHashMatch) {
-                     // Hash mismatch + Fingerprint match + No Tool ID match = New Instruction on same thread.
-                     // If the last message is USER, we assume interruption and preempt.
+                    // Hash mismatch + Fingerprint match + No Tool ID match = New Instruction on same thread.
+                    // If the last message is USER, we assume interruption and preempt.
 
-                     if (lastMsg && lastMsg.role === 'user') {
-                         console.log(`[API] One Session Rule: Preempting old turn ${hijackedTurnId} for new instruction on fingerprint ${fingerprint}`);
-                         controller.cancelCurrentTurn(hijackedTurnId);
-                         await new Promise(r => setTimeout(r, 200));
-                         hijackedTurnId = null; // Proceed to NEW TURN
-                     }
+                    if (lastMsg && lastMsg.role === 'user') {
+                        console.log(`[API] One Session Rule: Preempting old turn ${hijackedTurnId} for new instruction on fingerprint ${fingerprint}`);
+                        controller.cancelCurrentTurn(hijackedTurnId);
+                        await new Promise(r => setTimeout(r, 200));
+                        hijackedTurnId = null; // Proceed to NEW TURN
+                    }
                 }
             }
         }
@@ -402,17 +405,14 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         const onError = (err) => {
             if (responseSent || res.writableEnded) return;
             responseSent = true;
-            const errorObj = {
-                message: typeof err === 'string' ? err : (err.message || "Unknown error"),
-                type: (typeof err === 'object' && err.type) ? err.type : "internal_error",
-                code: (typeof err === 'object' && err.code) ? err.code : "cli_failure"
-            };
+
+            const errorObj = formatErrorResponse(err);
+            const status = getStatusCode(errorObj);
 
             if (isStreaming) {
                 sendChunk({ error: errorObj });
                 if (!res.writableEnded) res.end();
             } else {
-                const status = (errorObj.code === 'rate_limit_exceeded') ? 429 : 500;
                 if (!res.headersSent) res.status(status).json({ error: errorObj });
             }
             if (heartbeatInterval) clearInterval(heartbeatInterval);
@@ -431,7 +431,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                     usage: {
                         prompt_tokens: finalStats.input_tokens || 0,
                         completion_tokens: finalStats.output_tokens || 0,
-                        total_tokens: finalStats.total_tokens || 0
+                        total_tokens: (finalStats.input_tokens || 0) + (finalStats.output_tokens || 0)
                     }
                 });
                 if (!res.writableEnded) {
@@ -458,7 +458,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                         usage: {
                             prompt_tokens: finalStats.input_tokens || 0,
                             completion_tokens: finalStats.output_tokens || 0,
-                            total_tokens: finalStats.total_tokens || 0
+                            total_tokens: (finalStats.input_tokens || 0) + (finalStats.output_tokens || 0)
                         }
                     });
                     responseSent = true;
@@ -507,7 +507,11 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                         },
                         finish_reason: accumulatedToolCalls.length > 0 ? "tool_calls" : "stop"
                     }],
-                    usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+                    usage: {
+                        prompt_tokens: finalStats?.input_tokens || 0,
+                        completion_tokens: finalStats?.output_tokens || 0,
+                        total_tokens: (finalStats?.input_tokens || 0) + (finalStats?.output_tokens || 0)
+                    }
                 };
                 res.json(payload);
             }
@@ -537,6 +541,10 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 // Note: We use the robust finder to ensure we track the right session even if hash shifts
                 const updated = findHijackedTurnId(messages, historyHash, fingerprint, activeTurnsByHash, parkedTurns, pendingToolCalls);
                 if (updated && updated.turnId) hijackedTurnId = updated.turnId;
+            }
+            if (hijackedTurnId && !parkedTurns.has(hijackedTurnId)) {
+                console.warn(`[API] Wait-and-Hijack: Timed out waiting for turn ${hijackedTurnId} to park. Falling back to fresh turn.`);
+                hijackedTurnId = null;
             }
         }
 
@@ -913,8 +921,11 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         await enqueueControllerPrompt(executeTask);
 
     } catch (err) {
-        console.error("[API Error]", err);
-        if (!res.headersSent) res.status(500).json({ error: err.message });
+        console.error(`[API Error] Critical failure in /v1/chat/completions: ${err.stack || err.message}`);
+        const errorObj = formatErrorResponse(err);
+        if (!res.headersSent) {
+            res.status(getStatusCode(errorObj)).json({ error: errorObj });
+        }
         else res.end();
     }
 });
@@ -930,14 +941,33 @@ app.get('/v1/models', (req, res) => {
         { id: "gemini-2.5-flash-lite", context_window: 1000000 },
         { id: "gemini-2.0-flash", context_window: 1000000 }
     ];
+    // Baseline timestamp for "modern" Gemini models
+    const created = 1715731200; // May 15, 2024 (Gemini 1.5 stable)
+
     res.json({
         object: "list",
         data: models.map(m => ({
             id: m.id,
             object: "model",
-            created: 1686935002,
+            created: created,
             owned_by: "google",
-            context_window: m.context_window
+            context_window: m.context_window,
+            permission: [
+                {
+                    id: `modelperm-${randomUUID()}`,
+                    object: "model_permission",
+                    created: created,
+                    allow_create_engine: false,
+                    allow_sampling: true,
+                    allow_logprobs: true,
+                    allow_search_indices: false,
+                    allow_view: true,
+                    allow_fine_tuning: false,
+                    organization: "*",
+                    group: null,
+                    is_blocking: false
+                }
+            ]
         }))
     });
 });
@@ -953,6 +983,7 @@ app.get('/v1/models/:model', (req, res) => {
         { id: "gemini-2.5-flash-lite", context_window: 1000000 },
         { id: "gemini-2.0-flash", context_window: 1000000 }
     ];
+    const created = 1715731200;
     const modelId = req.params.model;
     const model = models.find(m => m.id === modelId);
 
@@ -960,9 +991,25 @@ app.get('/v1/models/:model', (req, res) => {
         return res.json({
             id: model.id,
             object: "model",
-            created: 1686935002,
+            created: created,
             owned_by: "google",
-            context_window: model.context_window
+            context_window: model.context_window,
+            permission: [
+                {
+                    id: `modelperm-${randomUUID()}`,
+                    object: "model_permission",
+                    created: created,
+                    allow_create_engine: false,
+                    allow_sampling: true,
+                    allow_logprobs: true,
+                    allow_search_indices: false,
+                    allow_view: true,
+                    allow_fine_tuning: false,
+                    organization: "*",
+                    group: null,
+                    is_blocking: false
+                }
+            ]
         });
     }
 

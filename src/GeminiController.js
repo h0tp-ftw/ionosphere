@@ -4,6 +4,7 @@ import path from 'path';
 import os from 'os';
 import fs from 'fs';
 import { randomUUID } from 'crypto';
+import { createError, ErrorType, ErrorCode } from './errorHandler.js';
 
 /**
  * Accumulates chunked stdout into distinct JSON lines.
@@ -198,7 +199,7 @@ export class GeminiController {
                     if (count >= 5) {
                         console.error(`[GeminiController] Repeat Breaker: Tool '${toolName}' called 5 times within the same Turn. Terminating process to prevent loop.`);
                         const errorMsg = `Loop detected: Model repeated tool '${toolName}' with same arguments 5 times. Terminating for safety.`;
-                        if (activeCallbacks.onError) activeCallbacks.onError({ type: 'error', message: errorMsg, code: 'LOOP_DETECTED' });
+                        if (activeCallbacks.onError) activeCallbacks.onError(createError(errorMsg, ErrorType.INVALID_REQUEST, ErrorCode.POLICY_DENIED));
                         if (activeCallbacks.onResult) activeCallbacks.onResult({ type: 'result', text: errorMsg, stats: {} });
                         proc.kill();
                         return 'KILL';
@@ -315,12 +316,16 @@ export class GeminiController {
                 });
 
                 let lastStderr = '';
+                let lastStderrLines = [];
                 proc.stderr.on('data', (chunk) => {
                     const stderrText = chunk.toString().trim();
                     if (stderrText) {
+                        lastStderrLines.push(stderrText);
+                        if (lastStderrLines.length > 5) lastStderrLines.shift();
+
                         lastStderr = stderrText.split('\n').slice(-3).join('\n'); // Keep last 3 lines
                         const activeCallbacks = this.callbacksByTurn.get(turnId) || {};
-                        console.error(`[Gemini CLI STDERR] ${stderrText}`);
+                        console.error(`[Gemini CLI STDERR] [Turn ${turnId}] ${stderrText}`);
 
                         // ... (keep matches as they were)
                         const isAuthError = (/(please log in|auth|authorization)/i.test(stderrText) && !/unauthorized tool call/i.test(stderrText)) ||
@@ -332,19 +337,19 @@ export class GeminiController {
 
                         if (isAuthError) {
                             const errorMsg = `Fatal: CLI Auth Expired or Missing. Raw: ${stderrText}`;
-                            if (activeCallbacks.onError) activeCallbacks.onError({ type: 'invalid_request_error', message: errorMsg, code: 'invalid_api_key' });
+                            if (activeCallbacks.onError) activeCallbacks.onError(createError(errorMsg, ErrorType.AUTHENTICATION, ErrorCode.INVALID_API_KEY));
                             proc.kill('SIGKILL');
                         } else if (isResourceError) {
                             const errorMsg = `Fatal: Gemini API Quota/Capacity Exhausted (429). Raw: ${stderrText}`;
-                            if (activeCallbacks.onError) activeCallbacks.onError({ type: 'rate_limit_error', message: errorMsg, code: 'rate_limit_exceeded' });
+                            if (activeCallbacks.onError) activeCallbacks.onError(createError(errorMsg, ErrorType.RATE_LIMIT, ErrorCode.RATE_LIMIT_EXCEEDED));
                             proc.kill('SIGKILL');
                         } else if (isModelError) {
                             const errorMsg = `Fatal: Model not found or inaccessible. Raw: ${stderrText}`;
-                            if (activeCallbacks.onError) activeCallbacks.onError({ type: 'invalid_request_error', message: errorMsg, code: 'model_not_found' });
+                            if (activeCallbacks.onError) activeCallbacks.onError(createError(errorMsg, ErrorType.INVALID_REQUEST, ErrorCode.MODEL_NOT_FOUND));
                             proc.kill('SIGKILL');
                         } else if (isPolicyError) {
                             const errorMsg = `Fatal: Tool use or action denied by policy. Raw: ${stderrText}`;
-                            if (activeCallbacks.onError) activeCallbacks.onError({ type: 'access_denied', message: errorMsg, code: 'policy_denied' });
+                            if (activeCallbacks.onError) activeCallbacks.onError(createError(errorMsg, ErrorType.PERMISSION, ErrorCode.POLICY_DENIED));
                             proc.kill('SIGKILL');
                         } else if (isNotFound) {
                             const match = stderrText.match(/Tool "([^"]+)" not found/i);
@@ -383,7 +388,8 @@ export class GeminiController {
                     if (code === 0 || code === null) {
                         resolve(lastResultJson);
                     } else {
-                        const errorMsg = lastStderr ? `CLI failed (code ${code}): ${lastStderr}` : `CLI process exited with code ${code}`;
+                        const diagnostics = lastStderrLines.join('\n').trim();
+                        const errorMsg = diagnostics ? `CLI failed (code ${code}): ${diagnostics}` : `CLI process exited with code ${code}`;
                         reject(new Error(errorMsg));
                     }
                 });
@@ -400,7 +406,7 @@ export class GeminiController {
         } catch (err) {
             console.error(`[GeminiController] Turn error: ${err.message}`);
             const activeCallbacks = this.callbacksByTurn.get(turnId) || {};
-            if (activeCallbacks.onError) activeCallbacks.onError({ type: 'error', message: err.message });
+            if (activeCallbacks.onError) activeCallbacks.onError(createError(err.message, ErrorType.SERVER, ErrorCode.INTERNAL_ERROR));
         } finally {
             this.callbacksByTurn.delete(turnId);
         }

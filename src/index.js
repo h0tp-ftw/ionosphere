@@ -4,9 +4,10 @@ import net from 'net';
 import { GeminiController } from './GeminiController.js';
 import fs from 'fs';
 import path from 'path';
-import { randomUUID, createHash } from 'crypto';
+import { randomUUID } from 'crypto';
 import { fileURLToPath } from 'url';
 import { generateConfig } from '../scripts/generate_settings.js';
+import { getHistoryHash, getConversationFingerprint, findHijackedTurnId } from './session_manager.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -54,50 +55,6 @@ const loosenSchema = (obj) => {
             loosenSchema(obj[key]);
         }
     }
-};
-
-/**
- * Computes a hash of the conversation messages to identify a thread.
- * Traditional hash is very sensitive.
- */
-const getHistoryHash = (messages) => {
-    const serialized = JSON.stringify(messages.map(m => ({ role: m.role, content: m.content, name: m.name, tool_call_id: m.tool_call_id })));
-    return createHash('sha256').update(serialized).digest('hex');
-};
-
-/**
- * A more stable identifier that ignores slight metadata or "thinking" changes.
- * Useful for catching retries that might have slightly different history.
- */
-const getConversationFingerprint = (messages) => {
-    // Stable Turn Anchor: based on the FIRST user message and system prompt
-    // This is more resilient to history truncation/sliding windows.
-    const systemMsg = messages.find(m => m.role === 'system');
-
-    // Find the FIRST user message
-    const firstUserMsg = messages.find(m => m.role === 'user');
-
-    const extractText = (content) => {
-        if (!content) return "";
-        let text = "";
-        if (typeof content === 'string') text = content;
-        else if (Array.isArray(content)) {
-            text = content.map(p => (typeof p === 'object' && p.type === 'text') ? p.text : "").join("");
-        }
-
-        // Drift Resistance: Try to isolate the core <user_message>
-        const userMsgMatch = text.match(/<user_message>([\s\S]*?)<\/user_message>/);
-        if (userMsgMatch) return userMsgMatch[1].trim();
-
-        // Fallback: Strip known dynamic blocks like <environment_details>
-        return text.replace(/<environment_details>[\s\S]*?<\/environment_details>/g, "").trim();
-    };
-
-    const system = extractText(systemMsg?.content);
-    const firstUser = extractText(firstUserMsg?.content);
-
-    // Hash the purified content (first 500 chars)
-    return createHash('sha256').update(`${system.substring(0, 100)}:${firstUser.substring(0, 500)}`).digest('hex').substring(0, 12);
 };
 
 const logRequestForensics = (req) => {
@@ -303,45 +260,33 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
         // 2. Identify "Handoff" (Warm Stateless Continuity)
         let lastMsg = messages[messages.length - 1];
-        let hijackedTurnId = null;
 
-        const byHash = activeTurnsByHash.get(historyHash);
-        const byFinger = activeTurnsByHash.get(fingerprint);
+        // Find existing session to hijack using robust logic (Deep Scan + Fingerprint)
+        let { turnId: hijackedTurnId, matchType } = findHijackedTurnId(messages, historyHash, fingerprint, activeTurnsByHash, parkedTurns, pendingToolCalls, process.env.GEMINI_DEBUG_HANDOFF === 'true') || {};
 
-        if (byHash) {
-            hijackedTurnId = byHash;
-            console.log(`[HIJACK] Exact Hash Match (Thread Safe): Turn ${hijackedTurnId}`);
-        } else if (byFinger && parkedTurns.has(byFinger)) {
-            // Priority: If the turn is already Parked, we MUST hijack it to deliver the next message (approval/data)
-            hijackedTurnId = byFinger;
-            console.log(`[HIJACK] Fingerprint Match (Parked Turn): Turn ${hijackedTurnId}`);
-        } else if (byFinger && lastMsg && (lastMsg.role === 'tool' || lastMsg.role === 'function')) {
-            hijackedTurnId = byFinger;
-            console.log(`[HIJACK] Fingerprint Anchor Match (Tool Continuation): Turn ${hijackedTurnId}`);
-        } else if (byFinger) {
-            // New Instruction Case: We have a fingerprint match but the hash is different.
-            // Under the One Session Rule, we will PREEMPT (kill) the old turn and start a NEW one.
-            const oldTurnId = byFinger;
-            console.log(`[API] One Session Rule: Preempting old turn ${oldTurnId} for new instruction on fingerprint ${fingerprint}`);
-            controller.cancelCurrentTurn(oldTurnId);
-            // We wait a tiny bit for the cleanup to start, then proceed to NEW TURN logic
-            await new Promise(r => setTimeout(r, 200));
-        }
+        // Handle "New Instruction" Case (Preemption)
+        if (hijackedTurnId && !parkedTurns.has(hijackedTurnId)) {
+            // Check if this is a "New Instruction" that requires preemption (killing old turn) instead of waiting.
+            // This happens when hash differs (so new messages) but fingerprint matches, and it's NOT a tool continuation we identified.
 
-        if (!hijackedTurnId && lastMsg && (lastMsg.role === 'tool' || lastMsg.role === 'function')) {
-            const callId = lastMsg.tool_call_id;
-            const shortKey = callId?.startsWith('call_') ? callId.substring(5) : callId;
+            const isToolMatch = matchType === 'tool_call';
 
-            if (process.env.GEMINI_DEBUG_HANDOFF === 'true') {
-                console.log(`[Handoff] Attempting match for callId: ${callId}, shortKey: ${shortKey}, pending: ${pendingToolCalls.size}`);
-            }
+            if (!isToolMatch) {
+                // Not a tool match. Must be a fingerprint match.
+                // If the history hash is different, it means we have new messages (user instruction).
+                // If it's NOT a tool continuation (checked by isToolMatch), then it is a new user instruction.
+                const isHashMatch = activeTurnsByHash.get(historyHash) === hijackedTurnId;
 
-            // Find the full callKey in pendingToolCalls
-            for (const [callKey, pending] of pendingToolCalls.entries()) {
-                if (callKey.startsWith(shortKey)) {
-                    hijackedTurnId = pending.turnId;
-                    console.log(`[API] Hijack discovery: Match found for ${callId} -> Turn ${hijackedTurnId}`);
-                    break;
+                if (!isHashMatch) {
+                     // Hash mismatch + Fingerprint match + No Tool ID match = New Instruction on same thread.
+                     // If the last message is USER, we assume interruption and preempt.
+
+                     if (lastMsg && lastMsg.role === 'user') {
+                         console.log(`[API] One Session Rule: Preempting old turn ${hijackedTurnId} for new instruction on fingerprint ${fingerprint}`);
+                         controller.cancelCurrentTurn(hijackedTurnId);
+                         await new Promise(r => setTimeout(r, 200));
+                         hijackedTurnId = null; // Proceed to NEW TURN
+                     }
                 }
             }
         }
@@ -589,7 +534,9 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                     break;
                 }
                 // Refresh our view of who is active for this thread
-                hijackedTurnId = activeTurnsByHash.get(historyHash) || activeTurnsByHash.get(fingerprint);
+                // Note: We use the robust finder to ensure we track the right session even if hash shifts
+                const updated = findHijackedTurnId(messages, historyHash, fingerprint, activeTurnsByHash, parkedTurns, pendingToolCalls);
+                if (updated && updated.turnId) hijackedTurnId = updated.turnId;
             }
         }
 

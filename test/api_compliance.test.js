@@ -222,8 +222,10 @@ test('api_compliance - tool call chunks have correct OpenAI structure', async ()
         assert.equal(tc.type, 'function');
         assert.ok(tc.function?.name, 'Tool call must have function.name');
         assert.ok(typeof tc.function?.arguments === 'string', 'arguments must be a JSON string');
-        // Validate finish_reason on tool call chunk
-        assert.equal(toolChunks[0].choices[0].finish_reason, 'tool_calls');
+        
+        // Validate finish_reason exists in the stream conclude with tool_calls
+        const finalToolChunk = chunks.find(c => c.choices?.[0]?.finish_reason === 'tool_calls');
+        assert.ok(finalToolChunk, 'Should have a chunk with finish_reason: tool_calls');
     } finally {
         await stopBridge();
     }

@@ -192,7 +192,7 @@ async function main() {
         if (ionoKey) {
             console.log("🔑 YOUR IONOSPHERE API KEY:");
             console.log(`   ${ionoKey}`);
-            console.log("\nCopy this key into your AI applications (Roo Code, opencode, etc.)\n");
+            console.log("\nCopy this key into your AI applications (any OpenAI-compatible SDK or client)\n");
         }
 
         const startNow = await question("Start the server now? (y/N): ");

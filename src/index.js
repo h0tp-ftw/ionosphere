@@ -30,6 +30,24 @@ const sanitizePromptText = (text) => {
 };
 
 /**
+ * Recursively removes 'required' constraints from a JSON Schema.
+ * This ensures the Gemini CLI doesn't pre-flight crash on tool calls 
+ * that the underlying software (any OpenAI-compatible SDK) might accept.
+ * This makes Ionosphere a robust, transparent proxy for ANY client.
+ */
+const loosenSchema = (obj) => {
+    if (!obj || typeof obj !== 'object') return;
+    if (obj.required && Array.isArray(obj.required)) {
+        delete obj.required;
+    }
+    for (const key in obj) {
+        if (typeof obj[key] === 'object') {
+            loosenSchema(obj[key]);
+        }
+    }
+};
+
+/**
  * Computes a hash of the conversation messages to identify a thread.
  * Traditional hash is very sensitive.
  */
@@ -58,12 +76,8 @@ const getConversationFingerprint = (messages) => {
             text = content.map(p => (typeof p === 'object' && p.type === 'text') ? p.text : "").join("");
         }
 
-        // Drift Resistance: Try to isolate the core <user_message>
-        const userMsgMatch = text.match(/<user_message>([\s\S]*?)<\/user_message>/);
-        if (userMsgMatch) return userMsgMatch[1].trim();
-
-        // Fallback: Strip known dynamic blocks like <environment_details>
-        return text.replace(/<environment_details>[\s\S]*?<\/environment_details>/g, "").trim();
+        // Return trimmed text for general stability
+        return text.trim();
     };
 
     const system = extractText(systemMsg?.content);
@@ -385,7 +399,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
         const onToolCall = (info) => {
             if (responseSent) return;
-            // Force stringification of arguments for OpenAI compatibility (Roo Code requirement)
+            // Force stringification of arguments for strict OpenAI compatibility
             const argsStr = typeof info.arguments === 'string' ? info.arguments : JSON.stringify(info.arguments || {});
 
             console.log(`[Turn ${activeTurnId}] Dispatching Tool Call: ${info.name} (${info.id}) FULL ARGS: ${argsStr}`);
@@ -638,10 +652,6 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         let conversationPromptSection = ""; // Renamed to avoid shadowed top-level historyHash if any
         let imageCounter = 0;
 
-        // Find the LAST user message to identify which one needs environment details
-        const userMessages = messages.filter(m => m.role === 'user');
-        const lastUserMsg = userMessages[userMessages.length - 1];
-
         // Check if the last message is a slash command (for probing)
         const isSlash = lastMsg && lastMsg.role === 'user' && typeof lastMsg.content === 'string' && lastMsg.content.trim().startsWith('/');
 
@@ -671,10 +681,6 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                     }
 
                     if (msg.role === 'user') {
-                        // History Deduplication: Strip environment details from non-latest messages to prevent prompt bloat
-                        if (msg !== lastUserMsg) {
-                            text = text.replace(/<environment_details>[\s\S]*?<\/environment_details>/g, "[Environment details stripped for brevity]");
-                        }
                         conversationPromptSection += `USER: ${text}\n\n`;
                     }
                     else if (msg.role === 'assistant') {
@@ -742,7 +748,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                             const callKey = randomUUID();
                             const callId = `call_${callKey.substring(0, 8)}`;
 
-                            // Prefix stripping: send ORIGINAL names to the client (Roo Code)
+                            // Prefix stripping: send ORIGINAL names back to the client
                             const clientToolName = msg.name.startsWith('ionosphere__') ? msg.name.substring(12) : msg.name;
 
                             const argsStr = typeof msg.arguments === 'string' ? msg.arguments : JSON.stringify(msg.arguments || {});
@@ -750,8 +756,8 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                             pendingToolCalls.set(callKey, {
                                 socket,
                                 turnId: activeTurnId,
-                                name: msg.name, // Real namespaced name for the model
-                                clientName: clientToolName, // Stripped name for Roo Code
+                                name: msg.name, // Internal namespaced name
+                                clientName: clientToolName, // Stripped name for client compatibility
                                 arguments: argsStr
                             });
 
@@ -832,28 +838,10 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                     toolCopy.strict = false;
                     if (fn.strict !== undefined) fn.strict = false;
 
-                    // Relax schemas for Roo's native tools to prevent validation loops
-                    const rooTools = ['read_file', 'list_files', 'apply_diff', 'search_files', 'execute_command', 'write_to_file', 'ask_followup_question', 'attempt_completion', 'read_command_output'];
-                    if (rooTools.includes(originalName)) {
-                        if (fn.parameters?.required) {
-                            const essentials = {
-                                'read_file': ['path'],
-                                'list_files': ['path'],
-                                'apply_diff': ['path', 'diff'],
-                                'search_files': ['path', 'regex'],
-                                'execute_command': ['command'],
-                                'write_to_file': ['path', 'content'],
-                                'ask_followup_question': ['question', 'follow_up'],
-                                'attempt_completion': ['result'],
-                                'read_command_output': ['artifact_id']
-                            };
-                            fn.parameters.required = essentials[originalName] || fn.parameters.required;
-                        }
-                        // Deep-fix for ask_followup_question follow_up items
-                        if (originalName === 'ask_followup_question' && fn.parameters?.properties?.follow_up?.items?.required) {
-                            fn.parameters.properties.follow_up.items.required = ['text']; // Remove 'mode' requirement
-                        }
-                    }
+                    // Generic Schema Relaxation: Recursively remove 'required' constraints.
+                    // This shifts validation from the "Outer Shell" (Gemini CLI) to the 
+                    // "Inner Logic" (the Tool Handler), ensuring compatibility with any SDK.
+                    loosenSchema(fn.parameters);
 
                     // Standardize namespacing
                     if (toolCopy.function) toolCopy.function.name = prefixedName;

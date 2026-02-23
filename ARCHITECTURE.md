@@ -8,7 +8,7 @@ Ionosphere is a **strictly stateless** HTTP bridge that translates OpenAI-compat
 
 ```mermaid
 flowchart TD
-    Client["OpenAI-compatible Client\n(Roo Code / opencode / SDK)"]
+    Client["OpenAI-compatible Client\n(SDK / App / IDE Extension)"]
     Bridge["Ionosphere Bridge\n(src/index.js — Express HTTP)"]
     Settings["settings.json\n(per-request temp dir)"]
     CLI["Gemini CLI\n(node process)"]

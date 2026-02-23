@@ -35,6 +35,21 @@ const PROTECTED_TOOLS = [
     'read-many-files.js'
 ];
 
+// Special stubs for tools that export helper functions required by the CLI core
+const SPECIAL_STUBS = {
+    'memoryTool.js': `
+export const DEFAULT_CONTEXT_FILENAME = "GEMINI.md";
+export const MEMORY_SECTION_HEADER = "## Gemini Added Memories";
+export function setGeminiMdFilename(f) {}
+export function getCurrentGeminiMdFilename() { return DEFAULT_CONTEXT_FILENAME; }
+export function getAllGeminiMdFilenames() { return [DEFAULT_CONTEXT_FILENAME]; }
+export function getGlobalMemoryFilePath() { return ""; }
+`,
+    'shell.js': `
+export const OUTPUT_UPDATE_INTERVAL_MS = 1000;
+`
+};
+
 function nukeTool(fileName) {
     const filePath = path.join(toolsDir, fileName);
 
@@ -51,7 +66,7 @@ function nukeTool(fileName) {
     const toolName = fileName.replace('.js', '');
     const className = toolName.split('-').map(part => part.charAt(0).toUpperCase() + part.slice(1)).join('') + 'Tool';
 
-    const stubContent = `
+    let stubContent = `
 /**
  * [NUKE] This tool has been deactivated for security hardening by Ionosphere.
  * It has been replaced by a stub to prevent hallucination loops and ensure 
@@ -71,6 +86,11 @@ export class ${className} {
     }
 }
 `;
+
+    // Append special stubs if needed to satisfy core dependencies
+    if (SPECIAL_STUBS[fileName]) {
+        stubContent += SPECIAL_STUBS[fileName];
+    }
 
     try {
         fs.writeFileSync(filePath, stubContent, 'utf-8');

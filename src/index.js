@@ -673,9 +673,11 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                             for (const tc of msg.tool_calls) {
                                 const callId = tc.id || tc.tool_call_id || 'unknown';
                                 let toolName = tc.function?.name || tc.name || 'unknown';
-                                // Ensure history identity: All our tools should be parked under ionosphere__
-                                if (!toolName.includes('__') && !toolName.startsWith('ionosphere__')) {
-                                    toolName = `ionosphere__${toolName}`;
+
+                                // Bare-Metal Normalization: Use stripped names in history 
+                                // to match the new bare-metal discovery state.
+                                if (toolName.startsWith('ionosphere__')) {
+                                    toolName = toolName.slice(12);
                                 }
 
                                 // Handle both string arguments (OpenAI format) and object arguments (accumulatedToolCalls)
@@ -806,11 +808,11 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             };
             if (openAiTools) {
                 const toolsPath = path.join(turnTempDir, 'tools.json');
-                // Uniform Namespacing: Prefix names in tools.json so the model sees ionosphere__ prefix
-                const namespacedTools = [];
+                // Bare-Metal Tool Strategy: Don't prefix native Roo tools.
+                // This ensures names match the model's training and the client's expectations.
+                const bareTools = [];
                 for (const t of openAiTools) {
                     const originalName = t.function?.name || t.name;
-                    const prefixedName = originalName.startsWith('ionosphere__') ? originalName : `ionosphere__${originalName}`;
 
                     // Relax schemas for Roo's native tools to prevent validation loops
                     const rooTools = ['read_file', 'list_files', 'apply_diff', 'search_files', 'execute_command', 'write_to_file'];
@@ -830,21 +832,10 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                         }
                     }
 
-                    // 1. Add the prefixed version (Official)
-                    const prefixedTool = JSON.parse(JSON.stringify(t));
-                    if (prefixedTool.function) prefixedTool.function.name = prefixedName;
-                    else prefixedTool.name = prefixedName;
-                    namespacedTools.push(prefixedTool);
-
-                    // 2. Add the bare version (Alias) if it's not already prefixed
-                    if (originalName !== prefixedName) {
-                        const bareTool = JSON.parse(JSON.stringify(t));
-                        if (bareTool.function) bareTool.function.name = originalName;
-                        else bareTool.name = originalName;
-                        namespacedTools.push(bareTool);
-                    }
+                    // Just pass the tool exactly as it came from the client
+                    bareTools.push(t);
                 }
-                fs.writeFileSync(toolsPath, JSON.stringify(namespacedTools, null, 2));
+                fs.writeFileSync(toolsPath, JSON.stringify(bareTools, null, 2));
                 toolBridgeEnv.TOOL_BRIDGE_TOOLS = toolsPath;
             }
             if (req.body.mcpServers) {

@@ -38,6 +38,17 @@ if (!ipcPath) {
     process.exit(1);
 }
 
+// Global Error Handling to prevent silent discovery crashes
+process.on('uncaughtException', (err) => {
+    process.stderr.write(`[ToolBridge] FATAL UNCAUGHT EXCEPTION: ${err.stack || err}\n`);
+    process.exit(1);
+});
+
+process.on('unhandledRejection', (reason) => {
+    process.stderr.write(`[ToolBridge] FATAL UNHANDLED REJECTION: ${reason?.stack || reason}\n`);
+    process.exit(1);
+});
+
 let openAiTools = [];
 if (process.env.TOOL_BRIDGE_TOOLS) {
     try {
@@ -182,9 +193,11 @@ function makeIpcHandler(toolName) {
 
 function openaiParamsToInputSchema(parameters) {
     if (!parameters || typeof parameters !== 'object') {
-        return { type: 'object', properties: {} };
+        return { type: 'object', properties: {}, required: [] };
     }
-    return parameters;
+    const schema = { ...parameters };
+    if (!schema.required) schema.required = [];
+    return schema;
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -196,37 +209,25 @@ for (const toolDef of openAiTools) {
     const fn = toolDef.function ?? toolDef;
     const { name, description, parameters } = fn;
     if (!name) continue;
-    // Namespacing: Standardize on ionosphere__ prefix. 
-    // Guard against double-prefixing (if index.js already prefixed it in tools.json)
-    const namespacedName = name.startsWith('ionosphere__') ? name : `ionosphere__${name}`;
 
-    // In @modelcontextprotocol/sdk v1.x, the tool() method takes 3 args: (name, schema, handler)
-    // The description should be part of the schema object.
     const schema = {
         ...openaiParamsToInputSchema(parameters),
         description: description ?? `Client-side tool: ${name}`
     };
 
-    process.stderr.write(`[ToolBridge] Registering OpenAI tool: ${namespacedName} (Alias: ${name})\n`);
+    process.stderr.write(`[ToolBridge] Registering OpenAI tool: ${name}\n`);
     if (process.env.GEMINI_DEBUG_TOOLS === 'true') {
-        process.stderr.write(`[ToolBridge] Schema for ${namespacedName}: ${JSON.stringify(schema, null, 2)}\n`);
+        process.stderr.write(`[ToolBridge] Schema for ${name}: ${JSON.stringify(schema, null, 2)}\n`);
     }
 
-    // 1a. Register the namespaced version (The "Official" name)
-    server.tool(
-        namespacedName,
-        schema,
-        makeIpcHandler(namespacedName)
-    );
-
-    // 1b. Register the original name as an alias (The "Instinct" name)
-    // This allows the model to use 'read_file' instead of 'ionosphere__read_file'
-    if (name !== namespacedName) {
+    try {
         server.tool(
             name,
             schema,
-            makeIpcHandler(namespacedName) // Always dispatch with namespaced name to orchestrator
+            makeIpcHandler(name)
         );
+    } catch (e) {
+        process.stderr.write(`[ToolBridge] ERROR: Failed to register tool ${name}: ${e.message}\n`);
     }
 }
 
@@ -259,33 +260,37 @@ for (const [serverName, config] of serverEntries) {
                 description: `[${serverName}] ${tool.description ?? tool.name}`
             };
 
-            server.tool(
-                namespacedName,
-                schema,
-                async (args) => {
-                    try {
-                        process.stderr.write(`[ToolBridge] → Calling upstream tool: ${namespacedName}\n`);
-                        // Strip internal MCP SDK args if present
-                        const cleanArgs = { ...args };
-                        delete cleanArgs.signal;
-                        delete cleanArgs.requestId;
+            try {
+                server.tool(
+                    namespacedName,
+                    schema,
+                    async (args) => {
+                        try {
+                            process.stderr.write(`[ToolBridge] → Calling upstream tool: ${namespacedName}\n`);
+                            // Strip internal MCP SDK args if present
+                            const cleanArgs = { ...args };
+                            delete cleanArgs.signal;
+                            delete cleanArgs.requestId;
 
-                        const result = await upstreamClient.callTool({ name: tool.name, arguments: cleanArgs });
-                        process.stderr.write(`[ToolBridge] ← Upstream result received for: ${namespacedName}\n`);
+                            const result = await upstreamClient.callTool({ name: tool.name, arguments: cleanArgs });
+                            process.stderr.write(`[ToolBridge] ← Upstream result received for: ${namespacedName}\n`);
 
-                        // Consolidate content blocks into a single string
-                        const text = result.content.map(c => {
-                            if (c.type === 'text') return c.text;
-                            return JSON.stringify(c);
-                        }).join('\n');
+                            // Consolidate content blocks into a single string
+                            const text = result.content.map(c => {
+                                if (c.type === 'text') return c.text;
+                                return JSON.stringify(c);
+                            }).join('\n');
 
-                        return { content: [{ type: 'text', text: String(text) }] };
-                    } catch (err) {
-                        process.stderr.write(`[ToolBridge] Error calling upstream ${namespacedName}: ${err.message}\n`);
-                        return { content: [{ type: 'text', text: `Error: ${err.message}` }], isError: true };
+                            return { content: [{ type: 'text', text: String(text) }] };
+                        } catch (err) {
+                            process.stderr.write(`[ToolBridge] Error calling upstream ${namespacedName}: ${err.message}\n`);
+                            return { content: [{ type: 'text', text: `Error: ${err.message}` }], isError: true };
+                        }
                     }
-                }
-            );
+                );
+            } catch (e) {
+                process.stderr.write(`[ToolBridge] ERROR: Failed to register upstream tool ${namespacedName}: ${e.message}\n`);
+            }
         }
     } catch (err) {
         process.stderr.write(`[ToolBridge] WARN: Failed to aggregate server "${serverName}": ${err.message}\n`);

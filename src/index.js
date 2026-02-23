@@ -595,7 +595,10 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                         if (msg.tool_calls) {
                             for (const tc of msg.tool_calls) {
                                 const callId = tc.id || tc.tool_call_id || 'unknown';
-                                content += `\n<action id="${callId}">Called tool '${tc.function?.name || tc.name}' with args: ${tc.function?.arguments || tc.arguments}</action>`;
+                                const originalName = tc.function?.name || tc.name;
+                                // Uniform Namespacing: History must match available tools (ionosphere__ prefix)
+                                const namespacedName = originalName.startsWith('ionosphere__') ? originalName : `ionosphere__${originalName}`;
+                                content += `\n<action id="${callId}">Called tool '${namespacedName}' with args: ${tc.function?.arguments || tc.arguments}</action>`;
                             }
                         }
                         conversationPromptSection += `ASSISTANT: ${content.trim()}\n\n`;
@@ -638,15 +641,22 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 while ((nl = buf.indexOf('\n')) !== -1) {
                     const line = buf.slice(0, nl).trim();
                     buf = buf.slice(nl + 1);
+                    if (process.env.GEMINI_DEBUG_IPC === 'true') {
+                        console.log(`[IPC] Raw payload: ${line}`);
+                    }
                     try {
                         const msg = JSON.parse(line);
                         if (msg.event === 'tool_call') {
                             const callKey = randomUUID();
                             const callId = `call_${callKey.substring(0, 8)}`;
+
+                            // Strip prefix for the CLIENT (Roo Code doesn't know about our namespacing)
+                            const clientToolName = msg.name.startsWith('ionosphere__') ? msg.name.substring(12) : msg.name;
+
                             pendingToolCalls.set(callKey, {
                                 socket,
                                 turnId: activeTurnId,
-                                name: msg.name,
+                                name: msg.name, // Real namespaced name for the model
                                 arguments: msg.arguments
                             });
 
@@ -655,21 +665,21 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                                 console.log(`[Turn ${activeTurnId}] Parking via IPC tool call: ${msg.name}`);
                                 parkedTurns.set(activeTurnId, {
                                     controller,
-                                    executePromise: globalPromiseMap.get(activeTurnId), // Use a global map to find the promise
+                                    executePromise: globalPromiseMap.get(activeTurnId),
                                     cleanupWorkspace: () => fs.rmSync(turnTempDir, { recursive: true, force: true }),
                                     historyHash
                                 });
                             }
 
-                            // Trigger dispatcher (Handoff logic will pick this up when the CLIENT calls back)
+                            // Trigger dispatcher
                             const callbacks = controller.callbacksByTurn.get(activeTurnId);
                             if (callbacks) {
                                 if (callbacks.onPark) {
-                                    callbacks.onPark({ id: callId, name: msg.name, arguments: msg.arguments });
+                                    callbacks.onPark({ id: callId, name: clientToolName, arguments: msg.arguments });
                                 }
                                 callbacks.onToolCall({
                                     id: callId,
-                                    name: msg.name,
+                                    name: clientToolName,
                                     arguments: msg.arguments
                                 });
                             }
@@ -706,15 +716,29 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         const openAiTools = req.body.tools || null;
         let mcpServers = null;
         if (openAiTools || req.body.mcpServers) {
-            const toolBridgeEnv = { TOOL_BRIDGE_IPC: ipcPath };
+            const toolBridgeEnv = {
+                TOOL_BRIDGE_IPC: ipcPath,
+                GEMINI_DEBUG_TOOLS: process.env.GEMINI_DEBUG_TOOLS || 'false',
+                GEMINI_DEBUG_IPC: process.env.GEMINI_DEBUG_IPC || 'false'
+            };
             if (openAiTools) {
                 const toolsPath = path.join(turnTempDir, 'tools.json');
-                fs.writeFileSync(toolsPath, JSON.stringify(openAiTools));
+                // Uniform Namespacing: Prefix names in tools.json so the model sees ionosphere__ prefix
+                const namespacedTools = openAiTools.map(t => {
+                    const name = t.function?.name || t.name;
+                    if (t.function) {
+                        t.function.name = name.startsWith('ionosphere__') ? name : `ionosphere__${name}`;
+                    } else {
+                        t.name = name.startsWith('ionosphere__') ? name : `ionosphere__${name}`;
+                    }
+                    return t;
+                });
+                fs.writeFileSync(toolsPath, JSON.stringify(namespacedTools, null, 2));
                 toolBridgeEnv.TOOL_BRIDGE_TOOLS = toolsPath;
             }
             if (req.body.mcpServers) {
                 const mcpPath = path.join(turnTempDir, 'mcp_servers.json');
-                fs.writeFileSync(mcpPath, JSON.stringify(req.body.mcpServers));
+                fs.writeFileSync(mcpPath, JSON.stringify(req.body.mcpServers, null, 2));
                 toolBridgeEnv.TOOL_BRIDGE_MCP_SERVERS = mcpPath;
             }
             mcpServers = { 'ionosphere-tool-bridge': { command: 'node', args: [TOOL_BRIDGE_PATH], env: toolBridgeEnv, trust: true } };

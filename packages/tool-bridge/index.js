@@ -168,7 +168,7 @@ function makeIpcHandler(toolName) {
             delete cleanArgs.signal;
             delete cleanArgs.requestId;
 
-            process.stderr.write(`[ToolBridge] → IPC dispatch: ${toolName}\n`);
+            process.stderr.write(`[ToolBridge] → IPC dispatch: ${toolName}. Args: ${JSON.stringify(cleanArgs)}\n`);
             const result = await dispatchToolCall(toolName, cleanArgs);
             process.stderr.write(`[ToolBridge] ← IPC result received for: ${toolName}\n`);
             return { content: [{ type: 'text', text: String(result) }] };
@@ -196,15 +196,10 @@ for (const toolDef of openAiTools) {
     const { name, description, parameters } = fn;
     if (!name) continue;
 
-    const namespacedName = `ionosphere__${name}`;
-    process.stderr.write(`[ToolBridge] Registering namespaced OpenAI tool: ${namespacedName} (original: ${name})\n`);
-
-    // In @modelcontextprotocol/sdk v1.x, the tool() method takes 3 args: (name, schema, handler)
-    // The description should be part of the schema object.
-    const schema = {
-        ...openaiParamsToInputSchema(parameters),
-        description: description ?? `Client-side tool: ${name}`
-    };
+    process.stderr.write(`[ToolBridge] Registering OpenAI tool: ${namespacedName}\n`);
+    if (process.env.GEMINI_DEBUG_TOOLS === 'true') {
+        process.stderr.write(`[ToolBridge] Schema for ${namespacedName}: ${JSON.stringify(schema, null, 2)}\n`);
+    }
 
     server.tool(
         namespacedName,

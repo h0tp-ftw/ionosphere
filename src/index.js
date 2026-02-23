@@ -687,6 +687,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         if (!fs.existsSync(turnTempDir)) fs.mkdirSync(turnTempDir, { recursive: true });
 
         // Serialize history (Strict Stateless Narrator)
+        let imageCounter = 0;
         let systemMessage = "";
         let conversationPromptSection = ""; // Renamed to avoid shadowed top-level historyHash if any
         // Find the LAST user message to identify which one needs environment details

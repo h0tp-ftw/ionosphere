@@ -14,6 +14,13 @@ RUN npm install --omit=dev && npm cache clean --force
 COPY src/ ./src/
 COPY scripts/ ./scripts/
 COPY packages/ ./packages/
+
+# Propagate setup preferences into the build phase for Scorched Earth hardening
+ARG GEMINI_DISABLE_TOOLS
+ARG GEMINI_DISABLE_WEB_SEARCH
+ENV GEMINI_DISABLE_TOOLS=${GEMINI_DISABLE_TOOLS}
+ENV GEMINI_DISABLE_WEB_SEARCH=${GEMINI_DISABLE_WEB_SEARCH}
+
 RUN node scripts/nuke-tools.js
 
 # 4. Prepare environment and executable

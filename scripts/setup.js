@@ -80,8 +80,9 @@ async function setupEnvAndAuth(isNative, composeCmd) {
         }
     } else {
         console.log("\nContainer mode selected. Building Image...");
-        // Build the image quickly so we can use its CLI.
-        spawnSync(`${composeCmd} build`, { stdio: 'inherit', shell: true });
+        // Pass build args to ensure Scorched Earth hardening is applied during image build
+        const buildArgs = `--build-arg GEMINI_DISABLE_TOOLS=${process.env.GEMINI_DISABLE_TOOLS || 'false'} --build-arg GEMINI_DISABLE_WEB_SEARCH=${process.env.GEMINI_DISABLE_WEB_SEARCH || 'false'}`;
+        spawnSync(`${composeCmd} build ${buildArgs}`, { stdio: 'inherit', shell: true });
 
         console.log("\nTriggering Isolated Container OAuth Flow...");
         console.log("The Gemini CLI will launch inside the container and open a browser link for authentication.");
@@ -221,8 +222,9 @@ async function main() {
                 console.log(`\n🏗️  Building Ionosphere image...`);
                 console.log(`⏳ (This may take a few minutes for the first build or code changes)\n`);
 
+                const buildArgs = `--build-arg GEMINI_DISABLE_TOOLS=${process.env.GEMINI_DISABLE_TOOLS || 'false'} --build-arg GEMINI_DISABLE_WEB_SEARCH=${process.env.GEMINI_DISABLE_WEB_SEARCH || 'false'}`;
                 // Use spawn for the build to ensure real-time output streaming on all platforms
-                const buildProcess = spawn(`${composeCmd} build`, { stdio: 'inherit', shell: true });
+                const buildProcess = spawn(`${composeCmd} build ${buildArgs}`, { stdio: 'inherit', shell: true });
 
                 buildProcess.on('exit', (code) => {
                     if (code === 0) {

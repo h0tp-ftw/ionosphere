@@ -2,7 +2,11 @@ version: '3.8'
 
 services:
   ionosphere:
-    build: .
+    build:
+      context: .
+      args:
+        - GEMINI_DISABLE_TOOLS=${GEMINI_DISABLE_TOOLS:-false}
+        - GEMINI_DISABLE_WEB_SEARCH=${GEMINI_DISABLE_WEB_SEARCH:-false}
     restart: unless-stopped
     environment:
       - GEMINI_API_KEY=${GEMINI_API_KEY}

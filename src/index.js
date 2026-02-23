@@ -827,7 +827,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                     if (fn.strict !== undefined) fn.strict = false;
 
                     // Relax schemas for Roo's native tools to prevent validation loops
-                    const rooTools = ['read_file', 'list_files', 'apply_diff', 'search_files', 'execute_command', 'write_to_file'];
+                    const rooTools = ['read_file', 'list_files', 'apply_diff', 'search_files', 'execute_command', 'write_to_file', 'ask_followup_question', 'attempt_completion'];
                     if (rooTools.includes(originalName)) {
                         if (fn.parameters?.required) {
                             const essentials = {
@@ -836,9 +836,15 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                                 'apply_diff': ['path', 'diff'],
                                 'search_files': ['path', 'regex'],
                                 'execute_command': ['command'],
-                                'write_to_file': ['path', 'content']
+                                'write_to_file': ['path', 'content'],
+                                'ask_followup_question': ['question', 'follow_up'],
+                                'attempt_completion': ['result']
                             };
                             fn.parameters.required = essentials[originalName] || fn.parameters.required;
+                        }
+                        // Deep-fix for ask_followup_question follow_up items
+                        if (originalName === 'ask_followup_question' && fn.parameters?.properties?.follow_up?.items?.required) {
+                            fn.parameters.properties.follow_up.items.required = ['text']; // Remove 'mode' requirement
                         }
                     }
 

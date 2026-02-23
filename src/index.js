@@ -673,6 +673,9 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                                     name: clientToolName,
                                     arguments: msg.arguments
                                 });
+                                if (callbacks.onPark) {
+                                    callbacks.onPark({ id: callId, name: clientToolName, arguments: msg.arguments });
+                                }
                             }
                         }
                     } catch (e) {

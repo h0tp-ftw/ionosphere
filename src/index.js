@@ -529,6 +529,12 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             }
             responseSent = true;
             if (heartbeatInterval) clearInterval(heartbeatInterval);
+
+            // Kill the CLI on park to enforce strict statelessness and prevent internal loops
+            // The next HTTP request (the tool result) will re-spawn the CLI.
+            setTimeout(() => {
+                controller.cancelCurrentTurn(activeTurnId);
+            }, 100);
         };
 
         const allCallbacks = { onText, onToolCall, onError, onResult, onEvent, onPark, hijackedFrom: hijackedTurnId };
@@ -640,10 +646,10 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         const isSlash = lastMsg && lastMsg.role === 'user' && typeof lastMsg.content === 'string' && lastMsg.content.trim().startsWith('/');
 
         if (isSlash) {
-            conversationPromptSection += `[SYSTEM] This is a command instruction. Follow it literally. Always use the 'ionosphere__' prefix for any tools you call.\n\n`;
+            conversationPromptSection += `[SYSTEM] This is a command instruction. Follow it literally. You may use tools with or without the 'ionosphere__' prefix.\n\n`;
             conversationPromptSection = lastMsg.content.trim();
         } else {
-            conversationPromptSection += `[SYSTEM] Hard Handoff Mode: All tools MUST be called with the 'ionosphere__' prefix. For example, use 'ionosphere__read_file' instead of 'read_file'.\n\n`;
+            conversationPromptSection += `[SYSTEM] Tool Protocol: You have access to tools via the Ionosphere bridge. You may call them using their bare names (e.g., 'read_file') or with the 'ionosphere__' prefix. Both are supported.\n\n`;
             for (const msg of req.body.messages) {
                 if (msg.role === 'system') systemMessage += (msg.content || "") + "\n";
                 else {
@@ -827,7 +833,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                     if (fn.strict !== undefined) fn.strict = false;
 
                     // Relax schemas for Roo's native tools to prevent validation loops
-                    const rooTools = ['read_file', 'list_files', 'apply_diff', 'search_files', 'execute_command', 'write_to_file', 'ask_followup_question', 'attempt_completion'];
+                    const rooTools = ['read_file', 'list_files', 'apply_diff', 'search_files', 'execute_command', 'write_to_file', 'ask_followup_question', 'attempt_completion', 'read_command_output'];
                     if (rooTools.includes(originalName)) {
                         if (fn.parameters?.required) {
                             const essentials = {
@@ -838,7 +844,8 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                                 'execute_command': ['command'],
                                 'write_to_file': ['path', 'content'],
                                 'ask_followup_question': ['question', 'follow_up'],
-                                'attempt_completion': ['result']
+                                'attempt_completion': ['result'],
+                                'read_command_output': ['artifact_id']
                             };
                             fn.parameters.required = essentials[originalName] || fn.parameters.required;
                         }

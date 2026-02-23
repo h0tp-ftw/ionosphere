@@ -174,7 +174,9 @@ export class GeminiController {
                     const currentEnv = proc?.extraEnv || extraEnv;
                     if (!currentEnv.IONOSPHERE_HISTORY_HASH) return false;
                     const hash = currentEnv.IONOSPHERE_HISTORY_HASH;
-                    if (!this.repeatTracker) this.repeatTracker = new Map();
+
+                    // Scope repeat tracker to the process/turn to prevent persistence bugs on retries
+                    if (!proc.repeatTracker) proc.repeatTracker = new Map();
 
                     // Normalize toolName to be prefix-agnostic for loop tracking
                     const normalizedToolName = toolName.startsWith('ionosphere__') ? toolName.slice(12) : toolName;
@@ -189,13 +191,13 @@ export class GeminiController {
                         return true; // Ignore historical echoes
                     }
 
-                    const count = (this.repeatTracker.get(key) || 0) + 1;
-                    this.repeatTracker.set(key, count);
+                    const count = (proc.repeatTracker.get(key) || 0) + 1;
+                    proc.repeatTracker.set(key, count);
                     console.log(`[GeminiController] [FORENSICS] Repeat Tracker: ${toolName} count=${count} for key ${key.substring(0, 15)}...`);
 
-                    if (count >= 3) {
-                        console.error(`[GeminiController] Repeat Breaker: Tool '${toolName}' called 3 times within the same Turn or stateless context. Terminating process to prevent loop.`);
-                        const errorMsg = `Loop detected: Model repeated tool '${toolName}' with same arguments 3 times. Terminating for safety.`;
+                    if (count >= 5) {
+                        console.error(`[GeminiController] Repeat Breaker: Tool '${toolName}' called 5 times within the same Turn. Terminating process to prevent loop.`);
+                        const errorMsg = `Loop detected: Model repeated tool '${toolName}' with same arguments 5 times. Terminating for safety.`;
                         if (activeCallbacks.onError) activeCallbacks.onError({ type: 'error', message: errorMsg, code: 'LOOP_DETECTED' });
                         if (activeCallbacks.onResult) activeCallbacks.onResult({ type: 'result', text: errorMsg, stats: {} });
                         proc.kill();

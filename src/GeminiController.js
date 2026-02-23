@@ -325,6 +325,7 @@ export class GeminiController {
                         const isResourceError = /RESOURCE_EXHAUSTED|rateLimitExceeded|429|No capacity available/i.test(stderrText);
                         const isPolicyError = /denied by policy|unauthorized tool call|not available to this agent/i.test(stderrText);
                         const isNotFound = /Tool "([^"]+)" not found/i.test(stderrText);
+                        const isModelError = /ModelNotFoundError|entity was not found/i.test(stderrText);
 
                         if (isAuthError) {
                             const errorMsg = `Fatal: CLI Auth Expired or Missing. Raw: ${stderrText}`;
@@ -332,6 +333,9 @@ export class GeminiController {
                         } else if (isResourceError) {
                             const errorMsg = `Fatal: Gemini API Quota/Capacity Exhausted (429). Raw: ${stderrText}`;
                             if (activeCallbacks.onError) activeCallbacks.onError({ type: 'error', message: errorMsg, code: 'RATE_LIMIT' });
+                        } else if (isModelError) {
+                            const errorMsg = `Fatal: Model not found or inaccessible. Please check your model name and API permissions. Raw: ${stderrText}`;
+                            if (activeCallbacks.onError) activeCallbacks.onError({ type: 'error', message: errorMsg, code: 'MODEL_NOT_FOUND' });
                         } else if (isPolicyError) {
                             const errorMsg = `Fatal: Tool use or action denied by policy. Raw: ${stderrText}`;
                             if (activeCallbacks.onError) activeCallbacks.onError({ type: 'error', message: errorMsg, code: 'POLICY_DENIED' });

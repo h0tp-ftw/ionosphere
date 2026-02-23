@@ -98,6 +98,7 @@ const logRequestForensics = (req) => {
         'x-request-id': headers['x-request-id'],
         'content-length': headers['content-length']
     })}`);
+    console.log(`[FORENSICS] Model: ${body.model}`);
     console.log(`[FORENSICS] Message Count: ${msgCount}`);
     if (lastMsg) {
         console.log(`[FORENSICS] Last Msg Role: ${lastMsg.role}`);
@@ -544,11 +545,9 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             responseSent = true;
             if (heartbeatInterval) clearInterval(heartbeatInterval);
 
-            // Kill the CLI on park to enforce strict statelessness and prevent internal loops
-            // The next HTTP request (the tool result) will re-spawn the CLI.
-            setTimeout(() => {
-                controller.cancelCurrentTurn(activeTurnId);
-            }, 100);
+            // In Warm Stateless Handoff, we keep the CLI parked and alive.
+            // It will be resolved by the next HTTP request (the tool result),
+            // or cleaned up by the GC/finally block if abandoned.
         };
 
         const allCallbacks = { onText, onToolCall, onError, onResult, onEvent, onPark, hijackedFrom: hijackedTurnId };
@@ -575,71 +574,87 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         // --- HANDOFF CASE ---
         if (hijackedTurnId && parkedTurns.has(hijackedTurnId)) {
             const parked = parkedTurns.get(hijackedTurnId);
-            const isToolContinuation = lastMsg && (lastMsg.role === 'tool' || lastMsg.role === 'function');
+            const proc = controller.processes.get(hijackedTurnId);
 
-            if (isToolContinuation) {
-                console.log(`[API] Warm Handoff: Hijacking turn ${hijackedTurnId} for tool result resolution.`);
+            if (!proc || proc.killed) {
+                console.log(`[API] Handoff failed: Turn ${hijackedTurnId} is no longer active. Falling back to fresh turn.`);
+                parkedTurns.delete(hijackedTurnId);
+                hijackedTurnId = null;
+                // Fall through to NEW TURN CASE
             } else {
-                console.log(`[API] Warm Handoff: Hijacking turn ${hijackedTurnId} as Proxy (Retry).`);
-            }
+                const isToolContinuation = lastMsg && (lastMsg.role === 'tool' || lastMsg.role === 'function');
 
-            // 1. Update callbacks and sync historical context to the running process
-            const extraEnv = {
-                IONOSPHERE_HISTORY_HASH: historyHash,
-                IONOSPHERE_HISTORY_TOOLS: historicalTools.join(',')
-            };
-            controller.updateCallbacks(hijackedTurnId, allCallbacks, extraEnv);
+                if (isToolContinuation) {
+                    console.log(`[API] Warm Handoff: Hijacking turn ${hijackedTurnId} for tool result resolution.`);
+                } else {
+                    console.log(`[API] Warm Handoff: Hijacking turn ${hijackedTurnId} as Proxy (Retry).`);
+                }
 
-            // 2. Resolve or Re-emit
-            // Deep-scan: Check ONLY the last 5 messages in the current payload for tool results
-            // This prevents "Instant Resolution" against historical echoes in the narrations.
-            let resolvedAny = false;
-            const scanRange = messages.slice(-5);
-            for (const msg of scanRange) {
-                if (msg.role === 'tool' || msg.role === 'function') {
-                    const callId = msg.tool_call_id;
-                    const shortKey = callId?.startsWith('call_') ? callId.substring(5) : callId;
-                    for (const [callKey, pending] of pendingToolCalls.entries()) {
-                        if (shortKey && callKey.startsWith(shortKey)) {
-                            console.log(`[API] Deep-scan match: Resolving ${callId} (Tool: ${pending.name}) for turn ${hijackedTurnId}`);
-                            resolveToolCall(callKey, msg.content);
-                            resolvedAny = true;
-                            break;
+                // 1. Update callbacks and sync historical context to the running process
+                const extraEnv = {
+                    IONOSPHERE_HISTORY_HASH: historyHash,
+                    IONOSPHERE_HISTORY_TOOLS: historicalTools.join(',')
+                };
+                controller.updateCallbacks(hijackedTurnId, allCallbacks, extraEnv);
+
+                // 2. Resolve or Re-emit
+                // Deep-scan: Check ONLY the last 5 messages in the current payload for tool results
+                // This prevents "Instant Resolution" against historical echoes in the narrations.
+                let resolvedAny = false;
+                const scanRange = messages.slice(-5);
+                for (const msg of scanRange) {
+                    if (msg.role === 'tool' || msg.role === 'function') {
+                        const callId = msg.tool_call_id;
+                        const shortKey = callId?.startsWith('call_') ? callId.substring(5) : callId;
+                        for (const [callKey, pending] of pendingToolCalls.entries()) {
+                            if (shortKey && callKey.startsWith(shortKey)) {
+                                console.log(`[API] Deep-scan match: Resolving ${callId} (Tool: ${pending.name}) for turn ${hijackedTurnId}`);
+                                resolveToolCall(callKey, msg.content);
+                                resolvedAny = true;
+                                break;
+                            }
                         }
                     }
                 }
-            }
 
-            if (!resolvedAny) {
-                // If no results found in messages, it might be a Proxy Hijack (Retry)
-                // Re-emit the pending tool call so the client knows we are still waiting
-                let reemitted = false;
-                for (const [callKey, pending] of pendingToolCalls.entries()) {
-                    if (pending.turnId === hijackedTurnId) {
-                        const callId = `call_${callKey.substring(0, 8)}`;
-                        const clientToolName = pending.clientName || (pending.name.startsWith('ionosphere__') ? pending.name.substring(12) : pending.name);
+                if (!resolvedAny) {
+                    // If no results found in messages, it might be a Proxy Hijack (Retry)
+                    // Re-emit the pending tool call so the client knows we are still waiting
+                    let reemitted = false;
+                    for (const [callKey, pending] of pendingToolCalls.entries()) {
+                        if (pending.turnId === hijackedTurnId) {
+                            const callId = `call_${callKey.substring(0, 8)}`;
+                            const clientToolName = pending.clientName || (pending.name.startsWith('ionosphere__') ? pending.name.substring(12) : pending.name);
 
-                        // Forensics: Log the arguments we are re-emitting
-                        const argsLog = typeof pending.arguments === 'string' ? pending.arguments : JSON.stringify(pending.arguments);
-                        console.log(`[API] Proxy Hijack: Re-emitting call ${callId} for tool '${clientToolName}' (Internal: ${pending.name}) FULL ARGS: ${argsLog}`);
+                            // Forensics: Log the arguments we are re-emitting
+                            const argsLog = typeof pending.arguments === 'string' ? pending.arguments : JSON.stringify(pending.arguments);
+                            console.log(`[API] Proxy Hijack: Re-emitting call ${callId} for tool '${clientToolName}' (Internal: ${pending.name}) FULL ARGS: ${argsLog}`);
 
-                        onToolCall({
-                            id: callId,
-                            name: clientToolName,
-                            arguments: pending.arguments
-                        });
-                        reemitted = true;
-                        break;
+                            onToolCall({
+                                id: callId,
+                                name: clientToolName,
+                                arguments: pending.arguments
+                            });
+
+                            // End the request since we are just re-emitting a parked state
+                            onPark({ id: callId, name: clientToolName, arguments: pending.arguments });
+                            reemitted = true;
+                            break;
+                        }
                     }
-                }
-                if (!reemitted) {
-                    console.warn(`[API] Proxy Hijack: No pending tool call found for Turn ${hijackedTurnId}. Falling back.`);
+                    if (!reemitted) {
+                        console.warn(`[API] Proxy Hijack: No pending tool call found for Turn ${hijackedTurnId}. Falling back.`);
+                        hijackedTurnId = null;
+                        // Fall through to NEW TURN CASE
+                    } else {
+                        return; // Request handled by re-emit
+                    }
+                } else {
+                    // 3. Await the conclusion of the TASK from the new request side
+                    await parked.executePromise;
+                    return;
                 }
             }
-
-            // 3. Await the conclusion of the TASK from the new request side
-            await parked.executePromise;
-            return;
         }
 
 
@@ -869,6 +884,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             try {
                 // Use fingerprint for concurrency gating to catch retries/metadata shifts
                 activeTurnsByHash.set(fingerprint, activeTurnId);
+                activeTurnsByHash.set(historyHash, activeTurnId);
                 console.log(`[Turn ${activeTurnId}] Executing for fingerprint: ${fingerprint}`);
 
                 await controller.sendPrompt(activeTurnId, (conversationPromptSection || conversationPrompt).trim(), turnTempDir, settingsPath, systemMessage.trim(), allCallbacks, {
@@ -901,6 +917,9 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
                 if (activeTurnsByHash.get(fingerprint) === activeTurnId) {
                     activeTurnsByHash.delete(fingerprint);
+                }
+                if (activeTurnsByHash.get(historyHash) === activeTurnId) {
+                    activeTurnsByHash.delete(historyHash);
                 }
                 parkedTurns.delete(activeTurnId);
                 globalPromiseMap.delete(activeTurnId);

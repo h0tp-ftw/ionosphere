@@ -577,9 +577,9 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 if (msg.role === 'tool' || msg.role === 'function') {
                     const callId = msg.tool_call_id;
                     const shortKey = callId?.startsWith('call_') ? callId.substring(5) : callId;
-                    for (const [callKey] of pendingToolCalls.entries()) {
-                        if (callKey.startsWith(shortKey)) {
-                            console.log(`[API] Deep-scan match: Resolving ${callId} for turn ${hijackedTurnId}`);
+                    for (const [callKey, pending] of pendingToolCalls.entries()) {
+                        if (shortKey && callKey.startsWith(shortKey)) {
+                            console.log(`[API] Deep-scan match: Resolving ${callId} (Tool: ${pending.name}) for turn ${hijackedTurnId}`);
                             resolveToolCall(callKey, msg.content);
                             resolvedAny = true;
                             break;
@@ -676,8 +676,8 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                                 const callId = tc.id || tc.tool_call_id || 'unknown';
                                 let toolName = tc.function?.name || tc.name || 'unknown';
 
-                                // Strong Concrete Handoff: Ensure history ALWAYS uses prefixes
-                                // This primes the model to call the namespaced version.
+                                // Consistency Normalization: Ensure history ALWAYS uses ionosphere__ prefix.
+                                // This provides a rock-solid pattern for the model to follow.
                                 if (!toolName.startsWith('ionosphere__')) {
                                     toolName = `ionosphere__${toolName}`;
                                 }
@@ -810,18 +810,24 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             };
             if (openAiTools) {
                 const toolsPath = path.join(turnTempDir, 'tools.json');
-                // Strong Concrete Handoff: Strict Prefixing
+                // Universal Global Prefixing: Everything starts with ionosphere__
                 const namespacedTools = [];
                 for (const t of openAiTools) {
                     const originalName = t.function?.name || t.name;
                     const prefixedName = originalName.startsWith('ionosphere__') ? originalName : `ionosphere__${originalName}`;
 
+                    // Always deep-copy to avoid side-effects on the original req.body.tools
+                    const toolCopy = JSON.parse(JSON.stringify(t));
+                    const fn = toolCopy.function || toolCopy;
+
+                    // ALWAYS disable 'strict' mode for all tools to prevent validation hallucinations
+                    toolCopy.strict = false;
+                    if (fn.strict !== undefined) fn.strict = false;
+
                     // Relax schemas for Roo's native tools to prevent validation loops
                     const rooTools = ['read_file', 'list_files', 'apply_diff', 'search_files', 'execute_command', 'write_to_file'];
                     if (rooTools.includes(originalName)) {
-                        const fn = t.function || t;
                         if (fn.parameters?.required) {
-                            // Only keep the most essential fields as required for the CLI
                             const essentials = {
                                 'read_file': ['path'],
                                 'list_files': ['path'],
@@ -834,11 +840,10 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                         }
                     }
 
-                    // Always use the prefixed name for the CLI
-                    const prefixedTool = JSON.parse(JSON.stringify(t));
-                    if (prefixedTool.function) prefixedTool.function.name = prefixedName;
-                    else prefixedTool.name = prefixedName;
-                    namespacedTools.push(prefixedTool);
+                    // Standardize namespacing
+                    if (toolCopy.function) toolCopy.function.name = prefixedName;
+                    else toolCopy.name = prefixedName;
+                    namespacedTools.push(toolCopy);
                 }
                 fs.writeFileSync(toolsPath, JSON.stringify(namespacedTools, null, 2));
                 toolBridgeEnv.TOOL_BRIDGE_TOOLS = toolsPath;

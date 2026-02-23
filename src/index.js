@@ -431,7 +431,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                     usage: {
                         prompt_tokens: finalStats.input_tokens || 0,
                         completion_tokens: finalStats.output_tokens || 0,
-                        total_tokens: finalStats.total_tokens || 0
+                        total_tokens: (finalStats.input_tokens || 0) + (finalStats.output_tokens || 0)
                     }
                 });
                 if (!res.writableEnded) {
@@ -458,7 +458,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                         usage: {
                             prompt_tokens: finalStats.input_tokens || 0,
                             completion_tokens: finalStats.output_tokens || 0,
-                            total_tokens: finalStats.total_tokens || 0
+                            total_tokens: (finalStats.input_tokens || 0) + (finalStats.output_tokens || 0)
                         }
                     });
                     responseSent = true;
@@ -507,7 +507,11 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                         },
                         finish_reason: accumulatedToolCalls.length > 0 ? "tool_calls" : "stop"
                     }],
-                    usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+                    usage: {
+                        prompt_tokens: finalStats?.input_tokens || 0,
+                        completion_tokens: finalStats?.output_tokens || 0,
+                        total_tokens: (finalStats?.input_tokens || 0) + (finalStats?.output_tokens || 0)
+                    }
                 };
                 res.json(payload);
             }

@@ -239,6 +239,10 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
         logRequestForensics(req);
 
+        if (process.env.GEMINI_DEBUG_MESSAGES === 'true') {
+            console.log(`[FORENSICS] Full Messages Array:\n${JSON.stringify(messages, null, 2)}`);
+        }
+
         const historyHash = getHistoryHash(messages);
         const fingerprint = getConversationFingerprint(messages);
 
@@ -368,7 +372,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             // Force stringification of arguments for OpenAI compatibility (Roo Code requirement)
             const argsStr = typeof info.arguments === 'string' ? info.arguments : JSON.stringify(info.arguments || {});
 
-            console.log(`[Turn ${activeTurnId}] Dispatching Tool Call: ${info.name} (${info.id}) ARGS: ${argsStr.substring(0, 50)}...`);
+            console.log(`[Turn ${activeTurnId}] Dispatching Tool Call: ${info.name} (${info.id}) FULL ARGS: ${argsStr}`);
 
             const toolCall = {
                 id: info.id,
@@ -543,8 +547,12 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 console.log(`[API] Warm Handoff: Hijacking turn ${hijackedTurnId} as Proxy (Retry).`);
             }
 
-            // 1. Update callbacks to pipe output to THIS response
-            controller.updateCallbacks(hijackedTurnId, allCallbacks);
+            // 1. Update callbacks and sync historical context to the running process
+            const extraEnv = {
+                IONOSPHERE_HISTORY_HASH: historyHash,
+                IONOSPHERE_HISTORY_TOOLS: historicalTools.join(',')
+            };
+            controller.updateCallbacks(hijackedTurnId, allCallbacks, extraEnv);
 
             // 2. Resolve or Re-emit
             // Deep-scan: Check if ANY message in the current payload is a tool result for our pending calls
@@ -575,7 +583,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
                         // Forensics: Log the arguments we are re-emitting
                         const argsLog = typeof pending.arguments === 'string' ? pending.arguments : JSON.stringify(pending.arguments);
-                        console.log(`[API] Proxy Hijack: Re-emitting call ${callId} for tool '${clientToolName}' (Internal: ${pending.name}) ARGS: ${argsLog.substring(0, 50)}...`);
+                        console.log(`[API] Proxy Hijack: Re-emitting call ${callId} for tool '${clientToolName}' (Internal: ${pending.name}) FULL ARGS: ${argsLog}`);
 
                         onToolCall({
                             id: callId,
@@ -672,12 +680,15 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             }
         }
 
-        // Collect historical tool calls to help Repeat Breaker ignore echoes
         const historicalTools = [];
         for (const msg of messages) {
             if (msg.role === 'assistant' && msg.tool_calls) {
                 for (const tc of msg.tool_calls) {
-                    const toolName = tc.function?.name || tc.name;
+                    let toolName = tc.function?.name || tc.name;
+                    // Uniform Namespacing: Use prefixed names for historical comparison to match bridge calls
+                    if (!toolName.includes('__') && !toolName.startsWith('ionosphere__')) {
+                        toolName = `ionosphere__${toolName}`;
+                    }
                     const rawArgs = tc.function?.arguments || tc.arguments || "{}";
                     const toolArgs = JSON.stringify(typeof rawArgs === 'string' ? JSON.parse(rawArgs) : rawArgs);
                     historicalTools.push(`${historyHash}:${toolName}:${toolArgs}`);

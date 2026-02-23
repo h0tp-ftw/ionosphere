@@ -56,13 +56,22 @@ export class GeminiController {
      * Essential for "Warm Stateless Handoff" where a second HTTP request 
      * takes over the output of a process parked from a first request.
      */
-    updateCallbacks(turnId, callbacks) {
+    updateCallbacks(turnId, callbacks, extraEnv = null) {
         const previous = this.callbacksByTurn.has(turnId);
         this.callbacksByTurn.set(turnId, callbacks);
+
+        if (extraEnv) {
+            const proc = this.processes.get(turnId);
+            if (proc) {
+                // Sync historical context into the running process tracker
+                proc.extraEnv = { ...(proc.extraEnv || {}), ...extraEnv };
+            }
+        }
+
         if (previous) {
-            console.log(`[GeminiController] Callbacks HIJACKED for turn ${turnId}`);
+            console.log(`[GeminiController] Callbacks ${extraEnv ? 'AND extraEnv ' : ''}HIJACKED for turn ${turnId}`);
         } else {
-            console.log(`[GeminiController] Callbacks registered for turn ${turnId}`);
+            console.warn(`[GeminiController] Callbacks registered for INACTIVE turn ${turnId}`);
         }
     }
 
@@ -149,6 +158,7 @@ export class GeminiController {
                     shell: process.platform === 'win32',
                 });
 
+                proc.extraEnv = extraEnv; // Initialize with spawn env
                 proc.toolUsage = new Set(); // Track real tool calls in this turn
                 this.processes.set(turnId, proc);
 
@@ -160,11 +170,44 @@ export class GeminiController {
                     reject(new Error('Turn timed out'));
                 }, TURN_TIMEOUT_MS);
 
+                const checkRepeatLimit = (toolName, argsObj, activeCallbacks) => {
+                    const currentEnv = proc?.extraEnv || extraEnv;
+                    if (!currentEnv.IONOSPHERE_HISTORY_HASH) return false;
+                    const hash = currentEnv.IONOSPHERE_HISTORY_HASH;
+                    if (!this.repeatTracker) this.repeatTracker = new Map();
+                    const toolArgs = JSON.stringify(argsObj || {});
+                    const key = `${hash}:${toolName}:${toolArgs}`;
+
+                    // Check if this is a "historical" tool call being parroted
+                    const isHistorical = (currentEnv.IONOSPHERE_HISTORY_TOOLS || "").includes(key);
+
+                    if (isHistorical) {
+                        console.log(`[GeminiController] [FORENSICS] Tool '${toolName}' with args ${toolArgs} identified as historical echo (Key: ${key.substring(0, 15)}...). Ignoring.`);
+                        return true; // Ignore historical echoes
+                    }
+
+                    const count = (this.repeatTracker.get(key) || 0) + 1;
+                    this.repeatTracker.set(key, count);
+                    console.log(`[GeminiController] [FORENSICS] Repeat Tracker: ${toolName} count=${count} for key ${key.substring(0, 15)}...`);
+
+                    if (count >= 3) {
+                        console.error(`[GeminiController] Repeat Breaker: Tool '${toolName}' called 3 times within the same Turn or stateless context. Terminating process to prevent loop.`);
+                        const errorMsg = `Loop detected: Model repeated tool '${toolName}' with same arguments 3 times. Terminating for safety.`;
+                        if (activeCallbacks.onError) activeCallbacks.onError({ type: 'error', message: errorMsg, code: 'LOOP_DETECTED' });
+                        if (activeCallbacks.onResult) activeCallbacks.onResult({ type: 'result', text: errorMsg, stats: {} });
+                        proc.kill();
+                        return 'KILL';
+                    }
+                    return false;
+                };
+
                 accumulator.on('line', (json) => {
                     const activeCallbacks = this.callbacksByTurn.get(turnId) || {};
 
                     if (process.env.GEMINI_DEBUG_RAW === 'true') {
-                        console.log(`[Turn ${turnId}] CLI Raw Line: ${JSON.stringify(json).substring(0, 100)}...`);
+                        console.log(`[Turn ${turnId}] CLI Raw Line: ${JSON.stringify(json)}`);
+                    } else {
+                        console.log(`[Turn ${turnId}] CLI Raw Line: ${json.type}${json.role ? ' [' + json.role + ']' : ''}`);
                     }
 
                     if (json.type === 'message' && json.role === 'assistant') {
@@ -187,6 +230,12 @@ export class GeminiController {
 
                                 if (!alreadySeen && !isLikelyHallucination) {
                                     console.log(`[GeminiController] Intercepted leaked tool call in text for Turn ${turnId}: ${toolName} (${callId})`);
+
+                                    // Apply Repeat Breaker to leaks too!
+                                    let parsedArgs = {};
+                                    try { parsedArgs = JSON.parse(argsStr); } catch (e) { }
+                                    if (checkRepeatLimit(toolName, parsedArgs) === 'KILL') return;
+
                                     if (activeCallbacks.onToolCall) {
                                         activeCallbacks.onToolCall({
                                             id: callId.startsWith('leak_') ? callId : `leak_${callId}`,
@@ -215,36 +264,13 @@ export class GeminiController {
 
                     } else if (json.type === 'tool_use' || json.type === 'toolCall') {
                         const toolName = json.tool_name || json.name;
-                        const toolArgs = JSON.stringify(json.arguments || {});
+                        const argsObj = json.arguments || {};
 
                         // Track real usage to suppress "echo leaks"
                         this.processes.get(turnId)?.toolUsage.add(toolName);
 
                         // Repeat Breaker Logic (Global per historyHash)
-                        if (extraEnv.IONOSPHERE_HISTORY_HASH) {
-                            const hash = extraEnv.IONOSPHERE_HISTORY_HASH;
-                            if (!this.repeatTracker) this.repeatTracker = new Map();
-                            const key = `${hash}:${toolName}:${toolArgs}`;
-
-                            // Check if this is a "historical" tool call being parroted
-                            const isHistorical = (extraEnv.IONOSPHERE_HISTORY_TOOLS || "").includes(key);
-
-                            if (isHistorical) {
-                                console.log(`[GeminiController] Tool '${toolName}' identified as historical echo. Ignoring in repeat count.`);
-                            } else {
-                                const count = (this.repeatTracker.get(key) || 0) + 1;
-                                this.repeatTracker.set(key, count);
-
-                                if (count >= 3) {
-                                    console.warn(`[GeminiController] Repeat Breaker: Tool '${toolName}' called 3 times with same args. Terminating loop.`);
-                                    const errorMsg = `Loop detected: Model repeated tool '${toolName}' with same arguments 3 times. Terminating for safety.`;
-                                    if (activeCallbacks.onError) activeCallbacks.onError({ type: 'error', message: errorMsg, code: 'LOOP_DETECTED' });
-                                    if (activeCallbacks.onResult) activeCallbacks.onResult({ type: 'result', text: errorMsg, stats: {} });
-                                    proc.kill();
-                                    return;
-                                }
-                            }
-                        }
+                        if (checkRepeatLimit(toolName, argsObj, activeCallbacks) === 'KILL') return;
 
                         const transparentTools = ['google_web_search'];
                         if (transparentTools.includes(toolName)) {

@@ -31,17 +31,21 @@ export const getConversationFingerprint = (messages) => {
 
         // Drift Resistance: Try to isolate the core <user_message>
         const userMsgMatch = text.match(/<user_message>([\s\S]*?)<\/user_message>/);
-        if (userMsgMatch) return userMsgMatch[1].trim();
+        if (userMsgMatch) text = userMsgMatch[1];
+        else {
+            // Fallback: Strip known dynamic blocks like <environment_details>
+            text = text.replace(/<environment_details>[\s\S]*?<\/environment_details>/g, "");
+        }
 
-        // Fallback: Strip known dynamic blocks like <environment_details>
-        return text.replace(/<environment_details>[\s\S]*?<\/environment_details>/g, "").trim();
+        // Normalization: Remove all non-alphanumeric for fingerprint anchor
+        return text.toLowerCase().replace(/[^a-z0-9]/g, "").trim();
     };
 
     const system = extractText(systemMsg?.content);
     const firstUser = extractText(firstUserMsg?.content);
 
     // Hash the purified content (first 500 chars)
-    return createHash('sha256').update(`${system.substring(0, 100)}:${firstUser.substring(0, 500)}`).digest('hex').substring(0, 12);
+    return createHash('sha256').update(`${system.substring(0, 50)}:${firstUser.substring(0, 200)}`).digest('hex').substring(0, 12);
 };
 
 /**
@@ -113,16 +117,16 @@ export const findHijackedTurnId = (messages, historyHash, fingerprint, activeTur
         // if it's the same conversation.
         const lastMsg = messages[messages.length - 1];
         if (lastMsg && (lastMsg.role === 'tool' || lastMsg.role === 'function')) {
-             hijackedTurnId = byFinger;
-             matchType = 'fingerprint_tool';
-             console.log(`[HIJACK] Fingerprint Anchor Match (Tool Continuation, Fallback): Turn ${hijackedTurnId}`);
+            hijackedTurnId = byFinger;
+            matchType = 'fingerprint_tool';
+            console.log(`[HIJACK] Fingerprint Anchor Match (Tool Continuation, Fallback): Turn ${hijackedTurnId}`);
         } else {
             // New Instruction / Retry on active turn
-             // This case is handled by the caller (Preemption/Cancellation) or Wait-and-Hijack logic
-             // We return matching turn ID, caller decides what to do.
-             hijackedTurnId = byFinger;
-             matchType = 'fingerprint_active';
-             if (debug) console.log(`[HIJACK] Fingerprint Match (Active/Unknown state): Turn ${hijackedTurnId}`);
+            // This case is handled by the caller (Preemption/Cancellation) or Wait-and-Hijack logic
+            // We return matching turn ID, caller decides what to do.
+            hijackedTurnId = byFinger;
+            matchType = 'fingerprint_active';
+            if (debug) console.log(`[HIJACK] Fingerprint Match (Active/Unknown state): Turn ${hijackedTurnId}`);
         }
     }
 

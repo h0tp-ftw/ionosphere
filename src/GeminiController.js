@@ -330,15 +330,19 @@ export class GeminiController {
                         if (isAuthError) {
                             const errorMsg = `Fatal: CLI Auth Expired or Missing. Raw: ${stderrText}`;
                             if (activeCallbacks.onError) activeCallbacks.onError({ type: 'error', message: errorMsg, code: 'AUTH_EXPIRED' });
+                            proc.kill('SIGKILL');
                         } else if (isResourceError) {
                             const errorMsg = `Fatal: Gemini API Quota/Capacity Exhausted (429). Raw: ${stderrText}`;
                             if (activeCallbacks.onError) activeCallbacks.onError({ type: 'error', message: errorMsg, code: 'RATE_LIMIT' });
+                            proc.kill('SIGKILL');
                         } else if (isModelError) {
                             const errorMsg = `Fatal: Model not found or inaccessible. Please check your model name and API permissions. Raw: ${stderrText}`;
                             if (activeCallbacks.onError) activeCallbacks.onError({ type: 'error', message: errorMsg, code: 'MODEL_NOT_FOUND' });
+                            proc.kill('SIGKILL');
                         } else if (isPolicyError) {
                             const errorMsg = `Fatal: Tool use or action denied by policy. Raw: ${stderrText}`;
                             if (activeCallbacks.onError) activeCallbacks.onError({ type: 'error', message: errorMsg, code: 'POLICY_DENIED' });
+                            proc.kill('SIGKILL');
                         } else if (isNotFound) {
                             const match = stderrText.match(/Tool "([^"]+)" not found/i);
                             const toolName = match ? match[1] : 'unknown';

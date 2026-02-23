@@ -434,6 +434,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
         const onError = (err) => {
             if (responseSent) return;
+            responseSent = true;
             const errorObj = {
                 message: typeof err === 'string' ? err : (err.message || "Unknown error"),
                 type: "internal_error",
@@ -550,8 +551,6 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             // or cleaned up by the GC/finally block if abandoned.
         };
 
-        const allCallbacks = { onText, onToolCall, onError, onResult, onEvent, onPark, hijackedFrom: hijackedTurnId };
-
         // (Concurrency Gating consolidated into section 2/2.5)
 
         // --- WAIT-AND-HIJACK CASE ---
@@ -570,6 +569,8 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 hijackedTurnId = activeTurnsByHash.get(historyHash) || activeTurnsByHash.get(fingerprint);
             }
         }
+
+        const allCallbacks = { onText, onToolCall, onError, onResult, onEvent, onPark, hijackedFrom: hijackedTurnId };
 
         // --- HANDOFF CASE ---
         if (hijackedTurnId && parkedTurns.has(hijackedTurnId)) {

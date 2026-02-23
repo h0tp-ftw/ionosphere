@@ -55,10 +55,11 @@ export const getConversationFingerprint = (messages) => {
  * @param {Map} pendingToolCalls - Map of pending tool calls.
  * @param {boolean} debug - Enable debug logging.
  *
- * @returns {string|null} - The ID of the turn to hijack, or null if none.
+ * @returns {object|null} - An object { turnId, matchType } or null if none.
  */
 export const findHijackedTurnId = (messages, historyHash, fingerprint, activeTurnsByHash, parkedTurns, pendingToolCalls, debug = false) => {
     let hijackedTurnId = null;
+    let matchType = null;
 
     // 1. Tool Call ID Match (Deep Scan)
     // We scan the last few messages for tool results. If we find a tool result
@@ -79,8 +80,9 @@ export const findHijackedTurnId = (messages, historyHash, fingerprint, activeTur
                 for (const [callKey, pending] of pendingToolCalls.entries()) {
                     if (callKey.startsWith(shortKey)) {
                         hijackedTurnId = pending.turnId;
+                        matchType = 'tool_call';
                         console.log(`[API] Hijack discovery: Match found for ${callId} -> Turn ${hijackedTurnId}`);
-                        return hijackedTurnId; // Immediate return on strong match
+                        return { turnId: hijackedTurnId, matchType }; // Immediate return on strong match
                     }
                 }
             }
@@ -93,10 +95,12 @@ export const findHijackedTurnId = (messages, historyHash, fingerprint, activeTur
 
     if (byHash) {
         hijackedTurnId = byHash;
+        matchType = 'hash';
         console.log(`[HIJACK] Exact Hash Match (Thread Safe): Turn ${hijackedTurnId}`);
     } else if (byFinger && parkedTurns.has(byFinger)) {
         // Priority: If the turn is already Parked, we MUST hijack it to deliver the next message (approval/data)
         hijackedTurnId = byFinger;
+        matchType = 'fingerprint_parked';
         console.log(`[HIJACK] Fingerprint Match (Parked Turn): Turn ${hijackedTurnId}`);
     } else if (byFinger) {
         // We have a fingerprint match, but it's not parked.
@@ -110,15 +114,21 @@ export const findHijackedTurnId = (messages, historyHash, fingerprint, activeTur
         const lastMsg = messages[messages.length - 1];
         if (lastMsg && (lastMsg.role === 'tool' || lastMsg.role === 'function')) {
              hijackedTurnId = byFinger;
+             matchType = 'fingerprint_tool';
              console.log(`[HIJACK] Fingerprint Anchor Match (Tool Continuation, Fallback): Turn ${hijackedTurnId}`);
         } else {
             // New Instruction / Retry on active turn
              // This case is handled by the caller (Preemption/Cancellation) or Wait-and-Hijack logic
              // We return matching turn ID, caller decides what to do.
              hijackedTurnId = byFinger;
+             matchType = 'fingerprint_active';
              if (debug) console.log(`[HIJACK] Fingerprint Match (Active/Unknown state): Turn ${hijackedTurnId}`);
         }
     }
 
-    return hijackedTurnId;
+    if (hijackedTurnId) {
+        return { turnId: hijackedTurnId, matchType };
+    }
+
+    return null;
 };

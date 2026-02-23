@@ -262,59 +262,26 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         let lastMsg = messages[messages.length - 1];
 
         // Find existing session to hijack using robust logic (Deep Scan + Fingerprint)
-        let hijackedTurnId = findHijackedTurnId(messages, historyHash, fingerprint, activeTurnsByHash, parkedTurns, pendingToolCalls, process.env.GEMINI_DEBUG_HANDOFF === 'true');
+        let { turnId: hijackedTurnId, matchType } = findHijackedTurnId(messages, historyHash, fingerprint, activeTurnsByHash, parkedTurns, pendingToolCalls, process.env.GEMINI_DEBUG_HANDOFF === 'true') || {};
 
         // Handle "New Instruction" Case (Preemption)
-        // If we found a turn via fingerprint but it's not parked and logic says we should preempt it.
-        // findHijackedTurnId returns the ID if it matches fingerprint, but if it's not parked, we need to decide what to do.
-        // The previous logic was: if (byFinger) -> Preempt if not parked and not tool continuation.
-        // But findHijackedTurnId returns hijackedTurnId if it finds a match.
-
-        // We need to replicate the Preemption logic explicitly if findHijackedTurnId returned a turn that is NOT parked and NOT matched by tool call.
-        // However, findHijackedTurnId prioritizes tool calls. If it returned a turn, it's either a tool match or a fingerprint match.
-
         if (hijackedTurnId && !parkedTurns.has(hijackedTurnId)) {
             // Check if this is a "New Instruction" that requires preemption (killing old turn) instead of waiting.
             // This happens when hash differs (so new messages) but fingerprint matches, and it's NOT a tool continuation we identified.
 
-            // Re-verify if it was a tool match (we want to keep those)
-            const deepToolMatch = findHijackedTurnId(messages, 'ignore', 'ignore', new Map(), new Map(), pendingToolCalls);
+            const isToolMatch = matchType === 'tool_call';
 
-            if (!deepToolMatch) {
+            if (!isToolMatch) {
                 // Not a tool match. Must be a fingerprint match.
                 // If the history hash is different, it means we have new messages (user instruction).
-                // If it's NOT a tool continuation (checked by deepToolMatch), then it is a new user instruction.
+                // If it's NOT a tool continuation (checked by isToolMatch), then it is a new user instruction.
                 const isHashMatch = activeTurnsByHash.get(historyHash) === hijackedTurnId;
 
                 if (!isHashMatch) {
                      // Hash mismatch + Fingerprint match + No Tool ID match = New Instruction on same thread.
-                     // We should KILL the old turn to start fresh, UNLESS we are in "Wait-and-Hijack" mode for a tool result that just hasn't arrived in pendingToolCalls yet?
-                     // But if the user sent a new message, they probably want to interrupt.
+                     // If the last message is USER, we assume interruption and preempt.
 
-                     // WAIT: The previous logic was:
-                     // else if (byFinger) { Preempt... }
-
-                     // Let's rely on the fact that if findHijackedTurnId returned it, we generally want to use it OR kill it.
-
-                     // For now, let's keep the "One Session Rule" preemption simple:
-                     // If we are about to start a NEW turn (because we didn't hijack), we kill the old one.
-                     // But here we DID hijack (identify) it.
-
-                     // If it is active (not parked), we have two choices:
-                     // A) Wait for it to park (Wait-and-Hijack) - appropriate for tool results.
-                     // B) Kill it (Preemption) - appropriate for new user interruptions.
-
-                     // We distinguish by checking if the last message is a tool result.
-                     // If last message is tool result, we assume we want to wait for the tool to finish.
-                     // If last message is USER, we assume interruption.
-
-                     const isToolContinuation = messages.some(m => m.role === 'tool' || m.role === 'function'); // Crude check
-
-                     // Better: check if we are sending a result to a pending call.
-                     // If findHijackedTurnId returned it via tool match, we are good.
-                     // If it returned via fingerprint...
-
-                     if (!deepToolMatch && lastMsg.role === 'user') {
+                     if (lastMsg && lastMsg.role === 'user') {
                          console.log(`[API] One Session Rule: Preempting old turn ${hijackedTurnId} for new instruction on fingerprint ${fingerprint}`);
                          controller.cancelCurrentTurn(hijackedTurnId);
                          await new Promise(r => setTimeout(r, 200));
@@ -568,8 +535,8 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 }
                 // Refresh our view of who is active for this thread
                 // Note: We use the robust finder to ensure we track the right session even if hash shifts
-                const updatedId = findHijackedTurnId(messages, historyHash, fingerprint, activeTurnsByHash, parkedTurns, pendingToolCalls, process.env.GEMINI_DEBUG_HANDOFF === 'true');
-                if (updatedId) hijackedTurnId = updatedId;
+                const updated = findHijackedTurnId(messages, historyHash, fingerprint, activeTurnsByHash, parkedTurns, pendingToolCalls);
+                if (updated && updated.turnId) hijackedTurnId = updated.turnId;
             }
         }
 

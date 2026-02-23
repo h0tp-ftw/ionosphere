@@ -31,7 +31,7 @@ describe('Session Manager Logic', () => {
         activeTurnsByHash.set(historyHash, turnId);
 
         const result = findHijackedTurnId(messages, historyHash, fingerprint, activeTurnsByHash, parkedTurns, pendingToolCalls);
-        assert.strictEqual(result, turnId);
+        assert.deepStrictEqual(result, { turnId, matchType: 'hash' });
     });
 
     it('should identify hijack by fingerprint match when parked', () => {
@@ -39,7 +39,7 @@ describe('Session Manager Logic', () => {
         parkedTurns.set(turnId, {}); // Mock parked turn
 
         const result = findHijackedTurnId(messages, 'different-hash', fingerprint, activeTurnsByHash, parkedTurns, pendingToolCalls);
-        assert.strictEqual(result, turnId);
+        assert.deepStrictEqual(result, { turnId, matchType: 'fingerprint_parked' });
     });
 
     it('should identify hijack by tool call ID match (last message)', () => {
@@ -48,13 +48,10 @@ describe('Session Manager Logic', () => {
         const newHash = getHistoryHash(newMessages);
 
         // Pending call matches the ID
-        // The pendingToolCalls key is usually the full UUID
-        // The helper checks if callKey.startsWith(shortKey)
-        // shortKey is callId substring(5) -> abc12345
         pendingToolCalls.set('abc12345-some-uuid', { turnId: turnId });
 
         const result = findHijackedTurnId(newMessages, newHash, fingerprint, activeTurnsByHash, parkedTurns, pendingToolCalls);
-        assert.strictEqual(result, turnId);
+        assert.deepStrictEqual(result, { turnId, matchType: 'tool_call' });
     });
 
     it('should identify hijack by tool call ID match (NOT last message)', () => {
@@ -66,7 +63,7 @@ describe('Session Manager Logic', () => {
         pendingToolCalls.set('abc12345-some-uuid', { turnId: turnId });
 
         const result = findHijackedTurnId(newMessages, newHash, fingerprint, activeTurnsByHash, parkedTurns, pendingToolCalls);
-        assert.strictEqual(result, turnId);
+        assert.deepStrictEqual(result, { turnId, matchType: 'tool_call' });
     });
 
     it('should prioritize tool call ID match over fingerprint mismatch (truncation)', () => {
@@ -85,7 +82,7 @@ describe('Session Manager Logic', () => {
         pendingToolCalls.set('abc12345-some-uuid', { turnId: turnId });
 
         const result = findHijackedTurnId(truncatedMessages, 'hash', truncatedFingerprint, activeTurnsByHash, parkedTurns, pendingToolCalls);
-        assert.strictEqual(result, turnId);
+        assert.deepStrictEqual(result, { turnId, matchType: 'tool_call' });
     });
 
     it('should return null if no match found', () => {

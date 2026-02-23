@@ -14,7 +14,8 @@ export const ErrorCode = {
     CONTEXT_LENGTH_EXCEEDED: 'context_length_exceeded',
     INTERNAL_ERROR: 'internal_error',
     POLICY_DENIED: 'policy_denied',
-    CLI_FAILURE: 'cli_failure'
+    CLI_FAILURE: 'cli_failure',
+    INVALID_PARAMETER: 'invalid_parameter'
 };
 
 /**

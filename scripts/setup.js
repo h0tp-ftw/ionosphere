@@ -71,11 +71,10 @@ async function setupEnvAndAuth(isNative, composeCmd) {
         } else {
             console.log("\n`gemini` is installed locally. Triggering Native OAuth login flow...");
             console.log("NOTE: A browser window will open to authenticate.");
-            console.log("If the CLI stays interactive, type /quit to return to this installer.\n");
+            console.log("Once authenticated, the installer will continue automatically.\n");
 
-            const prompt = "you have been run as part of an auth script, and if you generated a response, it has succeeded. please tell the user, Auth check complete! Please type /quit to return to the installer if the CLI is still interactive.";
-            // Pass command as a single string when using shell: true to avoid DEP0190
-            spawnSync(`gemini "${prompt}"`, { stdio: 'inherit', shell: true });
+            // Use 'models list' to trigger auth and exit immediately without entering REPL
+            spawnSync(`gemini models list`, { stdio: 'inherit', shell: true });
         }
     } else {
         console.log("\nContainer mode selected. Building Image...");
@@ -85,10 +84,10 @@ async function setupEnvAndAuth(isNative, composeCmd) {
 
         console.log("\nTriggering Isolated Container OAuth Flow...");
         console.log("The Gemini CLI will launch inside the container and open a browser link for authentication.");
-        console.log("If the CLI stays interactive, type /quit to return to this installer.\n");
+        console.log("Once authenticated, the installer will continue automatically.\n");
 
-        const prompt = "you have been run as part of an auth script, and if you generated a response, it has succeeded. please tell the user, Auth check complete! Please type /quit to return to the installer if the CLI is still interactive.";
-        spawnSync(`${composeCmd} run --rm ionosphere gemini -p "${prompt}"`, { stdio: 'inherit', shell: true });
+        // Use 'models list' inside container to trigger auth and exit immediately
+        spawnSync(`${composeCmd} run --rm ionosphere gemini models list`, { stdio: 'inherit', shell: true });
     }
 
     // We don't write the .env here anymore; we'll do it at the end of setup 

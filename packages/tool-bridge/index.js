@@ -207,16 +207,27 @@ for (const toolDef of openAiTools) {
         description: description ?? `Client-side tool: ${name}`
     };
 
-    process.stderr.write(`[ToolBridge] Registering OpenAI tool: ${namespacedName}\n`);
+    process.stderr.write(`[ToolBridge] Registering OpenAI tool: ${namespacedName} (Alias: ${name})\n`);
     if (process.env.GEMINI_DEBUG_TOOLS === 'true') {
         process.stderr.write(`[ToolBridge] Schema for ${namespacedName}: ${JSON.stringify(schema, null, 2)}\n`);
     }
 
+    // 1a. Register the namespaced version (The "Official" name)
     server.tool(
         namespacedName,
         schema,
-        makeIpcHandler(namespacedName) // Use namespaced name for dispatch to client
+        makeIpcHandler(namespacedName)
     );
+
+    // 1b. Register the original name as an alias (The "Instinct" name)
+    // This allows the model to use 'read_file' instead of 'ionosphere__read_file'
+    if (name !== namespacedName) {
+        server.tool(
+            name,
+            schema,
+            makeIpcHandler(namespacedName) // Always dispatch with namespaced name to orchestrator
+        );
+    }
 }
 
 // 2. Connect to upstream MCP servers, discover tools, re-register under namespace

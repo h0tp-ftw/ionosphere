@@ -43,22 +43,33 @@ const getHistoryHash = (messages) => {
  * Useful for catching retries that might have slightly different history.
  */
 const getConversationFingerprint = (messages) => {
-    // Stable Thread ID: based on the FIRST user message and system prompt
+    // Stable Turn Anchor: based on the FIRST user message and system prompt
+    // This is more resilient to history truncation/sliding windows.
     const systemMsg = messages.find(m => m.role === 'system');
+
+    // Find the FIRST user message
     const firstUserMsg = messages.find(m => m.role === 'user');
 
     const extractText = (content) => {
         if (!content) return "";
-        if (typeof content === 'string') return content;
-        if (Array.isArray(content)) {
-            return content.map(p => (typeof p === 'object' && p.type === 'text') ? p.text : "").join("");
+        let text = "";
+        if (typeof content === 'string') text = content;
+        else if (Array.isArray(content)) {
+            text = content.map(p => (typeof p === 'object' && p.type === 'text') ? p.text : "").join("");
         }
-        return "";
+
+        // Drift Resistance: Try to isolate the core <user_message>
+        const userMsgMatch = text.match(/<user_message>([\s\S]*?)<\/user_message>/);
+        if (userMsgMatch) return userMsgMatch[1].trim();
+
+        // Fallback: Strip known dynamic blocks like <environment_details>
+        return text.replace(/<environment_details>[\s\S]*?<\/environment_details>/g, "").trim();
     };
 
     const system = extractText(systemMsg?.content);
     const firstUser = extractText(firstUserMsg?.content);
 
+    // Hash the purified content (first 500 chars)
     return createHash('sha256').update(`${system.substring(0, 100)}:${firstUser.substring(0, 500)}`).digest('hex').substring(0, 12);
 };
 
@@ -227,6 +238,11 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
         const historyHash = getHistoryHash(messages);
         const fingerprint = getConversationFingerprint(messages);
+
+        // --- TURN IDENTITY ---
+        // We define activeTurnId early so it's available for all closures and hijacking logic.
+        const activeTurnId = req.turnId || randomUUID();
+
         const conversationPrompt = messages.map(m => {
             if (m.role === 'user') return `USER: ${m.content}`;
             if (m.role === 'assistant') return `ASSISTANT: ${m.content}`;
@@ -238,12 +254,17 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         let lastMsg = messages[messages.length - 1];
         let hijackedTurnId = null;
 
-        // NEW: Check if this fingerprint already has an active turn
-        if (!hijackedTurnId) {
-            hijackedTurnId = activeTurnsByHash.get(fingerprint);
-            if (hijackedTurnId) {
-                console.log(`[API] Fingerprint match! ${fingerprint} -> Turn ${hijackedTurnId}`);
-            }
+        const byHash = activeTurnsByHash.get(historyHash);
+        const byFinger = activeTurnsByHash.get(fingerprint);
+
+        if (byHash) {
+            hijackedTurnId = byHash;
+            console.log(`[HIJACK] Exact Hash Match (Thread Safe): Turn ${hijackedTurnId}`);
+        } else if (byFinger && lastMsg && (lastMsg.role === 'tool' || lastMsg.role === 'function')) {
+            hijackedTurnId = byFinger;
+            console.log(`[HIJACK] Fingerprint Anchor Match (Tool Continuation): Turn ${hijackedTurnId}`);
+        } else if (byFinger) {
+            console.log(`[HIJACK] Fingerprint Match but NOT Hijacking (New State/Error Feedback): ${fingerprint}`);
         }
 
         if (lastMsg && (lastMsg.role === 'tool' || lastMsg.role === 'function')) {
@@ -273,6 +294,10 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             const MAX_WAIT_ATTEMPTS = 60; // 30 seconds max
             while (activeTurnsByHash.has(fingerprint) || activeTurnsByHash.has(historyHash)) {
                 const existingTurnId = activeTurnsByHash.get(fingerprint) || activeTurnsByHash.get(historyHash);
+
+                // If it's a tool continuation, we MUST hijack it once it parks
+                const isContinuation = lastMsg && (lastMsg.role === 'tool' || lastMsg.role === 'function');
+
                 if (process.env.GEMINI_DEBUG_HANDOFF === 'true') {
                     console.log(`[Queue] Thread ${fingerprint} already has active turn ${existingTurnId}. Waiting... (${waitAttempts})`);
                 }
@@ -280,9 +305,12 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 // If it parks while we are waiting, we can hijack it!
                 for (const [callKey, pending] of pendingToolCalls.entries()) {
                     if (pending.turnId === existingTurnId) {
-                        hijackedTurnId = existingTurnId;
-                        console.log(`[API] Hijack discovery (WFI): Turn ${hijackedTurnId} parked while waiting. Hijacking!`);
-                        break;
+                        // Only hijack parked turns if it's an exact match or tool continuation
+                        if (existingTurnId === byHash || isContinuation) {
+                            hijackedTurnId = existingTurnId;
+                            console.log(`[API] Hijack discovery (WFI): Turn ${hijackedTurnId} parked while waiting. Hijacking!`);
+                            break;
+                        }
                     }
                 }
                 if (hijackedTurnId) break;
@@ -334,7 +362,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         const onText = (text) => {
             if (responseSent) return;
             if (process.env.GEMINI_DEBUG_RESPONSES === 'true') {
-                console.log(`[Turn ${turnId}] SSE Text Chunk: ${text.substring(0, 50)}...`);
+                console.log(`[Turn ${activeTurnId}] SSE Text Chunk: ${text.substring(0, 50)}...`);
             }
             if (isStreaming) {
                 sendChunk({
@@ -351,7 +379,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
         const onToolCall = (info) => {
             if (responseSent) return;
-            console.log(`[Turn ${turnId}] Dispatching Tool Call: ${info.name} (${info.id})`);
+            console.log(`[Turn ${activeTurnId}] Dispatching Tool Call: ${info.name} (${info.id})`);
             if (isStreaming) {
                 sendChunk({
                     id: `chatcmpl-stream`,
@@ -456,23 +484,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             if (heartbeatInterval) clearInterval(heartbeatInterval);
         };
 
-        // --- CONCURRENCY GATING ---
-        if (!hijackedTurnId) {
-            const byHash = activeTurnsByHash.get(historyHash);
-            const byFinger = activeTurnsByHash.get(fingerprint);
-
-            if (byHash) {
-                hijackedTurnId = byHash;
-                console.log(`[HIJACK] Exact Hash Match (Thread Safe): Turn ${hijackedTurnId}`);
-            } else if (byFinger) {
-                hijackedTurnId = byFinger;
-                console.log(`[HIJACK] Fingerprint Anchor Match (Stable Continuity): Turn ${hijackedTurnId}`);
-            } else {
-                if (process.env.GEMINI_DEBUG_HANDOFF === 'true') {
-                    console.log(`[HIJACK] No match for Fingerprint=${fingerprint} or Hash=${historyHash.substring(0, 8)}`);
-                }
-            }
-        }
+        // (Concurrency Gating consolidated into section 2/2.5)
 
         // --- WAIT-AND-HIJACK CASE ---
         // If a turn is active but NOT yet parked, wait for it to park.
@@ -551,8 +563,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
 
         // --- NEW TURN CASE ---
-        const turnId = req.turnId || randomUUID();
-        const turnTempDir = path.join(baseTempDir, turnId);
+        const turnTempDir = path.join(baseTempDir, activeTurnId);
         if (!fs.existsSync(turnTempDir)) fs.mkdirSync(turnTempDir, { recursive: true });
 
         // Serialize history (Strict Stateless Narrator)
@@ -560,8 +571,11 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         let conversationPromptSection = ""; // Renamed to avoid shadowed top-level historyHash if any
         let imageCounter = 0;
 
+        // Find the LAST user message to identify which one needs environment details
+        const userMessages = messages.filter(m => m.role === 'user');
+        const lastUserMsg = userMessages[userMessages.length - 1];
+
         // Check if the last message is a slash command (for probing)
-        lastMsg = messages[messages.length - 1];
         const isSlash = lastMsg && lastMsg.role === 'user' && typeof lastMsg.content === 'string' && lastMsg.content.trim().startsWith('/');
 
         if (isSlash) {
@@ -587,7 +601,13 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                         text = sanitizePromptText(text || "");
                     }
 
-                    if (msg.role === 'user') conversationPromptSection += `USER: ${text}\n\n`;
+                    if (msg.role === 'user') {
+                        // History Deduplication: Strip environment details from non-latest messages to prevent prompt bloat
+                        if (msg !== lastUserMsg) {
+                            text = text.replace(/<environment_details>[\s\S]*?<\/environment_details>/g, "[Environment details stripped for brevity]");
+                        }
+                        conversationPromptSection += `USER: ${text}\n\n`;
+                    }
                     else if (msg.role === 'assistant') {
                         let content = text;
                         if (msg.tool_calls) {
@@ -605,7 +625,17 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             }
         }
 
-        console.log(`[API] turnId: ${turnId} - Prompt Stats: System=${systemMessage.length} chars, History=${conversationPromptSection.length} chars`);
+        // Collect historical tool calls to help Repeat Breaker ignore echoes
+        const historicalTools = [];
+        for (const msg of messages) {
+            if (msg.role === 'assistant' && msg.tool_calls) {
+                for (const tc of msg.tool_calls) {
+                    const toolName = tc.function?.name || tc.name;
+                    const toolArgs = JSON.stringify(JSON.parse(tc.function?.arguments || tc.arguments || "{}"));
+                    historicalTools.push(`${historyHash}:${toolName}:${toolArgs}`);
+                }
+            }
+        }
 
         // Debug Persistence: Create directory if needed
         if (process.env.GEMINI_DEBUG_PROMPTS === 'true') {
@@ -615,8 +645,8 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
         // Per-turn IPC: Use /tmp for Unix sockets to avoid host-mount incompatibilities (ENOTSUP)
         const ipcPath = process.platform === 'win32'
-            ? `\\\\.\\pipe\\ionosphere-${turnId}`
-            : path.join('/tmp', `ionosphere-${turnId}.sock`);
+            ? `\\\\.\\pipe\\ionosphere-${activeTurnId}`
+            : path.join('/tmp', `ionosphere-${activeTurnId}.sock`);
 
         const ipcServer = net.createServer((socket) => {
             let buf = '';
@@ -633,24 +663,24 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                             const callId = `call_${callKey.substring(0, 8)}`;
                             pendingToolCalls.set(callKey, {
                                 socket,
-                                turnId,
+                                turnId: activeTurnId,
                                 name: msg.name,
                                 arguments: msg.arguments
                             });
 
                             // Ensure the turn is marked as PARKED if it wasn't already
-                            if (!parkedTurns.has(turnId)) {
-                                console.log(`[Turn ${turnId}] Parking via IPC tool call: ${msg.name}`);
-                                parkedTurns.set(turnId, {
+                            if (!parkedTurns.has(activeTurnId)) {
+                                console.log(`[Turn ${activeTurnId}] Parking via IPC tool call: ${msg.name}`);
+                                parkedTurns.set(activeTurnId, {
                                     controller,
-                                    executePromise: globalPromiseMap.get(turnId), // Use a global map to find the promise
+                                    executePromise: globalPromiseMap.get(activeTurnId), // Use a global map to find the promise
                                     cleanupWorkspace: () => fs.rmSync(turnTempDir, { recursive: true, force: true }),
                                     historyHash
                                 });
                             }
 
                             // Trigger dispatcher (Handoff logic will pick this up when the CLIENT calls back)
-                            const callbacks = controller.callbacksByTurn.get(turnId);
+                            const callbacks = controller.callbacksByTurn.get(activeTurnId);
                             if (callbacks) {
                                 if (callbacks.onPark) {
                                     callbacks.onPark({ id: callId, name: msg.name, arguments: msg.arguments });
@@ -663,7 +693,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                             }
                         }
                     } catch (e) {
-                        console.error(`[IPC] Parse error on turn ${turnId}:`, e);
+                        console.error(`[IPC] Parse error on turn ${activeTurnId}:`, e);
                     }
                 }
             });
@@ -709,52 +739,62 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         }
 
         const onEvent = (json) => {
-            console.log(`[Turn ${turnId}] CLI Event: ${json.type}`);
+            console.log(`[Turn ${activeTurnId}] CLI Event: ${json.type}`);
         };
 
         generateConfig({ targetPath: settingsPath, mcpServers, modelName: req.body.model });
 
         const onPark = (msg) => {
             if (responseSent) return;
-            console.log(`[Turn ${turnId}] Yielding response on Parked state.`);
+            console.log(`[Turn ${activeTurnId}] Yielding response on Parked state. Tool: ${msg.name}`);
+            const payload = isStreaming ? {
+                id: `chatcmpl-stream`,
+                object: 'chat.completion.chunk',
+                created: Math.floor(Date.now() / 1000),
+                model: responseModel,
+                choices: [{
+                    index: 0,
+                    delta: {
+                        tool_calls: [{
+                            index: 0,
+                            id: msg.id,
+                            type: 'function',
+                            function: { name: msg.name, arguments: msg.arguments }
+                        }]
+                    },
+                    finish_reason: "tool_calls"
+                }]
+            } : {
+                id: `chatcmpl-${activeTurnId}`,
+                object: "chat.completion",
+                created: Math.floor(Date.now() / 1000),
+                model: responseModel,
+                choices: [{
+                    index: 0,
+                    message: {
+                        role: "assistant",
+                        content: accumulatedText,
+                        tool_calls: [{
+                            id: msg.id,
+                            type: "function",
+                            function: { name: msg.name, arguments: msg.arguments }
+                        }]
+                    },
+                    finish_reason: "tool_calls"
+                }],
+                usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+            };
+
+            console.log(`[Turn ${activeTurnId}] PARK_PAYLOAD: ${JSON.stringify(payload).substring(0, 500)}`);
+
             if (isStreaming) {
-                sendChunk({
-                    id: `chatcmpl-stream`,
-                    choices: [{
-                        index: 0,
-                        delta: {
-                            tool_calls: [{
-                                id: msg.id,
-                                name: msg.name,
-                                arguments: msg.arguments
-                            }]
-                        },
-                        finish_reason: "tool_calls"
-                    }]
-                });
-                res.write('data: [DONE]\n\n');
-                res.end();
+                sendChunk(payload);
+                if (!res.writableEnded) {
+                    res.write('data: [DONE]\n\n');
+                    res.end();
+                }
             } else {
-                res.json({
-                    id: `chatcmpl-${turnId}`,
-                    object: "chat.completion",
-                    created: Math.floor(Date.now() / 1000),
-                    model: responseModel,
-                    choices: [{
-                        index: 0,
-                        message: {
-                            role: "assistant",
-                            content: accumulatedText,
-                            tool_calls: [{
-                                id: msg.id,
-                                type: "function",
-                                function: { name: msg.name, arguments: msg.arguments }
-                            }]
-                        },
-                        finish_reason: "tool_calls"
-                    }],
-                    usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
-                });
+                res.json(payload);
             }
             responseSent = true;
         };
@@ -762,35 +802,41 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         const executeTask = async () => {
             let taskResolve;
             const executePromise = new Promise(r => taskResolve = r);
-            globalPromiseMap.set(turnId, executePromise);
+            globalPromiseMap.set(activeTurnId, executePromise);
 
             try {
                 // Use fingerprint for concurrency gating to catch retries/metadata shifts
-                activeTurnsByHash.set(fingerprint, turnId);
-                console.log(`[Turn ${turnId}] Executing for fingerprint: ${fingerprint}`);
+                activeTurnsByHash.set(fingerprint, activeTurnId);
+                console.log(`[Turn ${activeTurnId}] Executing for fingerprint: ${fingerprint}`);
 
-                await controller.sendPrompt(turnId, (conversationPromptSection || conversationPrompt).trim(), turnTempDir, settingsPath, systemMessage.trim(), {
+                await controller.sendPrompt(activeTurnId, (conversationPromptSection || conversationPrompt).trim(), turnTempDir, settingsPath, systemMessage.trim(), {
                     onText, onToolCall, onError, onResult, onEvent, onPark
                 }, {
                     IONOSPHERE_IPC: ipcPath,
-                    IONOSPHERE_HISTORY_HASH: historyHash
+                    IONOSPHERE_HISTORY_HASH: historyHash,
+                    IONOSPHERE_HISTORY_TOOLS: historicalTools.join(',')
                 });
 
                 // Final safety for non-streaming multi-tool or parked turns
-                if (!isStreaming && !responseSent) {
-                    if (accumulatedToolCalls.length > 0) {
-                        onResult({ stats: {} }); // Force completion with gathered tools
+                if (!responseSent) {
+                    if (accumulatedText.length === 0 && accumulatedToolCalls.length === 0) {
+                        console.warn(`[Turn ${activeTurnId}] WARNING: No fresh text or tool calls accumulated for this turn.`);
+                    }
+                    if (!isStreaming) {
+                        if (accumulatedToolCalls.length > 0) {
+                            onResult({ stats: {} }); // Force completion with gathered tools
+                        }
                     }
                 }
             } finally {
                 const parkedCount = parkedTurns.size;
-                console.log(`[Turn ${turnId}] Concluded. Active: ${currentlyRunning}/${MAX_CONCURRENT_CLI}, Parked: ${parkedCount}`);
+                console.log(`[Turn ${activeTurnId}] Concluded. Active: ${currentlyRunning}/${MAX_CONCURRENT_CLI}, Parked: ${parkedCount}`);
 
-                if (activeTurnsByHash.get(fingerprint) === turnId) {
+                if (activeTurnsByHash.get(fingerprint) === activeTurnId) {
                     activeTurnsByHash.delete(fingerprint);
                 }
-                parkedTurns.delete(turnId);
-                globalPromiseMap.delete(turnId);
+                parkedTurns.delete(activeTurnId);
+                globalPromiseMap.delete(activeTurnId);
                 taskResolve();
                 ipcServer.close();
                 if (process.platform !== 'win32') {

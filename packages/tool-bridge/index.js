@@ -163,8 +163,13 @@ async function connectUpstreamMcp(serverName, config) {
 function makeIpcHandler(toolName) {
     return async (args) => {
         try {
+            // Strip internal MCP objects that might leak into args from some SDK versions
+            const cleanArgs = { ...args };
+            delete cleanArgs.signal;
+            delete cleanArgs.requestId;
+
             process.stderr.write(`[ToolBridge] → IPC dispatch: ${toolName}\n`);
-            const result = await dispatchToolCall(toolName, args);
+            const result = await dispatchToolCall(toolName, cleanArgs);
             process.stderr.write(`[ToolBridge] ← IPC result received for: ${toolName}\n`);
             return { content: [{ type: 'text', text: String(result) }] };
         } catch (err) {

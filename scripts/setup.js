@@ -104,8 +104,10 @@ async function setupPreferences() {
     const preview = await question("Enable preview models? (Y/n): ");
     process.env.GEMINI_ENABLE_PREVIEW = preview.toLowerCase() === 'n' ? 'false' : 'true';
 
-    const tools = await question("Disable inbuilt tools (read/write files, shell commands) by default? (Y/n): ");
-    process.env.GEMINI_DISABLE_TOOLS = tools.toLowerCase() === 'n' ? 'false' : 'true';
+    console.log("\n[SECURITY] Scorched Earth Hardening physically DELETES native tools from the container.");
+    console.log("This is the most secure mode but may break deep CLI internal dependencies.");
+    const tools = await question("Enable physical 'Scorched Earth' tool deletion? (y/N): ");
+    process.env.GEMINI_DISABLE_TOOLS = tools.toLowerCase() === 'y' ? 'true' : 'false';
 
     const search = await question("Disable Google Web Search tool as well? (y/N): ");
     process.env.GEMINI_DISABLE_WEB_SEARCH = search.toLowerCase() === 'y' ? 'true' : 'false';
@@ -191,8 +193,10 @@ async function main() {
             composeCmd = hasPodmanCompose ? 'podman-compose' : 'podman compose';
         }
 
-        const ionoKey = await setupEnvAndAuth(isNative, composeCmd);
+        // Collect preferences BEFORE build/auth to ensure the container image is consistent
         await setupPreferences();
+
+        const ionoKey = await setupEnvAndAuth(isNative, composeCmd);
         await generateSettings();
 
         // Persist all captured preferences to the .env file

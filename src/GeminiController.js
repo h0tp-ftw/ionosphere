@@ -261,7 +261,7 @@ export class GeminiController {
                             }
 
                             // Remove both action and result tags from the text before sending it to the client
-                            cleanedContent = content.replace(actionRegex, '').replace(resultRegex, '').trim();
+                            cleanedContent = content.replace(actionRegex, '').replace(resultRegex, '');
                             if (cleanedContent && activeCallbacks.onText) {
                                 activeCallbacks.onText(cleanedContent);
                             }

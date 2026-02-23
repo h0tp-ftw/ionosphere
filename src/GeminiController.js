@@ -161,12 +161,15 @@ export class GeminiController {
                 accumulator.on('line', (json) => {
                     const activeCallbacks = this.callbacksByTurn.get(turnId) || {};
 
+                    console.log(`[Turn ${turnId}] CLI Raw Line: ${json.type}${json.role ? ' [' + json.role + ']' : ''}`);
+
                     if (json.type === 'message' && json.role === 'assistant') {
                         const content = (typeof json.content === 'object') ? json.content.text : json.content;
                         if (content) {
                             // Intercept "leaked" tool calls that the model might write as text heritage
                             // NEW FORMAT: <action id="...">Called tool '...' with args: ...</action>
                             const actionRegex = /<action id="([^"]*)">Called tool '([^']+)' with args: (.*?)<\/action>/gs;
+                            const resultRegex = /<result id="([^"]*)">([\s\S]*?)<\/result>/gs;
                             let match;
                             let cleanedContent = content;
 
@@ -191,8 +194,13 @@ export class GeminiController {
                                 }
                             }
 
-                            // Remove the leaked tool calls from the text before sending it to the client
-                            cleanedContent = content.replace(actionRegex, '').trim();
+                            // Suppress echoed results as well
+                            while ((match = resultRegex.exec(content)) !== null) {
+                                console.log(`[GeminiController] Suppressing echo-leak for result: ${match[1]}`);
+                            }
+
+                            // Remove both action and result tags from the text before sending it to the client
+                            cleanedContent = content.replace(actionRegex, '').replace(resultRegex, '').trim();
                             if (cleanedContent && activeCallbacks.onText) {
                                 activeCallbacks.onText(cleanedContent);
                             }
@@ -210,16 +218,24 @@ export class GeminiController {
                             const hash = extraEnv.IONOSPHERE_HISTORY_HASH;
                             if (!this.repeatTracker) this.repeatTracker = new Map();
                             const key = `${hash}:${toolName}:${toolArgs}`;
-                            const count = (this.repeatTracker.get(key) || 0) + 1;
-                            this.repeatTracker.set(key, count);
 
-                            if (count >= 3) {
-                                console.warn(`[GeminiController] Repeat Breaker: Tool '${toolName}' called 3 times with same args. Terminating loop.`);
-                                const errorMsg = `Loop detected: Model repeated tool '${toolName}' with same arguments 3 times. Terminating for safety.`;
-                                if (activeCallbacks.onError) activeCallbacks.onError({ type: 'error', message: errorMsg, code: 'LOOP_DETECTED' });
-                                if (activeCallbacks.onResult) activeCallbacks.onResult({ type: 'result', text: errorMsg, stats: {} });
-                                proc.kill();
-                                return;
+                            // Check if this is a "historical" tool call being parroted
+                            const isHistorical = (extraEnv.IONOSPHERE_HISTORY_TOOLS || "").includes(key);
+
+                            if (isHistorical) {
+                                console.log(`[GeminiController] Tool '${toolName}' identified as historical echo. Ignoring in repeat count.`);
+                            } else {
+                                const count = (this.repeatTracker.get(key) || 0) + 1;
+                                this.repeatTracker.set(key, count);
+
+                                if (count >= 3) {
+                                    console.warn(`[GeminiController] Repeat Breaker: Tool '${toolName}' called 3 times with same args. Terminating loop.`);
+                                    const errorMsg = `Loop detected: Model repeated tool '${toolName}' with same arguments 3 times. Terminating for safety.`;
+                                    if (activeCallbacks.onError) activeCallbacks.onError({ type: 'error', message: errorMsg, code: 'LOOP_DETECTED' });
+                                    if (activeCallbacks.onResult) activeCallbacks.onResult({ type: 'result', text: errorMsg, stats: {} });
+                                    proc.kill();
+                                    return;
+                                }
                             }
                         }
 
@@ -294,19 +310,10 @@ export class GeminiController {
                                 });
                             }
 
-                            // 2. But ALSO signal a fatal error to the Bridge so it concludes the TURN
-                            if (activeCallbacks.onError) {
-                                activeCallbacks.onError({
-                                    type: 'error',
-                                    message: errorMsg,
-                                    code: 'TOOL_NOT_FOUND'
-                                });
-                            }
-
-                            // 3. Force end of turn
-                            if (activeCallbacks.onResult) {
-                                activeCallbacks.onResult({ type: 'result', text: `Terminated: ${errorMsg}`, stats: {} });
-                            }
+                            // 2. We no longer treat this as a FATAL turn error. 
+                            // By NOT calling activeCallbacks.onError or onResult, we let the CLI's internal loop
+                            // handle the error and give the model a chance to self-correct.
+                            console.log(`[GeminiController] Soft error: Missing tool ${toolName} reported back to model.`);
                         }
                     }
                 });

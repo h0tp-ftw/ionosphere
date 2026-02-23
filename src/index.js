@@ -40,6 +40,11 @@ const loosenSchema = (obj) => {
     if (obj.required && Array.isArray(obj.required)) {
         delete obj.required;
     }
+    // Deep Loosening: Remove type and format constraints to prevent CLI validation crashes
+    // This allows the model to send nulls/empties for fields that the bridge handles gracefully.
+    delete obj.type;
+    delete obj.format;
+
     for (const key in obj) {
         if (typeof obj[key] === 'object') {
             loosenSchema(obj[key]);
@@ -76,8 +81,12 @@ const getConversationFingerprint = (messages) => {
             text = content.map(p => (typeof p === 'object' && p.type === 'text') ? p.text : "").join("");
         }
 
-        // Return trimmed text for general stability
-        return text.trim();
+        // Drift Resistance: Try to isolate the core <user_message>
+        const userMsgMatch = text.match(/<user_message>([\s\S]*?)<\/user_message>/);
+        if (userMsgMatch) return userMsgMatch[1].trim();
+
+        // Fallback: Strip known dynamic blocks like <environment_details>
+        return text.replace(/<environment_details>[\s\S]*?<\/environment_details>/g, "").trim();
     };
 
     const system = extractText(systemMsg?.content);
@@ -675,7 +684,9 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         // Serialize history (Strict Stateless Narrator)
         let systemMessage = "";
         let conversationPromptSection = ""; // Renamed to avoid shadowed top-level historyHash if any
-        let imageCounter = 0;
+        // Find the LAST user message to identify which one needs environment details
+        const userMessages = req.body.messages.filter(m => m.role === 'user');
+        const lastUserMsg = userMessages[userMessages.length - 1];
 
         // Check if the last message is a slash command (for probing)
         const isSlash = lastMsg && lastMsg.role === 'user' && typeof lastMsg.content === 'string' && lastMsg.content.trim().startsWith('/');
@@ -706,6 +717,10 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                     }
 
                     if (msg.role === 'user') {
+                        // History Deduplication: Strip environment details from non-latest messages to prevent prompt bloat
+                        if (msg !== lastUserMsg) {
+                            text = text.replace(/<environment_details>[\s\S]*?<\/environment_details>/g, "[Environment details stripped for brevity]");
+                        }
                         conversationPromptSection += `USER: ${text}\n\n`;
                     }
                     else if (msg.role === 'assistant') {

@@ -14,8 +14,7 @@ export const ErrorCode = {
     CONTEXT_LENGTH_EXCEEDED: 'context_length_exceeded',
     INTERNAL_ERROR: 'internal_error',
     POLICY_DENIED: 'policy_denied',
-    CLI_FAILURE: 'cli_failure',
-    INVALID_PARAMETER: 'invalid_parameter'
+    CLI_FAILURE: 'cli_failure'
 };
 
 /**
@@ -76,15 +75,10 @@ export function formatErrorResponse(err, defaultType = ErrorType.SERVER, default
         return createError(err, defaultType, defaultCode);
     }
 
-    const message = err.message || "Unknown error";
-    const type = err.type || defaultType;
-    const code = err.code || defaultCode;
-    const param = err.param || null;
-
-    return {
-        message,
-        type,
-        param,
-        code
-    };
+    return createError(
+        err.message || "Unknown error",
+        err.type || defaultType,
+        err.code || defaultCode,
+        err.param || null
+    );
 }

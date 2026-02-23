@@ -265,7 +265,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
         let messages = req.body.messages;
         if (!messages || !Array.isArray(messages)) {
-            return res.status(400).json({ error: createError("Missing 'messages' array", ErrorType.INVALID_REQUEST, ErrorCode.INVALID_PARAMETER) });
+            return res.status(400).json({ error: createError("Missing 'messages' array", ErrorType.INVALID_REQUEST, 'invalid_parameter') });
         }
 
         logRequestForensics(req);

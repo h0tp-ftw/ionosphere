@@ -268,10 +268,16 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             hijackedTurnId = byFinger;
             console.log(`[HIJACK] Fingerprint Anchor Match (Tool Continuation): Turn ${hijackedTurnId}`);
         } else if (byFinger) {
-            console.log(`[HIJACK] Fingerprint Match but NOT Hijacking (New State/Error Feedback): ${fingerprint}`);
+            // New Instruction Case: We have a fingerprint match but the hash is different.
+            // Under the One Session Rule, we will PREEMPT (kill) the old turn and start a NEW one.
+            const oldTurnId = byFinger;
+            console.log(`[API] One Session Rule: Preempting old turn ${oldTurnId} for new instruction on fingerprint ${fingerprint}`);
+            controller.cancelCurrentTurn(oldTurnId);
+            // We wait a tiny bit for the cleanup to start, then proceed to NEW TURN logic
+            await new Promise(r => setTimeout(r, 200));
         }
 
-        if (lastMsg && (lastMsg.role === 'tool' || lastMsg.role === 'function')) {
+        if (!hijackedTurnId && lastMsg && (lastMsg.role === 'tool' || lastMsg.role === 'function')) {
             const callId = lastMsg.tool_call_id;
             const shortKey = callId?.startsWith('call_') ? callId.substring(5) : callId;
 
@@ -287,44 +293,15 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                     break;
                 }
             }
-            if (!hijackedTurnId) {
-                console.log(`[API] Hijack discovery: NO match for ${callId} in ${pendingToolCalls.size} pending calls`);
-            }
         }
 
-        // 2.5 Concurrency Gating: Wait if there's already an active (unparked) turn for this conversation
+        // 2.5 Concurrency Gating: Final safety to ensure no two turns for the same fingerprint run simultaneously
         if (!hijackedTurnId) {
-            let waitAttempts = 0;
-            const MAX_WAIT_ATTEMPTS = 60; // 30 seconds max
-            while (activeTurnsByHash.has(fingerprint) || activeTurnsByHash.has(historyHash)) {
-                const existingTurnId = activeTurnsByHash.get(fingerprint) || activeTurnsByHash.get(historyHash);
-
-                // If it's a tool continuation, we MUST hijack it once it parks
-                const isContinuation = lastMsg && (lastMsg.role === 'tool' || lastMsg.role === 'function');
-
-                if (process.env.GEMINI_DEBUG_HANDOFF === 'true') {
-                    console.log(`[Queue] Thread ${fingerprint} already has active turn ${existingTurnId}. Waiting... (${waitAttempts})`);
-                }
-
-                // If it parks while we are waiting, we can hijack it!
-                for (const [callKey, pending] of pendingToolCalls.entries()) {
-                    if (pending.turnId === existingTurnId) {
-                        // Only hijack parked turns if it's an exact match or tool continuation
-                        if (existingTurnId === byHash || isContinuation) {
-                            hijackedTurnId = existingTurnId;
-                            console.log(`[API] Hijack discovery (WFI): Turn ${hijackedTurnId} parked while waiting. Hijacking!`);
-                            break;
-                        }
-                    }
-                }
-                if (hijackedTurnId) break;
-
+            const existingTurnId = activeTurnsByHash.get(fingerprint) || activeTurnsByHash.get(historyHash);
+            if (existingTurnId) {
+                console.log(`[API] One Session Rule: Killing orphaned/stale active turn ${existingTurnId} before starting new turn.`);
+                controller.cancelCurrentTurn(existingTurnId);
                 await new Promise(r => setTimeout(r, 500));
-                waitAttempts++;
-                if (waitAttempts > MAX_WAIT_ATTEMPTS) {
-                    console.warn(`[Queue] Timeout waiting for active turn ${existingTurnId}. Proceeding with new turn.`);
-                    break;
-                }
             }
         }
 
@@ -522,25 +499,26 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             controller.updateCallbacks(hijackedTurnId, { onText, onToolCall, onError, onResult });
 
             // 2. Resolve or Re-emit
-            if (isToolContinuation) {
-                const toolContent = lastMsg.content;
-                const callId = lastMsg.tool_call_id;
-                const shortKey = callId?.startsWith('call_') ? callId.substring(5) : callId;
-                let resolved = false;
-                for (const [callKey] of pendingToolCalls.entries()) {
-                    if (callKey.startsWith(shortKey)) {
-                        resolveToolCall(callKey, toolContent);
-                        resolved = true;
-                        break;
+            // Deep-scan: Check if ANY message in the current payload is a tool result for our pending calls
+            let resolvedAny = false;
+            for (const msg of messages) {
+                if (msg.role === 'tool' || msg.role === 'function') {
+                    const callId = msg.tool_call_id;
+                    const shortKey = callId?.startsWith('call_') ? callId.substring(5) : callId;
+                    for (const [callKey] of pendingToolCalls.entries()) {
+                        if (callKey.startsWith(shortKey)) {
+                            console.log(`[API] Deep-scan match: Resolving ${callId} for turn ${hijackedTurnId}`);
+                            resolveToolCall(callKey, msg.content);
+                            resolvedAny = true;
+                            break;
+                        }
                     }
                 }
+            }
 
-                if (!resolved) {
-                    console.warn(`[API] Could not find pending tool call for ID ${callId}`);
-                    // If we can't find the tool call, it might be a race. Fallback to wait.
-                }
-            } else {
-                // Proxy Hijack: Re-emit the pending tool call to the NEW requester
+            if (!resolvedAny) {
+                // If no results found in messages, it might be a Proxy Hijack (Retry)
+                // Re-emit the pending tool call so the client knows we are still waiting
                 let reemitted = false;
                 for (const [callKey, pending] of pendingToolCalls.entries()) {
                     if (pending.turnId === hijackedTurnId) {
@@ -556,7 +534,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                     }
                 }
                 if (!reemitted) {
-                    console.warn(`[API] Proxy Hijack: No pending tool call found for Turn ${hijackedTurnId}. Falling back to wait.`);
+                    console.warn(`[API] Proxy Hijack: No pending tool call found for Turn ${hijackedTurnId}. Falling back.`);
                 }
             }
 

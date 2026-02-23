@@ -149,8 +149,9 @@ const resolveToolCall = (callKey, result) => {
     }
     pendingToolCalls.delete(callKey);
     try {
+        const resultStr = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
         console.log(`[IPC] Sending result to turn ${pending.turnId} for tool ${callKey}`);
-        pending.socket.write(JSON.stringify({ event: 'tool_result', result: String(result) }) + '\n');
+        pending.socket.write(JSON.stringify({ event: 'tool_result', result: resultStr }) + '\n');
         pending.socket.end();
         console.log(`[IPC] Resolved tool call ${callKey} for turn ${pending.turnId}`);
     } catch (e) {
@@ -361,6 +362,15 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         const onToolCall = (info) => {
             if (responseSent) return;
             console.log(`[Turn ${activeTurnId}] Dispatching Tool Call: ${info.name} (${info.id})`);
+
+            const toolCall = {
+                id: info.id,
+                type: 'function',
+                function: { name: info.name, arguments: info.arguments }
+            };
+
+            accumulatedToolCalls.push(toolCall);
+
             if (isStreaming) {
                 sendChunk({
                     id: `chatcmpl-stream`,
@@ -371,32 +381,13 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                         index: 0,
                         delta: {
                             tool_calls: [{
-                                index: 0,
-                                id: info.id,
-                                type: 'function',
-                                function: { name: info.name, arguments: info.arguments }
+                                ...toolCall,
+                                index: accumulatedToolCalls.length - 1
                             }]
-                        },
-                        finish_reason: 'tool_calls'
+                        }
                     }]
                 });
-                if (!res.writableEnded) {
-                    res.write('data: [DONE]\n\n');
-                    res.end();
-                    responseSent = true;
-                }
-            } else {
-                accumulatedToolCalls.push({
-                    id: info.id,
-                    type: 'function',
-                    function: { name: info.name, arguments: info.arguments }
-                });
-                // In non-streaming mode, we don't send the response yet.
-                // We wait for the 'done' or 'result' event or process exit if we expect others.
-                // However, the current CLI implementation often sends one tool use and parks.
-                // If it hits a "done" or parks, onResult or the end of sendPrompt will trigger.
             }
-            if (heartbeatInterval) clearInterval(heartbeatInterval);
         };
 
         const onError = (err) => {
@@ -595,10 +586,12 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                         if (msg.tool_calls) {
                             for (const tc of msg.tool_calls) {
                                 const callId = tc.id || tc.tool_call_id || 'unknown';
-                                const originalName = tc.function?.name || tc.name;
-                                // Uniform Namespacing: History must match available tools (ionosphere__ prefix)
-                                const namespacedName = originalName.startsWith('ionosphere__') ? originalName : `ionosphere__${originalName}`;
-                                content += `\n<action id="${callId}">Called tool '${namespacedName}' with args: ${tc.function?.arguments || tc.arguments}</action>`;
+                                // Handle both string arguments (OpenAI format) and object arguments (accumulatedToolCalls)
+                                const argsStr = typeof (tc.function?.arguments || tc.arguments) === 'string'
+                                    ? (tc.function?.arguments || tc.arguments)
+                                    : JSON.stringify(tc.function?.arguments || tc.arguments || {});
+
+                                content += `\n<action id="${callId}">Called tool '${namespacedName}' with args: ${argsStr}</action>`;
                             }
                         }
                         conversationPromptSection += `ASSISTANT: ${content.trim()}\n\n`;
@@ -616,7 +609,8 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             if (msg.role === 'assistant' && msg.tool_calls) {
                 for (const tc of msg.tool_calls) {
                     const toolName = tc.function?.name || tc.name;
-                    const toolArgs = JSON.stringify(JSON.parse(tc.function?.arguments || tc.arguments || "{}"));
+                    const rawArgs = tc.function?.arguments || tc.arguments || "{}";
+                    const toolArgs = JSON.stringify(typeof rawArgs === 'string' ? JSON.parse(rawArgs) : rawArgs);
                     historicalTools.push(`${historyHash}:${toolName}:${toolArgs}`);
                 }
             }
@@ -674,9 +668,6 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                             // Trigger dispatcher
                             const callbacks = controller.callbacksByTurn.get(activeTurnId);
                             if (callbacks) {
-                                if (callbacks.onPark) {
-                                    callbacks.onPark({ id: callId, name: clientToolName, arguments: msg.arguments });
-                                }
                                 callbacks.onToolCall({
                                     id: callId,
                                     name: clientToolName,
@@ -753,56 +744,45 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         const onPark = (msg) => {
             if (responseSent) return;
             console.log(`[Turn ${activeTurnId}] Yielding response on Parked state. Tool: ${msg.name}`);
-            const payload = isStreaming ? {
-                id: `chatcmpl-stream`,
-                object: 'chat.completion.chunk',
-                created: Math.floor(Date.now() / 1000),
-                model: responseModel,
-                choices: [{
-                    index: 0,
-                    delta: {
-                        tool_calls: [{
-                            index: 0,
-                            id: msg.id,
-                            type: 'function',
-                            function: { name: msg.name, arguments: msg.arguments }
-                        }]
-                    },
-                    finish_reason: "tool_calls"
-                }]
-            } : {
-                id: `chatcmpl-${activeTurnId}`,
-                object: "chat.completion",
-                created: Math.floor(Date.now() / 1000),
-                model: responseModel,
-                choices: [{
-                    index: 0,
-                    message: {
-                        role: "assistant",
-                        content: accumulatedText,
-                        tool_calls: [{
-                            id: msg.id,
-                            type: "function",
-                            function: { name: msg.name, arguments: msg.arguments }
-                        }]
-                    },
-                    finish_reason: "tool_calls"
-                }],
-                usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
-            };
-
-            console.log(`[Turn ${activeTurnId}] PARK_PAYLOAD: ${JSON.stringify(payload).substring(0, 500)}`);
 
             if (isStreaming) {
-                sendChunk(payload);
+                // Send finish_reason if we have tool calls
+                sendChunk({
+                    id: `chatcmpl-stream`,
+                    object: 'chat.completion.chunk',
+                    created: Math.floor(Date.now() / 1000),
+                    model: responseModel,
+                    choices: [{
+                        index: 0,
+                        delta: {},
+                        finish_reason: accumulatedToolCalls.length > 0 ? "tool_calls" : "stop"
+                    }]
+                });
                 if (!res.writableEnded) {
                     res.write('data: [DONE]\n\n');
                     res.end();
                 }
             } else {
+                const payload = {
+                    id: `chatcmpl-${activeTurnId}`,
+                    object: "chat.completion",
+                    created: Math.floor(Date.now() / 1000),
+                    model: responseModel,
+                    choices: [{
+                        index: 0,
+                        message: {
+                            role: "assistant",
+                            content: accumulatedText,
+                            tool_calls: accumulatedToolCalls.length > 0 ? accumulatedToolCalls : undefined
+                        },
+                        finish_reason: accumulatedToolCalls.length > 0 ? "tool_calls" : "stop"
+                    }],
+                    usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+                };
                 res.json(payload);
             }
             responseSent = true;
+            if (heartbeatInterval) clearInterval(heartbeatInterval);
         };
 
         const executeTask = async () => {

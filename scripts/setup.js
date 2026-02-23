@@ -200,7 +200,7 @@ async function main() {
                     } else {
                         console.log("❌ API_KEY not found in .env.");
                     }
-                    return;
+                    process.exit(0);
                 }
 
                 if (mChoice === '2') {

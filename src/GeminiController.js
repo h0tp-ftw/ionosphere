@@ -175,8 +175,11 @@ export class GeminiController {
                     if (!currentEnv.IONOSPHERE_HISTORY_HASH) return false;
                     const hash = currentEnv.IONOSPHERE_HISTORY_HASH;
                     if (!this.repeatTracker) this.repeatTracker = new Map();
+
+                    // Normalize toolName to be prefix-agnostic for loop tracking
+                    const normalizedToolName = toolName.startsWith('ionosphere__') ? toolName.slice(12) : toolName;
                     const toolArgs = JSON.stringify(argsObj || {});
-                    const key = `${hash}:${toolName}:${toolArgs}`;
+                    const key = `${hash}:${normalizedToolName}:${toolArgs}`;
 
                     // Check if this is a "historical" tool call being parroted
                     const isHistorical = (currentEnv.IONOSPHERE_HISTORY_TOOLS || "").includes(key);

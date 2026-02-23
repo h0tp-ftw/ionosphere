@@ -807,15 +807,43 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             if (openAiTools) {
                 const toolsPath = path.join(turnTempDir, 'tools.json');
                 // Uniform Namespacing: Prefix names in tools.json so the model sees ionosphere__ prefix
-                const namespacedTools = openAiTools.map(t => {
-                    const name = t.function?.name || t.name;
-                    if (t.function) {
-                        t.function.name = name.startsWith('ionosphere__') ? name : `ionosphere__${name}`;
-                    } else {
-                        t.name = name.startsWith('ionosphere__') ? name : `ionosphere__${name}`;
+                const namespacedTools = [];
+                for (const t of openAiTools) {
+                    const originalName = t.function?.name || t.name;
+                    const prefixedName = originalName.startsWith('ionosphere__') ? originalName : `ionosphere__${originalName}`;
+
+                    // Relax schemas for Roo's native tools to prevent validation loops
+                    const rooTools = ['read_file', 'list_files', 'apply_diff', 'search_files', 'execute_command', 'write_to_file'];
+                    if (rooTools.includes(originalName)) {
+                        const fn = t.function || t;
+                        if (fn.parameters?.required) {
+                            // Only keep the most essential fields as required for the CLI
+                            const essentials = {
+                                'read_file': ['path'],
+                                'list_files': ['path'],
+                                'apply_diff': ['path', 'diff'],
+                                'search_files': ['path', 'regex'],
+                                'execute_command': ['command'],
+                                'write_to_file': ['path', 'content']
+                            };
+                            fn.parameters.required = essentials[originalName] || fn.parameters.required;
+                        }
                     }
-                    return t;
-                });
+
+                    // 1. Add the prefixed version (Official)
+                    const prefixedTool = JSON.parse(JSON.stringify(t));
+                    if (prefixedTool.function) prefixedTool.function.name = prefixedName;
+                    else prefixedTool.name = prefixedName;
+                    namespacedTools.push(prefixedTool);
+
+                    // 2. Add the bare version (Alias) if it's not already prefixed
+                    if (originalName !== prefixedName) {
+                        const bareTool = JSON.parse(JSON.stringify(t));
+                        if (bareTool.function) bareTool.function.name = originalName;
+                        else bareTool.name = originalName;
+                        namespacedTools.push(bareTool);
+                    }
+                }
                 fs.writeFileSync(toolsPath, JSON.stringify(namespacedTools, null, 2));
                 toolBridgeEnv.TOOL_BRIDGE_TOOLS = toolsPath;
             }

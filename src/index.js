@@ -542,6 +542,10 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 const updated = findHijackedTurnId(messages, historyHash, fingerprint, activeTurnsByHash, parkedTurns, pendingToolCalls);
                 if (updated && updated.turnId) hijackedTurnId = updated.turnId;
             }
+            if (hijackedTurnId && !parkedTurns.has(hijackedTurnId)) {
+                console.warn(`[API] Wait-and-Hijack: Timed out waiting for turn ${hijackedTurnId} to park. Falling back to fresh turn.`);
+                hijackedTurnId = null;
+            }
         }
 
         const allCallbacks = { onText, onToolCall, onError, onResult, onEvent, onPark, hijackedFrom: hijackedTurnId };
@@ -917,8 +921,16 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         await enqueueControllerPrompt(executeTask);
 
     } catch (err) {
-        console.error("[API Error]", err);
-        if (!res.headersSent) res.status(500).json({ error: err.message });
+        console.error(`[API Error] Critical failure in /v1/chat/completions: ${err.stack || err.message}`);
+        if (!res.headersSent) {
+            res.status(500).json({
+                error: {
+                    message: `Internal Orchestrator Error: ${err.message}`,
+                    type: "internal_error",
+                    code: "orchestrator_failure"
+                }
+            });
+        }
         else res.end();
     }
 });

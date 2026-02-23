@@ -367,6 +367,15 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         req.setTimeout(0);
         res.setTimeout(0);
 
+        // Handle client disconnect mid-turn
+        res.on('close', () => {
+            if (!responseSent) {
+                console.log(`[Turn ${activeTurnId}] Client disconnected. Terminating turn.`);
+                controller.cancelCurrentTurn(activeTurnId);
+                responseSent = true; // Block any further callbacks
+            }
+        });
+
         const sendChunk = (chunk) => {
             if (isStreaming && !res.writableEnded) {
                 res.write(`data: ${JSON.stringify(chunk)}\n\n`);
@@ -380,7 +389,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         const responseModel = req.body.model || process.env.GEMINI_MODEL || "gemini-2.5-flash-lite";
 
         const onText = (text) => {
-            if (responseSent) return;
+            if (responseSent || res.writableEnded) return;
             const contextMsg = hijackedTurnId ? `[HIJACKED from ${hijackedTurnId}] ` : "";
             if (process.env.GEMINI_DEBUG_RESPONSES === 'true') {
                 console.log(`[Turn ${activeTurnId}] ${contextMsg}SSE Text Chunk: ${text.substring(0, 50)}...`);
@@ -399,7 +408,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         };
 
         const onToolCall = (info) => {
-            if (responseSent) return;
+            if (responseSent || res.writableEnded) return;
             // Force stringification of arguments for strict OpenAI compatibility
             const argsStr = typeof info.arguments === 'string' ? info.arguments : JSON.stringify(info.arguments || {});
 
@@ -433,7 +442,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         };
 
         const onError = (err) => {
-            if (responseSent) return;
+            if (responseSent || res.writableEnded) return;
             responseSent = true;
             const errorObj = {
                 message: typeof err === 'string' ? err : (err.message || "Unknown error"),
@@ -451,7 +460,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         };
 
         const onResult = (json) => {
-            if (responseSent) return;
+            if (responseSent || res.writableEnded) return;
             finalStats = json.stats || {};
             if (isStreaming) {
                 sendChunk({
@@ -504,7 +513,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         };
 
         const onPark = (msg) => {
-            if (responseSent) return;
+            if (responseSent || res.writableEnded) return;
             console.log(`[Turn ${activeTurnId}] Yielding response on Parked state. Tool: ${msg.name}`);
 
             if (isStreaming) {

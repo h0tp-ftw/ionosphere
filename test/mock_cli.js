@@ -14,7 +14,7 @@ function emit(obj) {
 async function run() {
     emit({ type: 'init', timestamp: new Date().toISOString(), session_id: 'mock-session-001', model: 'gemini-test' });
 
-    if (SCENARIO === 'tool_use') {
+    if (SCENARIO === 'tool_use' || SCENARIO === 'tool_park') {
         const ipcPath = process.env.IONOSPHERE_IPC || process.env.TOOL_BRIDGE_IPC;
         if (ipcPath) {
             const client = net.connect(ipcPath, () => {
@@ -24,16 +24,26 @@ async function run() {
                 const msg = JSON.parse(data.toString());
                 if (msg.event === 'tool_result') {
                     emit({ type: 'tool_result', timestamp: new Date().toISOString(), tool_id: 'mock_tc_1', status: 'success', output: msg.result });
-                    emit({ type: 'message', role: 'assistant', content: `The weather in London is ${msg.result}.`, delta: true });
+                    emit({ type: 'message', role: 'assistant', content: `Final answer: The weather in London is ${msg.result}.`, delta: true });
                     emit({ type: 'result', status: 'success', stats: { total_tokens: 100, input_tokens: 50, output_tokens: 50, duration_ms: 10, tool_calls: 1 } });
                     process.exit(0);
                 }
             });
+            // If it's a park scenario, we don't exit, we wait for the result which might come in a later process hijack
             await new Promise(() => { });
         }
     } else if (SCENARIO === 'vision') {
         emit({ type: 'message', role: 'assistant', content: 'I see a beautiful landscape with mountains.', delta: true });
         emit({ type: 'result', status: 'success', stats: { total_tokens: 150, input_tokens: 100, output_tokens: 50, duration_ms: 200, tool_calls: 0 } });
+    } else if (SCENARIO === 'auth_error') {
+        console.error("Fatal: please log in to continue. (Simulated auth error)");
+        process.exit(1);
+    } else if (SCENARIO === 'quota_error') {
+        console.error("Fatal: RESOURCE_EXHAUSTED. (Simulated quota error)");
+        process.exit(1);
+    } else if (SCENARIO === 'crash') {
+        console.error("Simulated crash: SEGFAULT at 0x000");
+        process.exit(1);
     } else if (SCENARIO === 'error') {
         console.error('[mock_cli] Simulating a fatal error');
         process.exit(1);

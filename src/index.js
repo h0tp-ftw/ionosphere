@@ -412,7 +412,12 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 sendChunk({ error: errorObj });
                 if (!res.writableEnded) res.end();
             } else {
-                const status = (errorObj.code === 'rate_limit_exceeded') ? 429 : 500;
+                let status = 500;
+                if (errorObj.code === 'rate_limit_exceeded') status = 429;
+                else if (errorObj.code === 'invalid_api_key') status = 401;
+                else if (errorObj.code === 'model_not_found') status = 404;
+                else if (errorObj.code === 'policy_denied') status = 403;
+
                 if (!res.headersSent) res.status(status).json({ error: errorObj });
             }
             if (heartbeatInterval) clearInterval(heartbeatInterval);

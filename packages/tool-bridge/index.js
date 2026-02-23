@@ -253,10 +253,11 @@ for (const [serverName, config] of serverEntries) {
         process.stderr.write(`[ToolBridge] Discovered ${tools.length} tool(s) from ${serverName}\n`);
 
         for (const tool of tools) {
-            // Namespace to avoid collisions: serverName__toolName
-            const namespacedName = `${serverName}__${tool.name}`;
+            // Namespace to avoid collisions: ionosphere__serverName__toolName
+            // This ensures EVERYTHING from the bridge is under the one safe prefix.
+            const namespacedName = `ionosphere__${serverName}__${tool.name}`;
 
-            process.stderr.write(`[ToolBridge] Re-registering: ${namespacedName}\n`);
+            process.stderr.write(`[ToolBridge] Re-registering upstream tool: ${namespacedName}\n`);
 
             const schema = {
                 ...(tool.inputSchema ?? { type: 'object', properties: {} }),

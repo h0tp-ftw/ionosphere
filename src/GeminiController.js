@@ -314,12 +314,15 @@ export class GeminiController {
                     accumulator.push(chunk);
                 });
 
+                let lastStderr = '';
                 proc.stderr.on('data', (chunk) => {
                     const stderrText = chunk.toString().trim();
                     if (stderrText) {
+                        lastStderr = stderrText.split('\n').slice(-3).join('\n'); // Keep last 3 lines
                         const activeCallbacks = this.callbacksByTurn.get(turnId) || {};
                         console.error(`[Gemini CLI STDERR] ${stderrText}`);
 
+                        // ... (keep matches as they were)
                         const isAuthError = (/(please log in|auth|authorization)/i.test(stderrText) && !/unauthorized tool call/i.test(stderrText)) ||
                             (/credentials/i.test(stderrText) && !/loaded cached credentials/i.test(stderrText));
                         const isResourceError = /RESOURCE_EXHAUSTED|rateLimitExceeded|429|No capacity available/i.test(stderrText);
@@ -329,19 +332,19 @@ export class GeminiController {
 
                         if (isAuthError) {
                             const errorMsg = `Fatal: CLI Auth Expired or Missing. Raw: ${stderrText}`;
-                            if (activeCallbacks.onError) activeCallbacks.onError({ type: 'error', message: errorMsg, code: 'AUTH_EXPIRED' });
+                            if (activeCallbacks.onError) activeCallbacks.onError({ type: 'invalid_request_error', message: errorMsg, code: 'invalid_api_key' });
                             proc.kill('SIGKILL');
                         } else if (isResourceError) {
                             const errorMsg = `Fatal: Gemini API Quota/Capacity Exhausted (429). Raw: ${stderrText}`;
-                            if (activeCallbacks.onError) activeCallbacks.onError({ type: 'error', message: errorMsg, code: 'RATE_LIMIT' });
+                            if (activeCallbacks.onError) activeCallbacks.onError({ type: 'rate_limit_error', message: errorMsg, code: 'rate_limit_exceeded' });
                             proc.kill('SIGKILL');
                         } else if (isModelError) {
-                            const errorMsg = `Fatal: Model not found or inaccessible. Please check your model name and API permissions. Raw: ${stderrText}`;
-                            if (activeCallbacks.onError) activeCallbacks.onError({ type: 'error', message: errorMsg, code: 'MODEL_NOT_FOUND' });
+                            const errorMsg = `Fatal: Model not found or inaccessible. Raw: ${stderrText}`;
+                            if (activeCallbacks.onError) activeCallbacks.onError({ type: 'invalid_request_error', message: errorMsg, code: 'model_not_found' });
                             proc.kill('SIGKILL');
                         } else if (isPolicyError) {
                             const errorMsg = `Fatal: Tool use or action denied by policy. Raw: ${stderrText}`;
-                            if (activeCallbacks.onError) activeCallbacks.onError({ type: 'error', message: errorMsg, code: 'POLICY_DENIED' });
+                            if (activeCallbacks.onError) activeCallbacks.onError({ type: 'access_denied', message: errorMsg, code: 'policy_denied' });
                             proc.kill('SIGKILL');
                         } else if (isNotFound) {
                             const match = stderrText.match(/Tool "([^"]+)" not found/i);
@@ -349,7 +352,6 @@ export class GeminiController {
                             const errorMsg = `Fatal: Tool "${toolName}" not found. This environment does not support ${toolName}.`;
                             console.log(`[GeminiController] Aggressively breaking loop: Tool '${toolName}' not found.`);
 
-                            // 1. Send the result back to the CLI so it doesn't hang
                             if (activeCallbacks.onEvent) {
                                 activeCallbacks.onEvent({
                                     type: 'tool_result',
@@ -358,10 +360,6 @@ export class GeminiController {
                                     is_error: true
                                 });
                             }
-
-                            // 2. We no longer treat this as a FATAL turn error. 
-                            // By NOT calling activeCallbacks.onError or onResult, we let the CLI's internal loop
-                            // handle the error and give the model a chance to self-correct.
                             console.log(`[GeminiController] Soft error: Missing tool ${toolName} reported back to model.`);
                         }
                     }
@@ -372,13 +370,11 @@ export class GeminiController {
                     const usageSummary = Array.from(this.processes.get(turnId)?.toolUsage || []).join(', ') || 'none';
                     console.log(`[GeminiController] Process closed for turn ${turnId} with code ${code}. Tool Usage: [${usageSummary}]`);
 
-                    // Flush any remaining data in the accumulator
                     if (accumulator.buffer) {
                         accumulator.push('\n');
                     }
 
                     this.processes.delete(turnId);
-                    // Skip immediate cleanup of callbacks to allow error handlers in catch block
 
                     try {
                         if (fs.existsSync(tempPromptPath)) fs.unlinkSync(tempPromptPath);
@@ -387,7 +383,8 @@ export class GeminiController {
                     if (code === 0 || code === null) {
                         resolve(lastResultJson);
                     } else {
-                        reject(new Error(`CLI process exited with code ${code}`));
+                        const errorMsg = lastStderr ? `CLI failed (code ${code}): ${lastStderr}` : `CLI process exited with code ${code}`;
+                        reject(new Error(errorMsg));
                     }
                 });
 

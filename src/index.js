@@ -459,15 +459,16 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             responseSent = true;
             const errorObj = {
                 message: typeof err === 'string' ? err : (err.message || "Unknown error"),
-                type: "internal_error",
-                code: "cli_failure"
+                type: (typeof err === 'object' && err.type) ? err.type : "internal_error",
+                code: (typeof err === 'object' && err.code) ? err.code : "cli_failure"
             };
 
             if (isStreaming) {
                 sendChunk({ error: errorObj });
                 if (!res.writableEnded) res.end();
             } else {
-                if (!res.headersSent) res.status(500).json({ error: errorObj });
+                const status = (errorObj.code === 'rate_limit_exceeded') ? 429 : 500;
+                if (!res.headersSent) res.status(status).json({ error: errorObj });
             }
             if (heartbeatInterval) clearInterval(heartbeatInterval);
         };

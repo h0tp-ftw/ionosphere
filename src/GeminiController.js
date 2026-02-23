@@ -292,6 +292,9 @@ export class GeminiController {
                         if (json.stats) {
                             const { input_tokens, output_tokens, total_tokens } = json.stats;
                             console.log(`[GeminiController] Turn ${turnId} Usage: In=${input_tokens || 0}, Out=${output_tokens || 0}, Total=${total_tokens || 0}`);
+                            if ((output_tokens || 0) === 0) {
+                                console.warn(`[GeminiController] WARNING: Turn ${turnId} generated 0 tokens. This may indicate a safety block or context issue.`);
+                            }
                         }
                         if (activeCallbacks.onResult) activeCallbacks.onResult(json);
 
@@ -355,6 +358,12 @@ export class GeminiController {
                     clearTimeout(timeout);
                     const usageSummary = Array.from(this.processes.get(turnId)?.toolUsage || []).join(', ') || 'none';
                     console.log(`[GeminiController] Process closed for turn ${turnId} with code ${code}. Tool Usage: [${usageSummary}]`);
+
+                    // Flush any remaining data in the accumulator
+                    if (accumulator.buffer) {
+                        accumulator.push('\n');
+                    }
+
                     this.processes.delete(turnId);
                     // Skip immediate cleanup of callbacks to allow error handlers in catch block
 

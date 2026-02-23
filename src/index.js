@@ -696,6 +696,11 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             }
         }
 
+        // Prime the assistant for a fresh turn if not a continuation or slash command
+        if (!isSlash) {
+            conversationPromptSection += "ASSISTANT: ";
+        }
+
 
         // Debug Persistence: Create directory if needed
         if (process.env.GEMINI_DEBUG_PROMPTS === 'true') {
@@ -843,9 +848,16 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 // Final safety for non-streaming multi-tool or parked turns
                 if (!responseSent) {
                     if (accumulatedText.length === 0 && accumulatedToolCalls.length === 0) {
-                        console.warn(`[Turn ${activeTurnId}] WARNING: No fresh text or tool calls accumulated for this turn.`);
-                    }
-                    if (!isStreaming) {
+                        console.warn(`[Turn ${activeTurnId}] WARNING: No fresh text or tool calls accumulated for this turn. (API returned 0 tokens?)`);
+                        // For non-streaming, we must send at least an empty response to avoid hanging the client
+                        if (!isStreaming) {
+                            onResult({ stats: { input_tokens: 0, output_tokens: 0, total_tokens: 0 } });
+                        } else {
+                            // For streaming, send an empty text chunk then [DONE]
+                            onText("");
+                            onResult({ stats: {} });
+                        }
+                    } else if (!isStreaming) {
                         if (accumulatedToolCalls.length > 0) {
                             onResult({ stats: {} }); // Force completion with gathered tools
                         }

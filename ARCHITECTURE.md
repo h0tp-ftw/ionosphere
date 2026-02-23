@@ -150,7 +150,8 @@ Any of the following model identifiers can be passed in the `model` field of the
 - **No Persistent State**: Eliminates the risk of database leaks or long-term data exposure.
 - **Ephemeral Workspaces**: All turn data is short-lived in-memory or in temporary directories.
 - **Input Sanitization**: `@` and `!` prefixes are escaped to prevent user content from triggering CLI directives.
-- **Dumb CLI**: CLI filesystem/shell tools are disabled by default. All interactions flow through the client.
+- **Scorched Earth Hardening**: Native CLI filesystem/shell tools are not just disabled; they are permanently deleted (stubbed) in `node_modules` during the build phase.
+- **Isolated Deployment**: Bind-mounts are removed in production. The container runs exclusively on code baked into the image, preventing host leakage and tampering.
 
 ---
 
@@ -164,8 +165,9 @@ gemini-ionosphere/
 ├── packages/
 │   └── tool-bridge/          ← MCP Aggregator (ToolBridge)
 ├── scripts/
-│   └── generate_settings.js  ← Per-turn settings generator
-└── temp/                     ← Ephemeral turn workspaces
+│   ├── generate_settings.js  ← Per-turn settings generator
+│   └── nuke-tools.js         ← Scorched Earth hardening script
+└── temp/                     ← Ephemeral workspaces (container-internal)
 ```
 
 ---

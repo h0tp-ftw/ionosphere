@@ -46,10 +46,9 @@ async function startSharedBridge(scenario = 'text') {
 
 async function stopSharedBridge() {
     if (bridgeProc) {
-        const closePromise = new Promise(resolve => bridgeProc.on('close', resolve));
         bridgeProc.kill('SIGKILL');
         bridgeProc = null;
-        await closePromise;
+        await new Promise(r => setTimeout(r, 1000));
     }
 }
 

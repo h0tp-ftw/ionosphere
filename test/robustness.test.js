@@ -47,10 +47,9 @@ async function startSharedBridge(scenario = 'text') {
 
 async function stopSharedBridge() {
     if (bridgeProc) {
-        const closePromise = new Promise(resolve => bridgeProc.on('close', resolve));
         bridgeProc.kill('SIGKILL');
         bridgeProc = null;
-        await closePromise;
+        await new Promise(r => setTimeout(r, 1000));
     }
 }
 
@@ -142,7 +141,7 @@ test('Robustness Suite', async (t) => {
         await new Promise(r => setTimeout(r, 500));
 
         // Verify server is still up with a simple request
-        await startSharedBridge('text'); // Restart to clear any mock state if needed, or just use text scenario
+        // Do NOT restart the bridge here, to prove the original process survived
         const check = await client.chat.completions.create({
             model: 'gemini-2.5-flash-lite',
             messages: [{ role: 'user', content: 'check' }]

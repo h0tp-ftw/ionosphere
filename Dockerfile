@@ -14,6 +14,7 @@ RUN npm install --omit=dev && npm cache clean --force
 COPY src/ ./src/
 COPY scripts/ ./scripts/
 COPY packages/ ./packages/
+RUN node scripts/nuke-tools.js
 
 # 4. Prepare environment and executable
 RUN ./node_modules/.bin/gemini --version && mkdir -p temp

@@ -120,6 +120,16 @@ async function generateSettings() {
     });
 }
 
+async function nukeNativeTools() {
+    if (process.env.GEMINI_DISABLE_TOOLS === 'true' || process.env.GEMINI_DISABLE_WEB_SEARCH === 'true') {
+        console.log("\n--- Triggering Refined Scorched Earth Tool Deletion ---");
+        spawnSync('node', ['scripts/nuke-tools.js'], {
+            stdio: 'inherit',
+            env: process.env
+        });
+    }
+}
+
 async function main() {
     console.log("=========================================");
     console.log("🚀 Ionosphere Native Orchestrator Setup");
@@ -184,6 +194,7 @@ async function main() {
         const ionoKey = await setupEnvAndAuth(isNative, composeCmd);
         await setupPreferences();
         await generateSettings();
+        await nukeNativeTools();
 
         console.log("\n=========================================");
         console.log("🎉 Setup Complete!");

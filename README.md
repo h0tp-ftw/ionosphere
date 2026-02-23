@@ -42,6 +42,8 @@ Ionosphere is designed for workflows with:
 ## Quick Start
 
 ```bash
+git clone https://github.com/h0tp-ftw/gemini-ionosphere.git
+cd gemini-ionosphere
 npm run setup
 ```
 ---

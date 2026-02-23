@@ -200,7 +200,7 @@ async function main() {
                     } else {
                         console.log("❌ API_KEY not found in .env.");
                     }
-                    process.exit(0);
+                    return;
                 }
 
                 if (mChoice === '2') {
@@ -334,6 +334,7 @@ async function main() {
 
     } catch (err) {
         console.error("Setup failed:", err);
+        process.exit(1);
     }
 }
 

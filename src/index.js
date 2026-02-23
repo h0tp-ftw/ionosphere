@@ -260,6 +260,10 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         if (byHash) {
             hijackedTurnId = byHash;
             console.log(`[HIJACK] Exact Hash Match (Thread Safe): Turn ${hijackedTurnId}`);
+        } else if (byFinger && parkedTurns.has(byFinger)) {
+            // Priority: If the turn is already Parked, we MUST hijack it to deliver the next message (approval/data)
+            hijackedTurnId = byFinger;
+            console.log(`[HIJACK] Fingerprint Match (Parked Turn): Turn ${hijackedTurnId}`);
         } else if (byFinger && lastMsg && (lastMsg.role === 'tool' || lastMsg.role === 'function')) {
             hijackedTurnId = byFinger;
             console.log(`[HIJACK] Fingerprint Anchor Match (Tool Continuation): Turn ${hijackedTurnId}`);

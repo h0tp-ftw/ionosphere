@@ -3,8 +3,9 @@ FROM node:22-slim
 
 WORKDIR /app
 
-# 1. Copy dependency manifests first for better layer caching
+# 1. Copy dependency manifests and scripts for postinstall
 COPY package.json package-lock.json ./
+COPY scripts/ ./scripts/
 COPY packages/tool-bridge/package.json ./packages/tool-bridge/package.json
 
 # 2. Install dependencies (this layer won't re-run unless package.json files change)

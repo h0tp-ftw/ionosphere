@@ -34,24 +34,19 @@ const sanitizePromptText = (text) => {
 };
 
 /**
- * Recursively removes 'required' constraints from a JSON Schema.
- * This ensures the Gemini CLI doesn't pre-flight crash on tool calls 
- * that the underlying software (any OpenAI-compatible SDK) might accept.
- * This makes Ionosphere a robust, transparent proxy for ANY client.
+ * Refines the JSON Schema to prevent Gemini CLI validation crashes
+ * while maintaining structural integrity for the model.
  */
 const loosenSchema = (obj) => {
     if (!obj || typeof obj !== 'object') return;
-    if (obj.required && Array.isArray(obj.required)) {
-        delete obj.required;
-    }
-    // Deep Loosening: Remove format constraints to prevent CLI validation crashes
-    delete obj.format;
 
-    // MCP/JSON Schema requirement: type: "object" MUST stay for structural definitions.
-    // We only nuke type if it's a primitive (string, number, boolean, etc) to prevent strict-mode validation loops.
-    if (obj.type && obj.type !== 'object') {
-        delete obj.type;
-    }
+    // We no longer delete 'required' or 'type' fields.
+    // Deleting them caused 'Validation Loops' in apps like Cline 
+    // that strictly enforce mandatory parameters (e.g., requires_approval).
+
+    // Deep Loosening: Remove format constraints to prevent CLI validation crashes.
+    // This remains the primary cause of pre-flight schema errors.
+    delete obj.format;
 
     for (const key in obj) {
         if (typeof obj[key] === 'object') {

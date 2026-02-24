@@ -8,11 +8,17 @@ services:
         - GEMINI_DISABLE_TOOLS=${GEMINI_DISABLE_TOOLS:-false}
         - GEMINI_DISABLE_WEB_SEARCH=${GEMINI_DISABLE_WEB_SEARCH:-false}
     restart: unless-stopped
+    tty: true
+    stdin_open: true
     environment:
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - GEMINI_AUTH_TYPE=${GEMINI_AUTH_TYPE}
       - GEMINI_SETTINGS_JSON=/app/settings.json
       - GEMINI_HARDENED=true
+      - NO_BROWSER=${NO_BROWSER:-true}
+      - GEMINI_CLI_NO_RELAUNCH=${GEMINI_CLI_NO_RELAUNCH:-true}
+      - GOOGLE_GENAI_USE_GCA=${GOOGLE_GENAI_USE_GCA}
+      - CI=${CI:-true}
     command: node src/index.js
     ports:
       - "3000:3000"

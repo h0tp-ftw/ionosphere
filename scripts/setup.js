@@ -40,6 +40,51 @@ async function checkDependencies() {
     console.log("✅ Dependencies check complete.\n");
 }
 
+/**
+ * Helper to run a command interactively with proper TTY and stdin/stdout inheritance.
+ * Forces manual auth and suppresses CLI relaunching to prevent terminal locking on Windows.
+ */
+function runInteractive(command, args, options = {}) {
+    return new Promise((resolve, reject) => {
+        // ANSI escapes for Alternate Screen Buffer
+        // \u001b[?1049h = Enter alt buffer
+        // \u001b[H = home cursor, \u001b[2J = clear screen
+        if (options.newWindow) {
+            process.stdout.write('\u001b[?1049h\u001b[H\u001b[2J');
+        }
+
+        const proc = spawn(command, args, {
+            stdio: 'inherit',
+            shell: true,
+            env: {
+                ...process.env,
+                NO_BROWSER: 'true',
+                GEMINI_CLI_NO_RELAUNCH: 'true',
+                GOOGLE_GENAI_USE_GCA: 'true', // Triggers OAuth in non-interactive/headless mode
+                CI: 'true', // Bypasses folder trust prompt
+                ...options.env
+            },
+            ...options
+        });
+
+        proc.on('close', (code) => {
+            if (options.newWindow) {
+                // \u001b[?1049l = Exit alt buffer (restores previous screen)
+                process.stdout.write('\u001b[?1049l');
+            }
+            if (code === 0 || code === 199) resolve();
+            else reject(new Error(`Process exited with code ${code}`));
+        });
+
+        proc.on('error', (err) => {
+            if (options.newWindow) {
+                process.stdout.write('\u001b[?1049l');
+            }
+            reject(err);
+        });
+    });
+}
+
 async function setupEnvAndAuth(isNative, composeCmd) {
     const envPath = path.join(process.cwd(), '.env');
 
@@ -64,11 +109,40 @@ async function setupEnvAndAuth(isNative, composeCmd) {
     }
 
     console.log("\n--- Authentication Configuration ---");
-    console.log("Ionosphere uses the standard Gemini CLI OAuth flow for authentication.");
-    console.log("This ensures maximum security and zero credential drift.");
+    console.log("Ionosphere supports Google OAuth (via Gemini CLI) or a Gemini API Key.");
 
-    // Enforce OAuth in the generated settings.json
-    process.env.GEMINI_AUTH_TYPE = 'oauth-personal';
+    const { authMethod } = await inquirer.prompt([{
+        type: 'select',
+        name: 'authMethod',
+        message: 'Select Authentication Method:',
+        choices: [
+            { name: 'Google OAuth (Recommended)', value: 'oauth' },
+            { name: 'Gemini API Key (AI Studio)', value: 'apikey' }
+        ]
+    }]);
+
+    let authEnv = {};
+    if (authMethod === 'oauth') {
+        process.env.GEMINI_AUTH_TYPE = 'oauth-personal';
+        process.env.GOOGLE_GENAI_USE_GCA = 'true';
+        authEnv = {
+            GEMINI_AUTH_TYPE: 'oauth-personal',
+            GOOGLE_GENAI_USE_GCA: 'true'
+        };
+    } else {
+        const { apiKey } = await inquirer.prompt([{
+            type: 'input',
+            name: 'apiKey',
+            message: 'Enter your Gemini API Key (from AI Studio):',
+            validate: (input) => input.length > 0 ? true : 'API Key is required'
+        }]);
+        process.env.GEMINI_API_KEY = apiKey;
+        process.env.GEMINI_AUTH_TYPE = 'gemini-api-key';
+        authEnv = {
+            GEMINI_API_KEY: apiKey,
+            GEMINI_AUTH_TYPE: 'gemini-api-key'
+        };
+    }
 
     if (isNative) {
         const hasGemini = spawnSync('gemini', ['--version'], { encoding: 'utf-8' });
@@ -76,12 +150,15 @@ async function setupEnvAndAuth(isNative, composeCmd) {
             console.error("\n❌ `gemini` is not installed on your host machine. Please install it with `npm install -g @google/gemini-cli`.");
             process.exit(1);
         } else {
-            console.log("\n`gemini` is installed locally. Triggering Native OAuth login flow...");
-            console.log("NOTE: A browser window will open to authenticate.");
-            console.log("Once authenticated, the installer will continue automatically.\n");
+            console.log("\n`gemini` is installed locally. Triggering Native validation flow...");
+            if (authMethod === 'oauth') {
+                console.log("NOTE: Automatic browser launch is DISABLED for stability.");
+                console.log("Please copy the URL provided below into your browser, then PASTE the code back here.");
+                console.log("Once authenticated, the installer will continue automatically.\n");
+            }
 
-            // Use 'models list' to trigger auth and exit immediately without entering REPL
-            spawnSync(`gemini models list`, { stdio: 'inherit', shell: true });
+            // Use a simple prompt to trigger auth and exit immediately
+            await runInteractive('gemini', ['-p', '"ping"', '--output-format', 'text'], { newWindow: true, env: authEnv });
         }
     } else {
         console.log("\nContainer mode selected. Building Image...");
@@ -89,12 +166,20 @@ async function setupEnvAndAuth(isNative, composeCmd) {
         const buildArgs = `--build-arg GEMINI_DISABLE_TOOLS=${process.env.GEMINI_DISABLE_TOOLS || 'false'} --build-arg GEMINI_DISABLE_WEB_SEARCH=${process.env.GEMINI_DISABLE_WEB_SEARCH || 'false'}`;
         spawnSync(`${composeCmd} build ${buildArgs}`, { stdio: 'inherit', shell: true });
 
-        console.log("\nTriggering Isolated Container OAuth Flow...");
-        console.log("The Gemini CLI will launch inside the container and open a browser link for authentication.");
-        console.log("Once authenticated, the installer will continue automatically.\n");
+        console.log("\nTriggering Isolated Container validation flow...");
+        if (authMethod === 'oauth') {
+            console.log("The Gemini CLI will launch inside the container and provide a manual authentication link.");
+            console.log("Please copy the URL provided into your browser, then PASTE the code back into this terminal.");
+            console.log("Once authenticated, the installer will continue automatically.\n");
+        }
 
-        // Use 'models list' inside container to trigger auth and exit immediately
-        spawnSync(`${composeCmd} run --rm ionosphere gemini models list`, { stdio: 'inherit', shell: true });
+        // Use a simple prompt inside container to trigger auth and exit immediately
+        // Force -it for docker-compose / podman compose run, but omit for podman-compose
+        const runArgs = ['run', '--rm', 'ionosphere', 'gemini', '-p', '"ping"', '--output-format', 'json'];
+        if (composeCmd !== 'podman-compose') {
+            runArgs.splice(1, 0, '-it');
+        }
+        await runInteractive(`${composeCmd}`, runArgs, { newWindow: true, env: authEnv });
     }
 
     return ionoKey;
@@ -272,7 +357,9 @@ async function main() {
         const envContent = [
             `GEMINI_CLI_PATH=gemini`,
             `GEMINI_SETTINGS_JSON=./settings.json`,
-            `GEMINI_AUTH_TYPE=oauth-personal`,
+            `GEMINI_AUTH_TYPE=${process.env.GEMINI_AUTH_TYPE}`,
+            process.env.GOOGLE_GENAI_USE_GCA ? `GOOGLE_GENAI_USE_GCA=true` : '',
+            process.env.GEMINI_API_KEY ? `GEMINI_API_KEY=${process.env.GEMINI_API_KEY}` : '',
             `API_KEY=${ionoKey}`,
             `GEMINI_DISABLE_TELEMETRY=${process.env.GEMINI_DISABLE_TELEMETRY}`,
             `GEMINI_ENABLE_PREVIEW=${process.env.GEMINI_ENABLE_PREVIEW}`,

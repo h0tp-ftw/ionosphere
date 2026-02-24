@@ -340,9 +340,14 @@ export class GeminiController {
                             if (activeCallbacks.onError) activeCallbacks.onError(createError(errorMsg, ErrorType.AUTHENTICATION, ErrorCode.INVALID_API_KEY));
                             proc.kill('SIGKILL');
                         } else if (isResourceError) {
-                            const errorMsg = `Fatal: Gemini API Quota/Capacity Exhausted (429). Raw: ${stderrText}`;
-                            if (activeCallbacks.onError) activeCallbacks.onError(createError(errorMsg, ErrorType.RATE_LIMIT, ErrorCode.RATE_LIMIT_EXCEEDED));
-                            proc.kill('SIGKILL');
+                            const errorMsg = `Gemini API Quota/Capacity Exhausted (429). Raw: ${stderrText}`;
+                            if (process.env.GEMINI_SILENT_FALLBACK === 'true') {
+                                console.log(`[GeminiController] Seamless Fallback: Ignoring 429 error to allow internal CLI fallback.`);
+                            } else {
+                                console.error(`[GeminiController] Fatal Resource Error: Killing process.`);
+                                if (activeCallbacks.onError) activeCallbacks.onError(createError(errorMsg, ErrorType.RATE_LIMIT, ErrorCode.RATE_LIMIT_EXCEEDED));
+                                proc.kill('SIGKILL');
+                            }
                         } else if (isModelError) {
                             const errorMsg = `Fatal: Model not found or inaccessible. Raw: ${stderrText}`;
                             if (activeCallbacks.onError) activeCallbacks.onError(createError(errorMsg, ErrorType.INVALID_REQUEST, ErrorCode.MODEL_NOT_FOUND));

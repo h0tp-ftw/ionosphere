@@ -141,6 +141,15 @@ async function setupPreferences() {
     }]);
 
     process.env.GEMINI_DISABLE_WEB_SEARCH = search ? 'true' : 'false';
+
+    const { silentFallback } = await inquirer.prompt([{
+        type: 'confirm',
+        name: 'silentFallback',
+        message: 'Enable Seamless Silent Fallbacks? (Highly recommended for Ionosphere)',
+        default: true
+    }]);
+
+    process.env.GEMINI_SILENT_FALLBACK = silentFallback ? 'true' : 'false';
 }
 
 async function generateSettings() {
@@ -269,6 +278,7 @@ async function main() {
             `GEMINI_ENABLE_PREVIEW=${process.env.GEMINI_ENABLE_PREVIEW}`,
             `GEMINI_DISABLE_TOOLS=${process.env.GEMINI_DISABLE_TOOLS}`,
             `GEMINI_DISABLE_WEB_SEARCH=${process.env.GEMINI_DISABLE_WEB_SEARCH}`,
+            `GEMINI_SILENT_FALLBACK=${process.env.GEMINI_SILENT_FALLBACK}`,
             `GEMINI_HARDENED=true`
         ].join('\n') + '\n';
 

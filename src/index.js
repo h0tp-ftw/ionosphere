@@ -664,10 +664,8 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         const isSlash = lastMsg && lastMsg.role === 'user' && typeof lastMsg.content === 'string' && lastMsg.content.trim().startsWith('/');
 
         if (isSlash) {
-            conversationPromptSection += `[SYSTEM] This is a command instruction. Follow it literally. You may use tools with or without the 'ionosphere__' prefix.\n\n`;
             conversationPromptSection = lastMsg.content.trim();
         } else {
-            conversationPromptSection += `[SYSTEM] Tool Protocol: You have access to tools via the Ionosphere bridge. Use their natural, bare names (e.g., 'read_file', 'list_files', 'execute_command'). Do NOT add prefix unless specifically required by the client.\n\n`;
             for (const msg of req.body.messages) {
                 if (msg.role === 'system') systemMessage += (msg.content || "") + "\n";
                 else {

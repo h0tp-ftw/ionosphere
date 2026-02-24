@@ -11,7 +11,7 @@ const DEFAULT_SETTINGS_PATH = path.join(PROJECT_ROOT, '.gemini', 'settings.json'
 const TARGET_PATH = process.env.GEMINI_SETTINGS_JSON || DEFAULT_SETTINGS_PATH;
 
 export function generateConfig(options = {}) {
-    const { targetPath = TARGET_PATH, mcpServers = null, customSettings = null, modelName = null } = options;
+    const { targetPath = TARGET_PATH, mcpServers = null, customSettings = null, modelName = null, generationConfig = null } = options;
 
     const config = {
         general: {
@@ -101,6 +101,19 @@ export function generateConfig(options = {}) {
 
     if (mcpServers) {
         config.mcpServers = mcpServers;
+    }
+
+    if (generationConfig) {
+        config.modelConfigs = {
+            customOverrides: [
+                {
+                    match: { model: config.model.name },
+                    modelConfig: {
+                        generateContentConfig: generationConfig
+                    }
+                }
+            ]
+        };
     }
 
     // Helper for deep merging custom settings onto the base config

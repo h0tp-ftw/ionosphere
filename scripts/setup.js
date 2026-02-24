@@ -206,13 +206,14 @@ async function setupPreferences() {
     process.env.GEMINI_DISABLE_TELEMETRY = answers.telemetry ? 'true' : 'false';
     process.env.GEMINI_ENABLE_PREVIEW = answers.preview ? 'true' : 'false';
 
-    console.log("\n[SECURITY] Scorched Earth Hardening physically DELETES native tools from the container.");
-    console.log("This is the most secure mode but may break deep CLI internal dependencies.");
+    console.log("\nGemini CLI's inbuilt tools may conflict with Ionosphere's tool bridge (custom tools).");
+    console.log("\nYou can disable the inbuilt tools so that only your program's tools are used.");
+    console.log("\n You can also opt to keep the google_web_search tool enabled, which has generous limits on free Google search usage.");
 
     const { tools } = await inquirer.prompt([{
         type: 'confirm',
         name: 'tools',
-        message: "Enable Dynamic Selective Blindness Hardening?",
+        message: "Disable Gemini's inbuilt tools?",
         default: true
     }]);
 
@@ -226,11 +227,14 @@ async function setupPreferences() {
     }]);
 
     process.env.GEMINI_DISABLE_WEB_SEARCH = search ? 'true' : 'false';
+    
+    console.log("\nSilent fallbacks allow Ionosphere to automatically switch to the next available model if the current model fails.");
+    console.log("\nFor example, for auto-gemini-3, it goes through gemini-3-pro-preview -> gemini-3-flash-preview -> gemini-2.5-pro -> gemini-2.5-flash -> gemini-2.5-flash-lite.");
 
     const { silentFallback } = await inquirer.prompt([{
         type: 'confirm',
         name: 'silentFallback',
-        message: 'Enable Seamless Silent Fallbacks? (Highly recommended for Ionosphere)',
+        message: 'Enable silent fallbacks to next available model? (for auto-gemini-3 or auto-gemini-2.5)',
         default: true
     }]);
 

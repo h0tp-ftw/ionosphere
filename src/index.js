@@ -1,4 +1,5 @@
 import express from 'express';
+import cors from 'cors';
 import multer from 'multer';
 import net from 'net';
 import { GeminiController } from './GeminiController.js';
@@ -19,6 +20,7 @@ const TOOL_BRIDGE_PATH = path.resolve(__dirname, '..', 'packages', 'tool-bridge'
 const app = express();
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
+app.use(cors());
 
 // Helper to sanitize user-provided text: escape lines starting with @ or !
 const sanitizePromptText = (text) => {
@@ -878,10 +880,26 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
         const generationConfig = {};
         if (req.body.max_tokens !== undefined) generationConfig.maxOutputTokens = req.body.max_tokens;
+        if (req.body.max_completion_tokens !== undefined) generationConfig.maxOutputTokens = req.body.max_completion_tokens;
         if (req.body.temperature !== undefined) generationConfig.temperature = req.body.temperature;
         if (req.body.top_p !== undefined) generationConfig.topP = req.body.top_p;
         if (req.body.stop) {
             generationConfig.stopSequences = Array.isArray(req.body.stop) ? req.body.stop : [req.body.stop];
+        }
+
+        // Map OpenAI reasoning_effort to Gemini thinkingConfig
+        const reasoningEffort = req.body.reasoning_effort;
+        if (reasoningEffort) {
+            generationConfig.thinkingConfig = {
+                includeThoughts: true
+            };
+            if (reasoningEffort === 'low') {
+                generationConfig.thinkingConfig.thinkingBudget = 4096;
+            } else if (reasoningEffort === 'medium') {
+                generationConfig.thinkingConfig.thinkingBudget = 16384;
+            } else if (reasoningEffort === 'high') {
+                generationConfig.thinkingConfig.thinkingBudget = 32768;
+            }
         }
 
         generateConfig({

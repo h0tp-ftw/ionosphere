@@ -10,6 +10,7 @@
         "generate-settings": "node scripts/generate_settings.js",
         "setup": "node scripts/setup.js",
         "update": "node scripts/update.js",
+        "postinstall": "node scripts/patch-gemini-core.js",
         "test": "node --test"
     },
     "dependencies": {

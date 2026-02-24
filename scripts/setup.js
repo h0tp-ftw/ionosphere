@@ -212,8 +212,8 @@ async function setupPreferences() {
     const { tools } = await inquirer.prompt([{
         type: 'confirm',
         name: 'tools',
-        message: "Enable physical 'Scorched Earth' tool deletion?",
-        default: false
+        message: "Enable Dynamic Selective Blindness Hardening?",
+        default: true
     }]);
 
     process.env.GEMINI_DISABLE_TOOLS = tools ? 'true' : 'false';
@@ -246,14 +246,12 @@ async function generateSettings() {
     });
 }
 
-async function nukeNativeTools() {
-    if (process.env.GEMINI_DISABLE_TOOLS === 'true' || process.env.GEMINI_DISABLE_WEB_SEARCH === 'true') {
-        console.log("\n--- Triggering Refined Scorched Earth Tool Deletion ---");
-        spawnSync('node', ['scripts/nuke-tools.js'], {
-            stdio: 'inherit',
-            env: process.env
-        });
-    }
+async function applySelectiveBlindness() {
+    console.log("\n--- Triggering Dynamic Tool Hardening (Selective Blindness) ---");
+    spawnSync('node', ['scripts/patch-gemini-core.js'], {
+        stdio: 'inherit',
+        env: process.env
+    });
 }
 
 async function main() {
@@ -372,11 +370,8 @@ async function main() {
         fs.writeFileSync(envPath, envContent, 'utf-8');
         console.log("✅ Finalized .env file with all preferences.");
 
-        // ONLY nuke native tools on the host if we are running in Native mode.
-        // For Docker/Podman, the hardening is handled inside the image build via build-args.
-        if (isNative) {
-            await nukeNativeTools();
-        }
+        // Apply hardening patch
+        await applySelectiveBlindness();
 
         console.log("\n=========================================");
         console.log("🎉 Setup Complete!");

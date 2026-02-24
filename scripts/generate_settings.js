@@ -41,8 +41,7 @@ export function generateConfig(options = {}) {
                     // Strictly allow only Google Search as a core tool.
                     // Everything else must come from the bridge (MCP).
                     return [
-                        "google_web_search",
-                        "google_search"
+                        "google_web_search"
                     ];
                 }
                 return undefined;

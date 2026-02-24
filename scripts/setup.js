@@ -181,7 +181,7 @@ async function main() {
 
             if (maintenance) {
                 const { mChoice } = await inquirer.prompt([{
-                    type: 'list',
+                    type: 'select',
                     name: 'mChoice',
                     message: 'Select Choice',
                     choices: [
@@ -224,7 +224,7 @@ async function main() {
         console.log("\n--- Setup Environment ---");
 
         const { envChoice } = await inquirer.prompt([{
-            type: 'list',
+            type: 'select',
             name: 'envChoice',
             message: 'How will you run Ionosphere?',
             choices: [

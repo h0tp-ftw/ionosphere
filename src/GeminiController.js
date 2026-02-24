@@ -196,9 +196,11 @@ export class GeminiController {
                     proc.repeatTracker.set(key, count);
                     console.log(`[GeminiController] [FORENSICS] Repeat Tracker: ${toolName} count=${count} for key ${key.substring(0, 15)}...`);
 
-                    if (count >= 5) {
-                        console.error(`[GeminiController] Repeat Breaker: Tool '${toolName}' called 5 times within the same Turn. Terminating process to prevent loop.`);
-                        const errorMsg = `Loop detected: Model repeated tool '${toolName}' with same arguments 5 times. Terminating for safety.`;
+                    const maxRepeats = parseInt(process.env.MAX_REPEAT_TOOL_CALLS) || 0;
+
+                    if (maxRepeats > 0 && count >= maxRepeats) {
+                        console.error(`[GeminiController] Repeat Breaker: Tool '${toolName}' called ${count} times within the same Turn. Terminating process to prevent loop.`);
+                        const errorMsg = `Loop detected: Model repeated tool '${toolName}' with same arguments ${count} times. Terminating for safety. (Limit: ${maxRepeats})`;
                         if (activeCallbacks.onError) activeCallbacks.onError(createError(errorMsg, ErrorType.INVALID_REQUEST, ErrorCode.POLICY_DENIED));
                         if (activeCallbacks.onResult) activeCallbacks.onResult({ type: 'result', text: errorMsg, stats: {} });
                         proc.kill();

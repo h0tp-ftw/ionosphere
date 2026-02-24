@@ -105,11 +105,10 @@ for (const toolDef of openAiTools) {
     const name = fn.name;
     if (!name) continue;
 
-    const prefixedName = name.startsWith('ionosphere__') ? name : `ionosphere__${name}`;
-    const bareName = name.startsWith('ionosphere__') ? name.substring(12) : name;
-
+    // Simplified Tool Registry: We use the tool's natural name.
+    // Collision security is now handled at the registrant level via Selective Blindness.
     const schema = {
-        name: prefixedName,
+        name: name,
         description: fn.description || `Proxy tool: ${name}`,
         inputSchema: fn.parameters || { type: 'object', properties: {} }
     };
@@ -118,19 +117,14 @@ for (const toolDef of openAiTools) {
         const cleanArgs = { ...args };
         delete cleanArgs.signal;
         delete cleanArgs.requestId;
-        process.stderr.write(`[ToolBridge] → Calling ${prefixedName}. Args: ${JSON.stringify(cleanArgs)}\n`);
-        const result = await dispatchToolCall(prefixedName, cleanArgs);
-        process.stderr.write(`[ToolBridge] ← Result received for: ${prefixedName}\n`);
+        process.stderr.write(`[ToolBridge] → Calling ${name}. Args: ${JSON.stringify(cleanArgs)}\n`);
+        const result = await dispatchToolCall(name, cleanArgs);
+        process.stderr.write(`[ToolBridge] ← Result received for: ${name}\n`);
         const text = typeof result === 'string' ? result : JSON.stringify(result);
         return { content: [{ type: 'text', text }] };
     };
 
-    // Store prefixed as primary
-    toolsRegistry.set(prefixedName, { schema, handler });
-    // Store bare as alias (sharing same handler but different schema name)
-    if (bareName !== prefixedName) {
-        toolsRegistry.set(bareName, { schema: { ...schema, name: bareName }, handler });
-    }
+    toolsRegistry.set(name, { schema, handler });
 }
 
 // 2. Set Handlers
@@ -152,4 +146,4 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 // 3. Connect
 const transport = new StdioServerTransport();
 await server.connect(transport);
-process.stderr.write(`[ToolBridge] Base Server Bridge started. Universal Aliasing for ${toolsRegistry.size / 2} tools enabled.\n`);
+process.stderr.write(`[ToolBridge] Base Server Bridge started. Handling ${toolsRegistry.size} tools.\n`);

@@ -236,10 +236,8 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             if (msg.role === 'assistant' && msg.tool_calls) {
                 for (const tc of msg.tool_calls) {
                     let toolName = tc.function?.name || tc.name;
-                    // Uniform Namespacing: Use prefixed names for historical comparison to match bridge calls
-                    if (!toolName.includes('__') && !toolName.startsWith('ionosphere__')) {
-                        toolName = `ionosphere__${toolName}`;
-                    }
+                    // Uniform Namespacing: We no longer force prefixes.
+                    // The Selective Blindness patch handles collision safety.
                     const rawArgs = tc.function?.arguments || tc.arguments || "{}";
                     const toolArgs = JSON.stringify(typeof rawArgs === 'string' ? JSON.parse(rawArgs) : rawArgs);
                     historicalTools.push(`${historyHash}:${toolName}:${toolArgs}`);
@@ -669,7 +667,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             conversationPromptSection += `[SYSTEM] This is a command instruction. Follow it literally. You may use tools with or without the 'ionosphere__' prefix.\n\n`;
             conversationPromptSection = lastMsg.content.trim();
         } else {
-            conversationPromptSection += `[SYSTEM] Tool Protocol: You have access to tools via the Ionosphere bridge. You may call them using their bare names (e.g., 'read_file') or with the 'ionosphere__' prefix. Both are supported.\n\n`;
+            conversationPromptSection += `[SYSTEM] Tool Protocol: You have access to tools via the Ionosphere bridge. Use their natural, bare names (e.g., 'read_file', 'list_files', 'execute_command'). Do NOT add prefix unless specifically required by the client.\n\n`;
             for (const msg of req.body.messages) {
                 if (msg.role === 'system') systemMessage += (msg.content || "") + "\n";
                 else {
@@ -704,11 +702,8 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                                 const callId = tc.id || tc.tool_call_id || 'unknown';
                                 let toolName = tc.function?.name || tc.name || 'unknown';
 
-                                // Consistency Normalization: Ensure history ALWAYS uses ionosphere__ prefix.
-                                // This provides a rock-solid pattern for the model to follow.
-                                if (!toolName.startsWith('ionosphere__')) {
-                                    toolName = `ionosphere__${toolName}`;
-                                }
+                                // Consistency Normalization: History now uses natural names.
+                                // Collisions are prevented by the hardened CLI environment.
 
                                 // Handle both string arguments (OpenAI format) and object arguments (accumulatedToolCalls)
                                 const argsStr = typeof (tc.function?.arguments || tc.arguments) === 'string'

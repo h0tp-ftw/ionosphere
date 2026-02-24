@@ -329,11 +329,24 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         res.setTimeout(0);
 
         // Handle client disconnect mid-turn
+        let disconnectTimeout = null;
         res.on('close', () => {
             if (!responseSent) {
-                console.log(`[Turn ${activeTurnId}] Client disconnected. Terminating turn.`);
-                controller.cancelCurrentTurn(activeTurnId);
-                responseSent = true; // Block any further callbacks
+                if (isStreaming) {
+                    console.log(`[Turn ${activeTurnId}] Client disconnected (Streaming). Terminating turn.`);
+                    controller.cancelCurrentTurn(activeTurnId);
+                    responseSent = true;
+                } else {
+                    const graceMs = parseInt(process.env.DISCONNECT_GRACE_PERIOD_MS) || 5000;
+                    console.log(`[Turn ${activeTurnId}] Client disconnected (Non-streaming). Waiting ${graceMs}ms grace period before termination...`);
+                    disconnectTimeout = setTimeout(() => {
+                        if (!responseSent) {
+                            console.log(`[Turn ${activeTurnId}] Grace period expired for Turn ${activeTurnId}. Terminating.`);
+                            controller.cancelCurrentTurn(activeTurnId);
+                            responseSent = true;
+                        }
+                    }, graceMs);
+                }
             }
         });
 
@@ -404,6 +417,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
         const onError = (err) => {
             if (responseSent || res.writableEnded) return;
+            if (disconnectTimeout) clearTimeout(disconnectTimeout);
             responseSent = true;
 
             const errorObj = formatErrorResponse(err);
@@ -420,6 +434,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
         const onResult = (json) => {
             if (responseSent || res.writableEnded) return;
+            if (disconnectTimeout) clearTimeout(disconnectTimeout);
             finalStats = json.stats || {};
             if (isStreaming) {
                 sendChunk({
@@ -473,6 +488,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
         const onPark = (msg) => {
             if (responseSent || res.writableEnded) return;
+            if (disconnectTimeout) clearTimeout(disconnectTimeout);
             console.log(`[Turn ${activeTurnId}] Yielding response on Parked state. Tool: ${msg.name}`);
 
             if (isStreaming) {
@@ -860,7 +876,20 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             mcpServers = { 'ionosphere-tool-bridge': { command: 'node', args: [TOOL_BRIDGE_PATH], env: toolBridgeEnv, trust: true } };
         }
 
-        generateConfig({ targetPath: settingsPath, mcpServers, modelName: req.body.model });
+        const generationConfig = {};
+        if (req.body.max_tokens !== undefined) generationConfig.maxOutputTokens = req.body.max_tokens;
+        if (req.body.temperature !== undefined) generationConfig.temperature = req.body.temperature;
+        if (req.body.top_p !== undefined) generationConfig.topP = req.body.top_p;
+        if (req.body.stop) {
+            generationConfig.stopSequences = Array.isArray(req.body.stop) ? req.body.stop : [req.body.stop];
+        }
+
+        generateConfig({
+            targetPath: settingsPath,
+            mcpServers,
+            modelName: req.body.model,
+            generationConfig
+        });
 
         const executeTask = async () => {
             let taskResolve;

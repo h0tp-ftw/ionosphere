@@ -32,7 +32,7 @@ export function generateConfig(options = {}) {
         },
         model: {
             name: modelName || process.env.GEMINI_MODEL || "gemini-2.5-flash-lite",
-            maxSessionTurns: parseInt(process.env.GEMINI_MAX_TURNS) || 12
+            maxSessionTurns: parseInt(process.env.GEMINI_MAX_TURNS) || 50
         },
         tools: {
             core: (() => {

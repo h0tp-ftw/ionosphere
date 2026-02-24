@@ -18,6 +18,7 @@ services:
       - NO_BROWSER=${NO_BROWSER:-true}
       - GEMINI_CLI_NO_RELAUNCH=${GEMINI_CLI_NO_RELAUNCH:-true}
       - GOOGLE_GENAI_USE_GCA=${GOOGLE_GENAI_USE_GCA}
+      - GEMINI_MAX_TURNS=${GEMINI_MAX_TURNS:-50}
       - CI=${CI:-true}
     command: node src/index.js
     ports:

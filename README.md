@@ -61,8 +61,8 @@ It is designed for advanced workflows, including:
 
 1.  **Clone the repository:**
     ```bash
-    git clone https://github.com/h0tp-ftw/gemini-ionosphere.git
-    cd gemini-ionosphere
+    git clone https://github.com/h0tp-ftw/ionosphere.git
+    cd ionosphere
     ```
 
 2.  **Install dependencies and run setup:**
@@ -156,7 +156,7 @@ The following models are supported:
 ## Project Structure
 
 ```
-gemini-ionosphere/
+ionosphere/
 ├── src/
 │   ├── index.js            # Handoff Orchestrator — manages parked CLI turns
 │   └── GeminiController.js # Stateless CLI Spawner & Stream Parser

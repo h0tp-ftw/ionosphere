@@ -1,5 +1,5 @@
 {
-    "name": "gemini-ionosphere",
+    "name": "ionosphere",
     "version": "1.0.0",
     "type": "module",
     "workspaces": [

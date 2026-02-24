@@ -6,8 +6,8 @@ Ionosphere is designed to run securely and efficiently within a lightweight Node
 
 1. **Clone and Configure**
    ```bash
-   git clone https://github.com/your-username/gemini-ionosphere.git
-   cd gemini-ionosphere
+   git clone https://github.com/h0tp-ftw/ionosphere.git
+   cd ionosphere
    cp .env.example .env
    ```
 2. **Setup your Environment**

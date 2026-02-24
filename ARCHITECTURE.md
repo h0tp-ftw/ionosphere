@@ -158,7 +158,7 @@ Any of the following model identifiers can be passed in the `model` field of the
 ## Repository Structure
 
 ```
-gemini-ionosphere/
+ionosphere/
 ├── src/
 │   ├── index.js              ← HTTP server & Handoff Orchestrator
 │   └── GeminiController.js   ← CLI lifecycle & Stream Hijacking

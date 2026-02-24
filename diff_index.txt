@@ -1,0 +1,38 @@
+diff --git a/src/index.js b/src/index.js
+index f9f5ba1..b6a329a 100644
+--- a/src/index.js
++++ b/src/index.js
+@@ -838,11 +838,11 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
+             };
+             if (openAiTools) {
+                 const toolsPath = path.join(turnTempDir, 'tools.json');
+-                // Universal Global Prefixing: Everything starts with ionosphere__
++                // Universal Tool Support: We no longer prefix with 'ionosphere__' 
++                // as Phase 2 hardening deactivates native tool collisions in the CLI.
+                 const namespacedTools = [];
+                 for (const t of openAiTools) {
+                     const originalName = t.function?.name || t.name;
+-                    const prefixedName = originalName.startsWith('ionosphere__') ? originalName : `ionosphere__${originalName}`;
+ 
+                     // Always deep-copy to avoid side-effects on the original req.body.tools
+                     const toolCopy = JSON.parse(JSON.stringify(t));
+@@ -852,14 +852,13 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
+                     toolCopy.strict = false;
+                     if (fn.strict !== undefined) fn.strict = false;
+ 
+-                    // Generic Schema Relaxation: Recursively remove 'required' constraints.
+-                    // This shifts validation from the "Outer Shell" (Gemini CLI) to the 
+-                    // "Inner Logic" (the Tool Handler), ensuring compatibility with any SDK.
++                    // Generic Schema Relaxation: Recursively remove problematic constraints (like 'format').
++                    // We now PRESERVE 'required' and 'type' for model awareness.
+                     loosenSchema(fn.parameters);
+ 
+-                    // Standardize namespacing
+-                    if (toolCopy.function) toolCopy.function.name = prefixedName;
+-                    else toolCopy.name = prefixedName;
++                    // Ensure the tool name is what the model expects (original name)
++                    if (toolCopy.function) toolCopy.function.name = originalName;
++                    else toolCopy.name = originalName;
+                     namespacedTools.push(toolCopy);
+                 }
+                 fs.writeFileSync(toolsPath, JSON.stringify(namespacedTools, null, 2));

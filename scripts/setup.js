@@ -211,8 +211,14 @@ async function main() {
                     let cCmd = dockerStatus.error ? 'podman compose' : 'docker-compose';
                     if (!podmanStatus.error && spawnSync('podman-compose', ['--version']).status === 0) cCmd = 'podman-compose';
 
-                    spawnSync(cCmd, ['down', '--volumes', '--rmi', 'all'], { stdio: 'inherit', shell: true });
-                    console.log("✅ State purged. Proceeding with fresh setup...\n");
+                    const nukeResult = spawnSync(cCmd, ['down', '--volumes', '--rmi', 'all'], { stdio: 'inherit', shell: true });
+                    if (nukeResult.status === 0) {
+                        console.log("✅ State purged. Proceeding with fresh setup...\n");
+                    } else {
+                        console.error(`\n❌ Failed to purge current container state (Exit code: ${nukeResult.status}).`);
+                        console.warn("  (Hint: If using Podman on Windows, ensure your Podman Machine is running: `podman machine start`)");
+                        console.log("Proceeding with setup anyway...\n");
+                    }
                 }
                 // Option 3 just continues to standard flow
             }

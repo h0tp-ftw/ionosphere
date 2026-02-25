@@ -134,8 +134,19 @@ const resolveToolCall = (callKey, result) => {
     }
     pendingToolCalls.delete(callKey);
     try {
-        const resultStr = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+        let resultStr = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+
+        // Ensure we never send an empty or undefined result to the CLI, which causes "result missing"
+        if (!resultStr || resultStr.trim() === "") {
+            console.warn(`[IPC] Warning: Tool ${pending.name} returned empty result. Normalizing to empty string.`);
+            resultStr = " "; // Send a space instead of empty to satisfy CLI/Model expectations if needed
+        }
+
         console.log(`[IPC] Sending result to turn ${pending.turnId} for tool ${callKey}`);
+        if (process.env.GEMINI_DEBUG_IPC === 'true') {
+            console.log(`[IPC] Result snippet: ${resultStr.substring(0, 100)}...`);
+        }
+
         pending.socket.write(JSON.stringify({ event: 'tool_result', result: resultStr }) + '\n');
         pending.socket.end();
         console.log(`[IPC] Resolved tool call ${callKey} (Turn: ${pending.turnId})`);
@@ -592,6 +603,9 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 // This prevents "Instant Resolution" against historical echoes in the narrations.
                 let resolvedAny = false;
                 const scanRange = messages.slice(-5);
+                if (process.env.GEMINI_DEBUG_HANDOFF === 'true') {
+                    console.log(`[FORENSICS] Handoff scanRange (last 5): ${JSON.stringify(scanRange.map(m => ({ role: m.role, tool_id: m.tool_call_id, content: typeof m.content === 'string' ? m.content.substring(0, 50) : 'obj' })), null, 2)}`);
+                }
                 for (const msg of scanRange) {
                     if (msg.role === 'tool' || msg.role === 'function') {
                         const callId = msg.tool_call_id;
@@ -599,6 +613,9 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                         for (const [callKey, pending] of pendingToolCalls.entries()) {
                             if (shortKey && callKey.startsWith(shortKey)) {
                                 console.log(`[API] Deep-scan match: Resolving ${callId} (Tool: ${pending.name}) for turn ${hijackedTurnId}`);
+                                if (process.env.GEMINI_DEBUG_HANDOFF === 'true') {
+                                    console.log(`[FORENSICS] Resolving with content: ${JSON.stringify(msg.content)}`);
+                                }
                                 resolveToolCall(callKey, msg.content);
                                 resolvedAny = true;
                                 break;

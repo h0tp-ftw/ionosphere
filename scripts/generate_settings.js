@@ -46,49 +46,6 @@ export function generateConfig(options = {}) {
                 }
                 return undefined;
             })(),
-            exclude: (() => {
-                let excludeList = [];
-                const hardened = process.env.GEMINI_HARDENED === 'true' || process.env.GEMINI_DISABLE_TOOLS === 'true';
-                const extraExcludes = process.env.GEMINI_EXCLUDE_TOOLS ? process.env.GEMINI_EXCLUDE_TOOLS.split(',') : [];
-
-                if (hardened) {
-                    // Exclude all known native tools to prevent conflicts with bridge aliases.
-                    excludeList = [
-                        "glob",
-                        "grep_search",
-                        "list_directory",
-                        "read_file",
-                        "read_many_files",
-                        "run_shell_command",
-                        "write_file",
-                        "replace",
-                        "edit",
-                        "write_todos",
-                        "web_fetch",
-                        "save_memory",
-                        "activate_skill",
-                        "activate-skill",
-                        "ask_user",
-                        "enter_plan_mode",
-                        "exit_plan_mode",
-                        "get_internal_docs",
-                        "codebase_investigator",
-                        "cli_help",
-                        "generalist",
-                        "default_api"
-                    ];
-                }
-
-                // Merge in extra excludes from env
-                excludeList = [...new Set([...excludeList, ...extraExcludes])];
-
-                // Legacy flags
-                if (process.env.GEMINI_DISABLE_WEB_SEARCH === 'true') {
-                    excludeList.push("google_web_search");
-                }
-
-                return excludeList.length > 0 ? [...new Set(excludeList)] : undefined;
-            })()
         }
     };
 

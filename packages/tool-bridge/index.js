@@ -84,6 +84,8 @@ function dispatchToolCall(name, args) {
             reject(new Error(`IPC reply timed out after ${TURN_TIMEOUT_MS / 60000} minutes.`));
         }, TURN_TIMEOUT_MS);
         client.on('close', () => clearTimeout(t));
+    }).catch(err => {
+        return `Error: ${err.message}`;
     });
 }
 

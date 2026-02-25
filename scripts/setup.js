@@ -174,12 +174,8 @@ async function setupEnvAndAuth(isNative, composeCmd) {
         }
 
         // Use a simple prompt inside container to trigger auth and exit immediately
-        // Force -it for docker-compose / podman compose run, but omit for podman-compose
         const runArgs = ['run', '--rm', 'ionosphere', 'gemini', '-p', '"ping"', '--output-format', 'json'];
-        if (composeCmd !== 'podman-compose') {
-            runArgs.splice(1, 0, '-it');
-        }
-        await runInteractive(`${composeCmd}`, runArgs, { newWindow: true, env: authEnv });
+        await runInteractive(`${composeCmd}`, runArgs);
     }
 
     return ionoKey;

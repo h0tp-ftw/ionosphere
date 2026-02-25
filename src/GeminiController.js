@@ -166,9 +166,9 @@ export class GeminiController {
                 // 2-hour timeout for ReAct loops (human-in-the-loop scale)
                 const TURN_TIMEOUT_MS = parseInt(process.env.TURN_TIMEOUT_MS) || 120 * 60 * 1000;
                 const timeout = setTimeout(() => {
-                    console.error(`[GeminiController] Turn ${turnId} timed out after ${TURN_TIMEOUT_MS / 60000}m. Killing.`);
-                    proc.kill();
-                    reject(new Error('Turn timed out'));
+                    console.error(`[GeminiController] FATAL: Turn ${turnId} timed out after ${TURN_TIMEOUT_MS / 60000}m. Active tools: ${Array.from(proc.toolUsage).join(', ')}. Killing process.`);
+                    proc.kill('SIGKILL');
+                    reject(new Error(`Turn timed out after ${TURN_TIMEOUT_MS / 60000}m`));
                 }, TURN_TIMEOUT_MS);
 
                 const checkRepeatLimit = (toolName, argsObj, activeCallbacks) => {
@@ -237,7 +237,9 @@ export class GeminiController {
                                 const isLikelyHallucination = !argsStr || argsStr.trim() === '{}' || argsStr.trim().length < 2;
 
                                 if (!alreadySeen && !isLikelyHallucination) {
-                                    console.log(`[GeminiController] Intercepted leaked tool call in text for Turn ${turnId}: ${toolName} (${callId})`);
+                                    if (process.env.GEMINI_DEBUG_RESPONSES === 'true') {
+                                        console.log(`[GeminiController] Intercepted leaked tool call in text for Turn ${turnId}: ${toolName} (${callId})`);
+                                    }
 
                                     // Apply Repeat Breaker to leaks too!
                                     let parsedArgs = {};
@@ -252,15 +254,21 @@ export class GeminiController {
                                         });
                                     }
                                 } else if (isLikelyHallucination) {
-                                    console.log(`[GeminiController] Ignoring likely hallucinated tool call leak: ${toolName} with args: ${argsStr}`);
+                                    if (process.env.GEMINI_DEBUG_RESPONSES === 'true') {
+                                        console.log(`[GeminiController] Ignoring likely hallucinated tool call leak: ${toolName} with args: ${argsStr}`);
+                                    }
                                 } else {
-                                    console.log(`[GeminiController] Suppressing echo-leak for tool '${toolName}' on Turn ${turnId}. (Already called in this turn)`);
+                                    if (process.env.GEMINI_DEBUG_RESPONSES === 'true') {
+                                        console.log(`[GeminiController] Suppressing echo-leak for tool '${toolName}' on Turn ${turnId}. (Already called in this turn)`);
+                                    }
                                 }
                             }
 
                             // Suppress echoed results as well
                             while ((match = resultRegex.exec(content)) !== null) {
-                                console.log(`[GeminiController] Suppressing echo-leak for result: ${match[1]}`);
+                                if (process.env.GEMINI_DEBUG_RESPONSES === 'true') {
+                                    console.log(`[GeminiController] Suppressing echo-leak for result: ${match[1]}`);
+                                }
                             }
 
                             // Remove both action and result tags from the text before sending it to the client
@@ -288,7 +296,9 @@ export class GeminiController {
                             // Non-transparent tools (MCP tools) are handled via the ionosphere-tool-bridge and IPC.
                             // We do NOT dispatch onToolCall here to avoid double-dispatching to the client.
                             // The IPC server in index.js will handle the actual dispatch and hijacking.
-                            console.log(`[GeminiController] Suppressing redundant JSON-stream dispatch for tool: ${toolName} (Turn: ${turnId})`);
+                            if (process.env.GEMINI_DEBUG_RESPONSES === 'true') {
+                                console.log(`[GeminiController] Suppressing redundant JSON-stream dispatch for tool: ${toolName} (Turn: ${turnId})`);
+                            }
                             if (activeCallbacks.onEvent) activeCallbacks.onEvent(json);
                         }
 

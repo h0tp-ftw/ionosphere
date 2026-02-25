@@ -46,7 +46,12 @@ const loosenSchema = (obj) => {
 
     // Deep Loosening: Remove format constraints to prevent CLI validation crashes.
     // This remains the primary cause of pre-flight schema errors.
-    delete obj.format;
+    if (obj.format) {
+        if (process.env.GEMINI_DEBUG_RESPONSES === 'true') {
+            console.log(`[Schema] Loosening: Removing 'format: ${obj.format}' from field.`);
+        }
+        delete obj.format;
+    }
 
     for (const key in obj) {
         if (typeof obj[key] === 'object') {
@@ -55,25 +60,6 @@ const loosenSchema = (obj) => {
     }
 };
 
-const logRequestForensics = (req) => {
-    if (process.env.GEMINI_DEBUG_HANDOFF !== 'true') return;
-    const { method, url, headers, body } = req;
-    const msgCount = body.messages?.length || 0;
-    const lastMsg = body.messages?.[msgCount - 1];
-    console.log(`[FORENSICS] ${method} ${url}`);
-    console.log(`[FORENSICS] Headers: ${JSON.stringify({
-        'user-agent': headers['user-agent'],
-        'x-request-id': headers['x-request-id'],
-        'content-length': headers['content-length']
-    })}`);
-    console.log(`[FORENSICS] Model: ${body.model}`);
-    console.log(`[FORENSICS] Message Count: ${msgCount}`);
-    if (lastMsg) {
-        console.log(`[FORENSICS] Last Msg Role: ${lastMsg.role}`);
-        const contentStr = typeof lastMsg.content === 'string' ? lastMsg.content : JSON.stringify(lastMsg.content);
-        console.log(`[FORENSICS] Last Msg Content (first 100 chars): ${contentStr.substring(0, 100)}...`);
-    }
-};
 
 // Ensure base temp directory exists
 const baseTempDir = path.join(process.cwd(), 'temp');
@@ -160,8 +146,8 @@ const resolveToolCall = (callKey, result) => {
 
         console.log(`[IPC] Sending result to turn ${pending.turnId} for tool ${callKey}`);
         if (process.env.GEMINI_DEBUG_IPC === 'true') {
-            const snippet = resultStr.length > 200 ? resultStr.substring(0, 200) + '...' : resultStr;
-            console.log(`[IPC] Result snippet: ${JSON.stringify(snippet)}`);
+            const snippet = resultStr.length > 500 ? resultStr.substring(0, 500) + '...' : resultStr;
+            console.log(`[IPC] Result length: ${resultStr.length}, Snippet: ${JSON.stringify(snippet)}`);
         }
 
         pending.socket.write(JSON.stringify({ event: 'tool_result', result: resultStr }) + '\n');
@@ -386,7 +372,10 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         const responseModel = req.body.model || process.env.GEMINI_MODEL || "gemini-2.5-flash-lite";
 
         const onText = (text) => {
-            if (responseSent || res.writableEnded) return;
+            if (responseSent || res.writableEnded) {
+                if (process.env.GEMINI_DEBUG_HANDOFF === 'true') console.log(`[Turn ${activeTurnId}] Suppressing onText: responseSent=${responseSent}, writableEnded=${res.writableEnded}`);
+                return;
+            }
             const contextMsg = hijackedTurnId ? `[HIJACKED from ${hijackedTurnId}] ` : "";
             if (process.env.GEMINI_DEBUG_RESPONSES === 'true') {
                 console.log(`[Turn ${activeTurnId}] ${contextMsg}SSE Text Chunk: ${text.substring(0, 50)}...`);
@@ -405,7 +394,10 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         };
 
         const onToolCall = (info) => {
-            if (responseSent || res.writableEnded) return;
+            if (responseSent || res.writableEnded) {
+                if (process.env.GEMINI_DEBUG_HANDOFF === 'true') console.log(`[Turn ${activeTurnId}] Suppressing onToolCall: responseSent=${responseSent}, writableEnded=${res.writableEnded}`);
+                return;
+            }
             // Force stringification of arguments for strict OpenAI compatibility
             const argsStr = typeof info.arguments === 'string' ? info.arguments : JSON.stringify(info.arguments || {});
 
@@ -439,7 +431,10 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         };
 
         const onError = (err) => {
-            if (responseSent || res.writableEnded) return;
+            if (responseSent || res.writableEnded) {
+                if (process.env.GEMINI_DEBUG_HANDOFF === 'true') console.log(`[Turn ${activeTurnId}] Suppressing onError: responseSent=${responseSent}, writableEnded=${res.writableEnded}`);
+                return;
+            }
             if (disconnectTimeout) clearTimeout(disconnectTimeout);
             responseSent = true;
 
@@ -456,8 +451,12 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         };
 
         const onResult = (json) => {
-            if (responseSent || res.writableEnded) return;
+            if (responseSent || res.writableEnded) {
+                if (process.env.GEMINI_DEBUG_HANDOFF === 'true') console.log(`[Turn ${activeTurnId}] Suppressing onResult: responseSent=${responseSent}, writableEnded=${res.writableEnded}`);
+                return;
+            }
             if (disconnectTimeout) clearTimeout(disconnectTimeout);
+            responseSent = true;
             finalStats = json.stats || {};
             if (isStreaming) {
                 sendChunk({
@@ -475,7 +474,6 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 if (!res.writableEnded) {
                     res.write('data: [DONE]\n\n');
                     res.end();
-                    responseSent = true;
                 }
             } else {
                 if (!res.headersSent) {
@@ -499,19 +497,24 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                             total_tokens: (finalStats.input_tokens || 0) + (finalStats.output_tokens || 0)
                         }
                     });
-                    responseSent = true;
                 }
             }
             if (heartbeatInterval) clearInterval(heartbeatInterval);
         };
 
         const onEvent = (json) => {
-            console.log(`[Turn ${activeTurnId}] CLI Event: ${json.type}`);
+            if (process.env.GEMINI_DEBUG_RAW === 'true') {
+                console.log(`[Turn ${activeTurnId}] CLI Event: ${json.type}`);
+            }
         };
 
         const onPark = (msg) => {
-            if (responseSent || res.writableEnded) return;
+            if (responseSent || res.writableEnded) {
+                if (process.env.GEMINI_DEBUG_HANDOFF === 'true') console.log(`[Turn ${activeTurnId}] Suppressing onPark: responseSent=${responseSent}, writableEnded=${res.writableEnded}`);
+                return;
+            }
             if (disconnectTimeout) clearTimeout(disconnectTimeout);
+            responseSent = true; // Mark BEFORE sending to ensure no close-race
             console.log(`[Turn ${activeTurnId}] Yielding response on Parked state. Tool: ${msg.name}`);
 
             if (isStreaming) {
@@ -616,29 +619,72 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 controller.updateCallbacks(hijackedTurnId, allCallbacks, extraEnv);
 
                 // 2. Resolve or Re-emit
-                // Deep-scan: Check ONLY the last 5 messages in the current payload for tool results
-                // This prevents "Instant Resolution" against historical echoes in the narrations.
+                // Deep-scan: Check the last 10 messages for tool results.
+                // We scan BACKWARDS to find the most recent/relevant results first.
                 let resolvedAny = false;
-                const scanRange = messages.slice(-5);
+                const scanRange = messages.slice(-10);
+
                 if (process.env.GEMINI_DEBUG_HANDOFF === 'true') {
-                    console.log(`[FORENSICS] Handoff scanRange (last 5): ${JSON.stringify(scanRange.map(m => ({ role: m.role, tool_id: m.tool_call_id, content: typeof m.content === 'string' ? m.content.substring(0, 50) : 'obj' })), null, 2)}`);
+                    console.log(`[FORENSICS] Handoff scanRange (last 10): ${JSON.stringify(scanRange.map(m => ({ role: m.role, tool_id: m.tool_call_id, content: typeof m.content === 'string' ? m.content.substring(0, 50) : 'obj' })), null, 2)}`);
                 }
-                for (const msg of scanRange) {
+
+                // First pass: look for AUTHENTIC tool results
+                for (let i = scanRange.length - 1; i >= 0; i--) {
+                    const msg = scanRange[i];
                     if (msg.role === 'tool' || msg.role === 'function') {
                         const callId = msg.tool_call_id;
                         const shortKey = callId?.startsWith('call_') ? callId.substring(5) : callId;
-                        for (const [callKey, pending] of pendingToolCalls.entries()) {
-                            if (shortKey && callKey.startsWith(shortKey)) {
-                                console.log(`[API] Deep-scan match: Resolving ${callId} (Tool: ${pending.name}) for turn ${hijackedTurnId}`);
-                                if (process.env.GEMINI_DEBUG_HANDOFF === 'true') {
-                                    console.log(`[FORENSICS] Resolving with content (Full): ${JSON.stringify(msg.content)}`);
+
+                        let resultData = msg.content;
+                        if (Array.isArray(resultData)) {
+                            resultData = resultData.map(p => (typeof p === 'object' && p.type === 'text') ? p.text : "").join("");
+                        }
+                        const isGarbage = (typeof resultData === 'string' && (resultData.trim().toLowerCase() === "result missing" || resultData.trim() === ""));
+
+                        if (shortKey) {
+                            for (const [callKey, pending] of pendingToolCalls.entries()) {
+                                if (callKey.startsWith(shortKey)) {
+                                    if (isGarbage) {
+                                        // If this is garbage, see if the NEXT message is a USER narration of this tool result
+                                        const nextMsg = scanRange[i + 1];
+                                        if (nextMsg && nextMsg.role === 'user') {
+                                            let nextContent = "";
+                                            if (typeof nextMsg.content === 'string') {
+                                                nextContent = nextMsg.content;
+                                            } else if (Array.isArray(nextMsg.content)) {
+                                                nextContent = nextMsg.content.map(p => (typeof p === 'object' && p.type === 'text') ? p.text : "").join("");
+                                            }
+
+                                            if (nextContent) {
+                                                // Pattern match for narrated result: [tool_name ...] Result: \n ...
+                                                const toolNameClean = pending.name.startsWith('ionosphere__') ? pending.name.substring(12) : pending.name;
+                                                const narrationPattern = new RegExp(`\\[${toolNameClean.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}.*?\\]\\s*Result:\\s*\\n?([\\s\\S]*)`, 'i');
+                                                const match = nextContent.match(narrationPattern);
+                                                if (match && match[1]) {
+                                                    console.log(`[API] Deep-scan match (Narrated): Extracted result for ${callId} from USER narration.`);
+                                                    resultData = match[1].trim();
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // If we still have garbage and there might be other results, keep looking
+                                    if (typeof resultData === 'string' && resultData.trim().toLowerCase() === "result missing" && i > 0) {
+                                        continue;
+                                    }
+
+                                    console.log(`[API] Deep-scan match: Resolving ${callId} (Tool: ${pending.name}) for turn ${hijackedTurnId}`);
+                                    if (process.env.GEMINI_DEBUG_HANDOFF === 'true') {
+                                        console.log(`[FORENSICS] Resolving with content (Full): ${JSON.stringify(resultData)}`);
+                                    }
+                                    resolveToolCall(callKey, resultData);
+                                    resolvedAny = true;
+                                    break;
                                 }
-                                resolveToolCall(callKey, msg.content);
-                                resolvedAny = true;
-                                break;
                             }
                         }
                     }
+                    if (resolvedAny) break;
                 }
 
                 if (!resolvedAny) {
@@ -773,6 +819,9 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             : path.join('/tmp', `ionosphere-${activeTurnId}.sock`);
 
         const ipcServer = net.createServer((socket) => {
+            if (process.env.GEMINI_DEBUG_IPC === 'true') {
+                console.log(`[IPC] Client connected for Turn ${activeTurnId}`);
+            }
             let buf = '';
             socket.on('data', (chunk) => {
                 buf += chunk.toString();

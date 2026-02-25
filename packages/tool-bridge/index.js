@@ -49,6 +49,9 @@ if (process.env.TOOL_BRIDGE_TOOLS) {
 function dispatchToolCall(name, args) {
     return new Promise((resolve, reject) => {
         const client = net.createConnection(ipcPath, () => {
+            if (process.env.GEMINI_DEBUG_IPC === 'true') {
+                process.stderr.write(`[ToolBridge] → IPC Connected: ${ipcPath}. Calling ${name}...\n`);
+            }
             const payload = JSON.stringify({
                 event: 'tool_call',
                 name,
@@ -63,6 +66,9 @@ function dispatchToolCall(name, args) {
             const nl = buffer.indexOf('\n');
             if (nl !== -1) {
                 const line = buffer.slice(0, nl).trim();
+                if (process.env.GEMINI_DEBUG_IPC === 'true') {
+                    process.stderr.write(`[ToolBridge] ← IPC Data received for ${name}: ${line.substring(0, 200)}...\n`);
+                }
                 client.destroy();
                 try {
                     const parsed = JSON.parse(line);
@@ -77,13 +83,22 @@ function dispatchToolCall(name, args) {
             }
         });
 
-        client.on('error', (err) => reject(new Error(`IPC error: ${err.message}`)));
+        client.on('error', (err) => {
+            process.stderr.write(`[ToolBridge] IPC CONNECTION ERROR: ${err.message}\n`);
+            reject(new Error(`IPC error: ${err.message}`));
+        });
         const TURN_TIMEOUT_MS = parseInt(process.env.TURN_TIMEOUT_MS) || 120 * 60 * 1000;
         const t = setTimeout(() => {
             client.destroy();
+            process.stderr.write(`[ToolBridge] IPC TIMEOUT after ${TURN_TIMEOUT_MS / 60000}m for ${name}\n`);
             reject(new Error(`IPC reply timed out after ${TURN_TIMEOUT_MS / 60000} minutes.`));
         }, TURN_TIMEOUT_MS);
-        client.on('close', () => clearTimeout(t));
+        client.on('close', () => {
+            if (process.env.GEMINI_DEBUG_IPC === 'true') {
+                process.stderr.write(`[ToolBridge] IPC Socket closed for ${name}\n`);
+            }
+            clearTimeout(t);
+        });
     }).catch(err => {
         return `Error: ${err.message}`;
     });

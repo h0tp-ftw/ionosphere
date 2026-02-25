@@ -22,16 +22,6 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(cors());
 
-// Helper to sanitize user-provided text: escape lines starting with @ or !
-const sanitizePromptText = (text) => {
-    if (typeof text !== 'string') return text;
-    return text.split('\n').map(line => {
-        if (line.startsWith('@') || line.startsWith('!')) {
-            return '\\' + line;
-        }
-        return line;
-    }).join('\n');
-};
 
 /**
  * Refines the JSON Schema to prevent Gemini CLI validation crashes
@@ -855,7 +845,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                     let text = msg.content;
                     if (Array.isArray(text)) {
                         text = text.map(p => {
-                            if (p.type === 'text') return sanitizePromptText(p.text);
+                            if (p.type === 'text') return p.text;
 
                             // OpenAI Multimodal support: image_url or file_url (often used for PDFs)
                             const urlObj = p.image_url || p.file_url;
@@ -911,7 +901,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                             return '';
                         }).join('\n');
                     } else {
-                        text = sanitizePromptText(text || "");
+                        text = text || "";
                     }
 
                     if (msg.role === 'user') {

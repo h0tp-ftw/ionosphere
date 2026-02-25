@@ -81,7 +81,7 @@ export class GeminiController {
      * 1. Spawn `gemini -y -o stream-json -p <text> --settings <settingsPath>`
      * 2. Stream output events back via callbacks.
      */
-    async sendPrompt(turnId, text, workspacePath = this.cwd, settingsPath = process.env.GEMINI_SETTINGS_JSON || path.join(this.cwd, '.gemini', 'settings.json'), systemPrompt = null, callbacks = {}, extraEnv = {}) {
+    async sendPrompt(turnId, text, workspacePath = this.cwd, settingsPath = process.env.GEMINI_SETTINGS_JSON || path.join(this.cwd, '.gemini', 'settings.json'), systemPrompt = null, callbacks = {}, extraEnv = {}, attachments = []) {
         try {
             this.callbacksByTurn.set(turnId, callbacks);
 
@@ -90,7 +90,11 @@ export class GeminiController {
             // Write prompt to a temp file
             const tempPromptPath = path.join(workspacePath, `prompt-${randomUUID()}.txt`);
             fs.writeFileSync(tempPromptPath, text, 'utf-8');
-            args.push('-p', `@${tempPromptPath}`);
+
+            // Pass attachments and the prompt file via the -p flag.
+            // Gemini CLI resolves @references in the positional query argument if joined.
+            const promptRefs = [...attachments, tempPromptPath].map(p => `@${p}`).join(' ');
+            args.push('-p', promptRefs);
 
             let systemPromptPath = null;
             if (systemPrompt !== null) {

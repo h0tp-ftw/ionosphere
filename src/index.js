@@ -835,9 +835,10 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         if (!fs.existsSync(turnTempDir)) fs.mkdirSync(turnTempDir, { recursive: true });
 
         // Serialize history (Strict Stateless Narrator)
-        let imageCounter = 0;
+        let attachmentCounter = 0;
+        let attachments = [];
         let systemMessage = "";
-        let conversationPromptSection = ""; // Renamed to avoid shadowed top-level historyHash if any
+        let conversationPromptSection = "";
         // Find the LAST user message to identify which one needs environment details
         const userMessages = req.body.messages.filter(m => m.role === 'user');
         const lastUserMsg = userMessages[userMessages.length - 1];
@@ -874,14 +875,15 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                                             else if (mime === 'application/pdf') ext = 'pdf';
                                             else if (mime.includes('text/')) ext = 'txt';
 
-                                            const filename = `attachment_${++imageCounter}.${ext}`;
+                                            const filename = `attachment_${++attachmentCounter}.${ext}`;
                                             const imgPath = path.join(turnTempDir, filename);
                                             fs.writeFileSync(imgPath, Buffer.from(b64, 'base64'));
-                                            return `@${imgPath}`;
+                                            attachments.push(imgPath);
+                                            return "";
                                         }
                                     } else {
                                         // Treat as a raw string if it's a URL
-                                        return `[Attached: ${url}]`;
+                                        return `[Attached URL: ${url}]`;
                                     }
                                 }
 
@@ -891,7 +893,8 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                                     const registry = loadFilesRegistry();
                                     const meta = registry[fileId];
                                     if (meta && fs.existsSync(meta.path)) {
-                                        return `@${meta.path}`;
+                                        attachments.push(meta.path);
+                                        return "";
                                     }
                                 }
                             }
@@ -901,7 +904,8 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                                 const registry = loadFilesRegistry();
                                 const meta = registry[p.file_id];
                                 if (meta && fs.existsSync(meta.path)) {
-                                    return `@${meta.path}`;
+                                    attachments.push(meta.path);
+                                    return "";
                                 }
                             }
                             return '';
@@ -945,29 +949,11 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             }
         }
 
-        // Collect multimodal attachments (multipart uploads + extracted images)
-        let multimodalPrefix = "";
-
-        // 1. Files uploaded via multipart/form-data (multer)
+        // Collect multimodal attachments (multipart uploads)
         if (req.files && Array.isArray(req.files)) {
             for (const file of req.files) {
-                multimodalPrefix += `@${file.path}\n`;
+                attachments.push(file.path);
             }
-        }
-
-        // 2. Images extracted from JSON messages
-        if (fs.existsSync(turnTempDir)) {
-            const tempFiles = fs.readdirSync(turnTempDir);
-            for (const f of tempFiles) {
-                if (f.startsWith('image_')) {
-                    multimodalPrefix += `@${path.join(turnTempDir, f)}\n`;
-                }
-            }
-        }
-
-        // Prepend multimodal references to the prompt
-        if (multimodalPrefix) {
-            conversationPromptSection = multimodalPrefix + "\n" + conversationPromptSection;
         }
 
         // Prime the assistant for a fresh turn if not a continuation or slash command
@@ -1163,7 +1149,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                     IONOSPHERE_IPC: ipcPath,
                     IONOSPHERE_HISTORY_HASH: historyHash,
                     IONOSPHERE_HISTORY_TOOLS: historicalTools.join(',')
-                });
+                }, attachments);
 
                 // Final safety for non-streaming multi-tool or parked turns
                 if (!responseSent) {

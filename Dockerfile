@@ -25,12 +25,16 @@ ENV GEMINI_DISABLE_WEB_SEARCH=${GEMINI_DISABLE_WEB_SEARCH}
 RUN node scripts/patch-gemini-core.js
 
 # 4. Prepare environment and executable
-RUN ./node_modules/.bin/gemini --version && mkdir -p temp
+RUN ./node_modules/.bin/gemini --version && \
+    mkdir -p temp && \
+    chmod +x scripts/entrypoint.sh
 
 ENV GEMINI_SETTINGS_JSON="/app/settings.json"
 ENV GEMINI_CLI_PATH="/app/node_modules/.bin/gemini"
 ENV PATH="/app/node_modules/.bin:${PATH}"
 ENV NODE_ENV=production
 
-# Default Command: First generate settings, then start orchestrator
-CMD ["sh", "-c", "node scripts/generate_settings.js && node src/index.js"]
+ENTRYPOINT ["/bin/sh", "/app/scripts/entrypoint.sh"]
+
+# Default Command: start orchestrator
+CMD ["node", "src/index.js"]

@@ -134,17 +134,34 @@ const resolveToolCall = (callKey, result) => {
     }
     pendingToolCalls.delete(callKey);
     try {
-        let resultStr = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+        // Robust Extraction: Detect and unwrap MCP/OpenAI-style content blocks
+        let extractedResult = result;
+        if (Array.isArray(result)) {
+            // Extract text from the first text block if it looks like an array of content
+            const textBlock = result.find(c => c.type === 'text');
+            if (textBlock && typeof textBlock.text === 'string') {
+                extractedResult = textBlock.text;
+            } else if (result.length > 0) {
+                // Fallback: use first element if it's a string, or stringify it correctly
+                extractedResult = typeof result[0] === 'string' ? result[0] : JSON.stringify(result[0]);
+            }
+        } else if (result && typeof result === 'object' && result.content) {
+            // Handle { content: [...] } wrapper
+            return resolveToolCall(callKey, result.content);
+        }
+
+        let resultStr = typeof extractedResult === 'string' ? extractedResult : JSON.stringify(extractedResult, null, 2);
 
         // Ensure we never send an empty or undefined result to the CLI, which causes "result missing"
         if (!resultStr || resultStr.trim() === "") {
-            console.warn(`[IPC] Warning: Tool ${pending.name} returned empty result. Normalizing to empty string.`);
-            resultStr = " "; // Send a space instead of empty to satisfy CLI/Model expectations if needed
+            console.warn(`[IPC] Warning: Tool ${pending.name} returned empty result. Normalizing.`);
+            resultStr = "Success: (Empty result)";
         }
 
         console.log(`[IPC] Sending result to turn ${pending.turnId} for tool ${callKey}`);
         if (process.env.GEMINI_DEBUG_IPC === 'true') {
-            console.log(`[IPC] Result snippet: ${resultStr.substring(0, 100)}...`);
+            const snippet = resultStr.length > 200 ? resultStr.substring(0, 200) + '...' : resultStr;
+            console.log(`[IPC] Result snippet: ${JSON.stringify(snippet)}`);
         }
 
         pending.socket.write(JSON.stringify({ event: 'tool_result', result: resultStr }) + '\n');
@@ -614,7 +631,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                             if (shortKey && callKey.startsWith(shortKey)) {
                                 console.log(`[API] Deep-scan match: Resolving ${callId} (Tool: ${pending.name}) for turn ${hijackedTurnId}`);
                                 if (process.env.GEMINI_DEBUG_HANDOFF === 'true') {
-                                    console.log(`[FORENSICS] Resolving with content: ${JSON.stringify(msg.content)}`);
+                                    console.log(`[FORENSICS] Resolving with content (Full): ${JSON.stringify(msg.content)}`);
                                 }
                                 resolveToolCall(callKey, msg.content);
                                 resolvedAny = true;

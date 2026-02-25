@@ -6,6 +6,9 @@ node_modules/
 
 # Temp files generated at runtime by the orchestrator
 temp/
+uploads/
+files.json
+*.log
 
 # Python artifacts
 __pycache__/

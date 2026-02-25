@@ -67,6 +67,42 @@ if (!fs.existsSync(baseTempDir)) {
     fs.mkdirSync(baseTempDir, { recursive: true });
 }
 
+// Ensure persistent uploads directory exists
+const uploadsDir = path.join(process.cwd(), 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
+// Files API Registry
+const filesRegistryPath = path.join(process.cwd(), 'files.json');
+const loadFilesRegistry = () => {
+    if (!fs.existsSync(filesRegistryPath)) return {};
+    try {
+        return JSON.parse(fs.readFileSync(filesRegistryPath, 'utf8'));
+    } catch (e) {
+        console.error(`[Files] Registry corrupt:`, e.message);
+        return {};
+    }
+};
+const saveFilesRegistry = (registry) => {
+    fs.writeFileSync(filesRegistryPath, JSON.stringify(registry, null, 2));
+};
+
+// Setup multer for persistent uploads separately
+const persistentStorage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        cb(null, uploadsDir);
+    },
+    filename: (req, file, cb) => {
+        const fileId = 'file-' + randomUUID();
+        // Store the ID in the file object so the route can use it
+        file.fileId = fileId;
+        const ext = path.extname(file.originalname);
+        cb(null, fileId + ext);
+    }
+});
+const persistentUpload = multer({ storage: persistentStorage });
+
 // Setup multer so files stream directly into our per-request isolated temp/ directory
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
@@ -213,6 +249,59 @@ const handleUpload = (req, res, next) => {
     }
 };
 
+// --- FILES API ---
+
+app.post('/v1/files', persistentUpload.single('file'), (req, res) => {
+    if (!req.file) {
+        return res.status(400).json({ error: { message: "No file provided", type: "invalid_request_error" } });
+    }
+
+    const registry = loadFilesRegistry();
+    const fileMetadata = {
+        id: req.file.fileId,
+        object: "file",
+        bytes: req.file.size,
+        created_at: Math.floor(Date.now() / 1000),
+        filename: req.file.originalname,
+        purpose: req.body.purpose || "assistants",
+        status: "processed",
+        path: req.file.path // local internal path
+    };
+
+    registry[fileMetadata.id] = fileMetadata;
+    saveFilesRegistry(registry);
+
+    res.json(fileMetadata);
+});
+
+app.get('/v1/files', (req, res) => {
+    const registry = loadFilesRegistry();
+    const files = Object.values(registry).map(({ path, ...meta }) => meta);
+    res.json({ object: "list", data: files });
+});
+
+app.get('/v1/files/:file_id', (req, res) => {
+    const registry = loadFilesRegistry();
+    const meta = registry[req.params.file_id];
+    if (!meta) return res.status(404).json({ error: { message: "File not found", type: "invalid_request_error" } });
+    const { path: _, ...publicMeta } = meta;
+    res.json(publicMeta);
+});
+
+app.delete('/v1/files/:file_id', (req, res) => {
+    const registry = loadFilesRegistry();
+    const meta = registry[req.params.file_id];
+    if (meta) {
+        if (fs.existsSync(meta.path)) {
+            fs.unlinkSync(meta.path);
+        }
+        delete registry[req.params.file_id];
+        saveFilesRegistry(registry);
+        return res.json({ id: req.params.file_id, object: "file", deleted: true });
+    }
+    res.status(404).json({ error: { message: "File not found", type: "invalid_request_error" } });
+});
+
 app.post('/v1/chat/completions', handleUpload, async (req, res) => {
     try {
         // 1. Authorization
@@ -231,12 +320,25 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             }
         }
 
+        // If multipart, some fields might be JSON-encoded strings
+        if (req.is('multipart/form-data')) {
+            if (typeof req.body.messages === 'string') {
+                try { req.body.messages = JSON.parse(req.body.messages); } catch (e) { }
+            }
+            if (typeof req.body.tools === 'string') {
+                try { req.body.tools = JSON.parse(req.body.tools); } catch (e) { }
+            }
+            if (typeof req.body.mcpServers === 'string') {
+                try { req.body.mcpServers = JSON.parse(req.body.mcpServers); } catch (e) { }
+            }
+        }
+
         let messages = req.body.messages;
         if (!messages || !Array.isArray(messages)) {
             return res.status(400).json({ error: createError("Missing 'messages' array", ErrorType.INVALID_REQUEST, 'invalid_parameter') });
         }
 
-        logRequestForensics(req);
+        // logRequestForensics(req);
 
         if (process.env.GEMINI_DEBUG_MESSAGES === 'true') {
             console.log(`[FORENSICS] Full Messages Array:\n${JSON.stringify(messages, null, 2)}`);
@@ -753,12 +855,54 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                     if (Array.isArray(text)) {
                         text = text.map(p => {
                             if (p.type === 'text') return sanitizePromptText(p.text);
-                            if (p.type === 'image_url') {
-                                const b64 = p.image_url.url.split(',')[1];
-                                const ext = p.image_url.url.split(';')[0].split('/')[1] || 'png';
-                                const imgPath = path.join(turnTempDir, `image_${++imageCounter}.${ext}`);
-                                fs.writeFileSync(imgPath, Buffer.from(b64, 'base64'));
-                                return `@${imgPath}`;
+
+                            // OpenAI Multimodal support: image_url or file_url (often used for PDFs)
+                            const urlObj = p.image_url || p.file_url;
+                            if (urlObj) {
+                                if (urlObj.url) {
+                                    const url = urlObj.url;
+                                    if (url.startsWith('data:')) {
+                                        // Extract data and mime type: data:mime/type;base64,data
+                                        const match = url.match(/^data:([^;]+);base64,(.+)$/);
+                                        if (match) {
+                                            const mime = match[1];
+                                            const b64 = match[2];
+
+                                            // Map mime types to common extensions
+                                            let ext = 'bin';
+                                            if (mime.includes('image/')) ext = mime.split('/')[1] || 'png';
+                                            else if (mime === 'application/pdf') ext = 'pdf';
+                                            else if (mime.includes('text/')) ext = 'txt';
+
+                                            const filename = `attachment_${++imageCounter}.${ext}`;
+                                            const imgPath = path.join(turnTempDir, filename);
+                                            fs.writeFileSync(imgPath, Buffer.from(b64, 'base64'));
+                                            return `@${imgPath}`;
+                                        }
+                                    } else {
+                                        // Treat as a raw string if it's a URL
+                                        return `[Attached: ${url}]`;
+                                    }
+                                }
+
+                                // Resolve by file_id if present (OpenAI Files API integration)
+                                const fileId = urlObj.id || urlObj.file_id || (p.type === 'file' ? (p.file?.id || p.file_id) : (p.type === 'input_file' ? p.file_id : null));
+                                if (fileId) {
+                                    const registry = loadFilesRegistry();
+                                    const meta = registry[fileId];
+                                    if (meta && fs.existsSync(meta.path)) {
+                                        return `@${meta.path}`;
+                                    }
+                                }
+                            }
+
+                            // Support for 'input_file' type directly
+                            if (p.type === 'input_file' && p.file_id) {
+                                const registry = loadFilesRegistry();
+                                const meta = registry[p.file_id];
+                                if (meta && fs.existsSync(meta.path)) {
+                                    return `@${meta.path}`;
+                                }
                             }
                             return '';
                         }).join('\n');
@@ -799,6 +943,31 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                     }
                 }
             }
+        }
+
+        // Collect multimodal attachments (multipart uploads + extracted images)
+        let multimodalPrefix = "";
+
+        // 1. Files uploaded via multipart/form-data (multer)
+        if (req.files && Array.isArray(req.files)) {
+            for (const file of req.files) {
+                multimodalPrefix += `@${file.path}\n`;
+            }
+        }
+
+        // 2. Images extracted from JSON messages
+        if (fs.existsSync(turnTempDir)) {
+            const tempFiles = fs.readdirSync(turnTempDir);
+            for (const f of tempFiles) {
+                if (f.startsWith('image_')) {
+                    multimodalPrefix += `@${path.join(turnTempDir, f)}\n`;
+                }
+            }
+        }
+
+        // Prepend multimodal references to the prompt
+        if (multimodalPrefix) {
+            conversationPromptSection = multimodalPrefix + "\n" + conversationPromptSection;
         }
 
         // Prime the assistant for a fresh turn if not a continuation or slash command
@@ -1047,28 +1216,30 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
     }
 });
 
+const MODELS_LIST = [
+    { id: "auto-gemini-3", context_window: 1000000, description: "Auto-selects an appropriate Gemini 3.0 model, and fallbacks if unavailable." },
+    { id: "auto-gemini-2.5", context_window: 1000000, description: "Auto-selects an appropriate Gemini 2.5 model, and fallbacks if unavailable." },
+    { id: "gemini-3-pro-preview", context_window: 1000000, description: "Gemini 3.0 Pro Preview" },
+    { id: "gemini-3-flash-preview", context_window: 1000000, description: "Gemini 3.0 Flash Preview" },
+    { id: "gemini-2.5-pro", context_window: 1000000, description: "Gemini 2.5 Pro" },
+    { id: "gemini-2.5-flash", context_window: 1000000, description: "Gemini 2.5 Flash" },
+    { id: "gemini-2.5-flash-lite", context_window: 1000000, description: "Gemini 2.5 Flash Lite" },
+    { id: "gemini-2.0-flash", context_window: 1000000, description: "Gemini 2.0 Flash" }
+];
+
 app.get('/v1/models', (req, res) => {
-    const models = [
-        { id: "auto-gemini-3", context_window: 1000000 },
-        { id: "auto-gemini-2.5", context_window: 1000000 },
-        { id: "gemini-3-pro-preview", context_window: 1000000 },
-        { id: "gemini-3-flash-preview", context_window: 1000000 },
-        { id: "gemini-2.5-pro", context_window: 1000000 },
-        { id: "gemini-2.5-flash", context_window: 1000000 },
-        { id: "gemini-2.5-flash-lite", context_window: 1000000 },
-        { id: "gemini-2.0-flash", context_window: 1000000 }
-    ];
     // Baseline timestamp for "modern" Gemini models
     const created = 1715731200; // May 15, 2024 (Gemini 1.5 stable)
 
     res.json({
         object: "list",
-        data: models.map(m => ({
+        data: MODELS_LIST.map(m => ({
             id: m.id,
             object: "model",
             created: created,
             owned_by: "google",
             context_window: m.context_window,
+            description: m.description,
             permission: [
                 {
                     id: `modelperm-${randomUUID()}`,
@@ -1090,19 +1261,9 @@ app.get('/v1/models', (req, res) => {
 });
 
 app.get('/v1/models/:model', (req, res) => {
-    const models = [
-        { id: "auto-gemini-3", context_window: 1000000 },
-        { id: "auto-gemini-2.5", context_window: 1000000 },
-        { id: "gemini-3-pro-preview", context_window: 1000000 },
-        { id: "gemini-3-flash-preview", context_window: 1000000 },
-        { id: "gemini-2.5-pro", context_window: 1000000 },
-        { id: "gemini-2.5-flash", context_window: 1000000 },
-        { id: "gemini-2.5-flash-lite", context_window: 1000000 },
-        { id: "gemini-2.0-flash", context_window: 1000000 }
-    ];
     const created = 1715731200;
     const modelId = req.params.model;
-    const model = models.find(m => m.id === modelId);
+    const model = MODELS_LIST.find(m => m.id === modelId);
 
     if (model) {
         return res.json({
@@ -1111,6 +1272,7 @@ app.get('/v1/models/:model', (req, res) => {
             created: created,
             owned_by: "google",
             context_window: model.context_window,
+            description: model.description,
             permission: [
                 {
                     id: `modelperm-${randomUUID()}`,

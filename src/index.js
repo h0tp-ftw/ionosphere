@@ -369,7 +369,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         let { turnId: hijackedTurnId, matchType } = findHijackedTurnId(messages, historyHash, fingerprint, activeTurnsByHash, parkedTurns, pendingToolCalls, process.env.GEMINI_DEBUG_HANDOFF === 'true') || {};
 
         // Handle "New Instruction" Case (Preemption)
-        if (hijackedTurnId && !parkedTurns.has(hijackedTurnId)) {
+        if (hijackedTurnId) {
             // Check if this is a "New Instruction" that requires preemption (killing old turn) instead of waiting.
             // This happens when hash differs (so new messages) but fingerprint matches, and it's NOT a tool continuation we identified.
 
@@ -388,6 +388,13 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                     if (lastMsg && lastMsg.role === 'user') {
                         console.log(`[API] One Session Rule: Preempting old turn ${hijackedTurnId} for new instruction on fingerprint ${fingerprint}`);
                         controller.cancelCurrentTurn(hijackedTurnId);
+                        parkedTurns.delete(hijackedTurnId);
+                        // Clean up any pending tool calls for the preempted turn
+                        for (const [callKey, pending] of pendingToolCalls.entries()) {
+                            if (pending.turnId === hijackedTurnId) {
+                                pendingToolCalls.delete(callKey);
+                            }
+                        }
                         await new Promise(r => setTimeout(r, 200));
                         hijackedTurnId = null; // Proceed to NEW TURN
                     }
@@ -700,121 +707,140 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 if (isToolContinuation) {
                     console.log(`[API] Warm Handoff: Hijacking turn ${hijackedTurnId} for tool result resolution.`);
                 } else {
-                    console.log(`[API] Warm Handoff: Hijacking turn ${hijackedTurnId} as Proxy (Retry).`);
-                }
-
-                // 1. Update callbacks and sync historical context to the running process
-                const extraEnv = {
-                    IONOSPHERE_HISTORY_HASH: historyHash,
-                    IONOSPHERE_HISTORY_TOOLS: historicalTools.join(',')
-                };
-                controller.updateCallbacks(hijackedTurnId, allCallbacks, extraEnv);
-
-                // 2. Resolve or Re-emit
-                // Deep-scan: Check the last 10 messages for tool results.
-                // We scan BACKWARDS to find the most recent/relevant results first.
-                let resolvedAny = false;
-                const scanRange = messages.slice(-10);
-
-                if (process.env.GEMINI_DEBUG_HANDOFF === 'true') {
-                    console.log(`[FORENSICS] Handoff scanRange (last 10): ${JSON.stringify(scanRange.map(m => ({ role: m.role, tool_id: m.tool_call_id, content: typeof m.content === 'string' ? m.content.substring(0, 50) : 'obj' })), null, 2)}`);
-                }
-
-                // First pass: look for AUTHENTIC tool results
-                for (let i = scanRange.length - 1; i >= 0; i--) {
-                    const msg = scanRange[i];
-                    if (msg.role === 'tool' || msg.role === 'function') {
-                        const callId = msg.tool_call_id;
-                        const shortKey = callId?.startsWith('call_') ? callId.substring(5) : callId;
-
-                        let resultData = msg.content;
-                        if (Array.isArray(resultData)) {
-                            resultData = resultData.map(p => (typeof p === 'object' && p.type === 'text') ? p.text : "").join("");
-                        }
-                        const isGarbage = (typeof resultData === 'string' && (resultData.trim().toLowerCase() === "result missing" || resultData.trim() === ""));
-
-                        if (shortKey) {
-                            for (const [callKey, pending] of pendingToolCalls.entries()) {
-                                if (callKey.startsWith(shortKey)) {
-                                    if (isGarbage) {
-                                        // If this is garbage, see if the NEXT message is a USER narration of this tool result
-                                        const nextMsg = scanRange[i + 1];
-                                        if (nextMsg && nextMsg.role === 'user') {
-                                            let nextContent = "";
-                                            if (typeof nextMsg.content === 'string') {
-                                                nextContent = nextMsg.content;
-                                            } else if (Array.isArray(nextMsg.content)) {
-                                                nextContent = nextMsg.content.map(p => (typeof p === 'object' && p.type === 'text') ? p.text : "").join("");
-                                            }
-
-                                            if (nextContent) {
-                                                // Pattern match for narrated result: [tool_name ...] Result: \n ...
-                                                const toolNameClean = pending.name.startsWith('ionosphere__') ? pending.name.substring(12) : pending.name;
-                                                const narrationPattern = new RegExp(`\\[${toolNameClean.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}.*?\\]\\s*Result:\\s*\\n?([\\s\\S]*)`, 'i');
-                                                const match = nextContent.match(narrationPattern);
-                                                if (match && match[1]) {
-                                                    console.log(`[API] Deep-scan match (Narrated): Extracted result for ${callId} from USER narration.`);
-                                                    resultData = match[1].trim();
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    // If we still have garbage and there might be other results, keep looking
-                                    if (typeof resultData === 'string' && resultData.trim().toLowerCase() === "result missing" && i > 0) {
-                                        continue;
-                                    }
-
-                                    console.log(`[API] Deep-scan match: Resolving ${callId} (Tool: ${pending.name}) for turn ${hijackedTurnId}`);
-                                    if (process.env.GEMINI_DEBUG_HANDOFF === 'true') {
-                                        console.log(`[FORENSICS] Resolving with content (Full): ${JSON.stringify(resultData)}`);
-                                    }
-                                    resolveToolCall(callKey, resultData);
-                                    resolvedAny = true;
-                                    break;
-                                }
+                    // Defense-in-depth: If last message is a new user instruction (not a retry),
+                    // do NOT re-emit the old tool call. Cancel and start fresh.
+                    if (lastMsg && lastMsg.role === 'user') {
+                        console.log(`[API] Handoff Guard: New user instruction detected on parked turn ${hijackedTurnId}. Preempting.`);
+                        controller.cancelCurrentTurn(hijackedTurnId);
+                        parkedTurns.delete(hijackedTurnId);
+                        for (const [callKey, pending] of pendingToolCalls.entries()) {
+                            if (pending.turnId === hijackedTurnId) {
+                                pendingToolCalls.delete(callKey);
                             }
                         }
-                    }
-                    if (resolvedAny) break;
-                }
-
-                if (!resolvedAny) {
-                    // If no results found in messages, it might be a Proxy Hijack (Retry)
-                    // Re-emit the pending tool call so the client knows we are still waiting
-                    let reemitted = false;
-                    for (const [callKey, pending] of pendingToolCalls.entries()) {
-                        if (pending.turnId === hijackedTurnId) {
-                            const callId = `call_${callKey.substring(0, 8)}`;
-                            const clientToolName = pending.clientName || (pending.name.startsWith('ionosphere__') ? pending.name.substring(12) : pending.name);
-
-                            // Forensics: Log the arguments we are re-emitting
-                            const argsLog = typeof pending.arguments === 'string' ? pending.arguments : JSON.stringify(pending.arguments);
-                            console.log(`[API] Proxy Hijack: Re-emitting call ${callId} for tool '${clientToolName}' (Internal: ${pending.name}) FULL ARGS: ${argsLog}`);
-
-                            onToolCall({
-                                id: callId,
-                                name: clientToolName,
-                                arguments: pending.arguments
-                            });
-
-                            // End the request since we are just re-emitting a parked state
-                            onPark({ id: callId, name: clientToolName, arguments: pending.arguments });
-                            reemitted = true;
-                            break;
-                        }
-                    }
-                    if (!reemitted) {
-                        console.warn(`[API] Proxy Hijack: No pending tool call found for Turn ${hijackedTurnId}. Falling back.`);
                         hijackedTurnId = null;
                         // Fall through to NEW TURN CASE
                     } else {
-                        return; // Request handled by re-emit
+                        console.log(`[API] Warm Handoff: Hijacking turn ${hijackedTurnId} as Proxy (Retry).`);
                     }
-                } else {
-                    // 3. Await the conclusion of the TASK from the new request side
-                    await parked.executePromise;
-                    return;
+                }
+
+                // Only proceed with handoff resolution if hijackedTurnId is still valid
+                // (defense-in-depth guard above may have nullified it for new user instructions)
+                if (hijackedTurnId) {
+                    // 1. Update callbacks and sync historical context to the running process
+                    const extraEnv = {
+                        IONOSPHERE_HISTORY_HASH: historyHash,
+                        IONOSPHERE_HISTORY_TOOLS: historicalTools.join(',')
+                    };
+                    controller.updateCallbacks(hijackedTurnId, allCallbacks, extraEnv);
+
+                    // 2. Resolve or Re-emit
+                    // Deep-scan: Check the last 10 messages for tool results.
+                    // We scan BACKWARDS to find the most recent/relevant results first.
+                    let resolvedAny = false;
+                    const scanRange = messages.slice(-10);
+
+                    if (process.env.GEMINI_DEBUG_HANDOFF === 'true') {
+                        console.log(`[FORENSICS] Handoff scanRange (last 10): ${JSON.stringify(scanRange.map(m => ({ role: m.role, tool_id: m.tool_call_id, content: typeof m.content === 'string' ? m.content.substring(0, 50) : 'obj' })), null, 2)}`);
+                    }
+
+                    // First pass: look for AUTHENTIC tool results
+                    for (let i = scanRange.length - 1; i >= 0; i--) {
+                        const msg = scanRange[i];
+                        if (msg.role === 'tool' || msg.role === 'function') {
+                            const callId = msg.tool_call_id;
+                            const shortKey = callId?.startsWith('call_') ? callId.substring(5) : callId;
+
+                            let resultData = msg.content;
+                            if (Array.isArray(resultData)) {
+                                resultData = resultData.map(p => (typeof p === 'object' && p.type === 'text') ? p.text : "").join("");
+                            }
+                            const isGarbage = (typeof resultData === 'string' && (resultData.trim().toLowerCase() === "result missing" || resultData.trim() === ""));
+
+                            if (shortKey) {
+                                for (const [callKey, pending] of pendingToolCalls.entries()) {
+                                    if (callKey.startsWith(shortKey)) {
+                                        if (isGarbage) {
+                                            // If this is garbage, see if the NEXT message is a USER narration of this tool result
+                                            const nextMsg = scanRange[i + 1];
+                                            if (nextMsg && nextMsg.role === 'user') {
+                                                let nextContent = "";
+                                                if (typeof nextMsg.content === 'string') {
+                                                    nextContent = nextMsg.content;
+                                                } else if (Array.isArray(nextMsg.content)) {
+                                                    nextContent = nextMsg.content.map(p => (typeof p === 'object' && p.type === 'text') ? p.text : "").join("");
+                                                }
+
+                                                if (nextContent) {
+                                                    // Pattern match for narrated result: [tool_name ...] Result: \n ...
+                                                    const toolNameClean = pending.name.startsWith('ionosphere__') ? pending.name.substring(12) : pending.name;
+                                                    const narrationPattern = new RegExp(`\\[${toolNameClean.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}.*?\\]\\s*Result:\\s*\\n?([\\s\\S]*)`, 'i');
+                                                    const match = nextContent.match(narrationPattern);
+                                                    if (match && match[1]) {
+                                                        console.log(`[API] Deep-scan match (Narrated): Extracted result for ${callId} from USER narration.`);
+                                                        resultData = match[1].trim();
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        // If we still have garbage and there might be other results, keep looking
+                                        if (typeof resultData === 'string' && resultData.trim().toLowerCase() === "result missing" && i > 0) {
+                                            continue;
+                                        }
+
+                                        console.log(`[API] Deep-scan match: Resolving ${callId} (Tool: ${pending.name}) for turn ${hijackedTurnId}`);
+                                        if (process.env.GEMINI_DEBUG_HANDOFF === 'true') {
+                                            console.log(`[FORENSICS] Resolving with content (Full): ${JSON.stringify(resultData)}`);
+                                        }
+                                        resolveToolCall(callKey, resultData);
+                                        resolvedAny = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if (resolvedAny) break;
+                    }
+
+                    if (!resolvedAny) {
+                        // If no results found in messages, it might be a Proxy Hijack (Retry)
+                        // Re-emit the pending tool call so the client knows we are still waiting
+                        let reemitted = false;
+                        for (const [callKey, pending] of pendingToolCalls.entries()) {
+                            if (pending.turnId === hijackedTurnId) {
+                                const callId = `call_${callKey.substring(0, 8)}`;
+                                const clientToolName = pending.clientName || (pending.name.startsWith('ionosphere__') ? pending.name.substring(12) : pending.name);
+
+                                // Forensics: Log the arguments we are re-emitting
+                                const argsLog = typeof pending.arguments === 'string' ? pending.arguments : JSON.stringify(pending.arguments);
+                                console.log(`[API] Proxy Hijack: Re-emitting call ${callId} for tool '${clientToolName}' (Internal: ${pending.name}) FULL ARGS: ${argsLog}`);
+
+                                onToolCall({
+                                    id: callId,
+                                    name: clientToolName,
+                                    arguments: pending.arguments
+                                });
+
+                                // End the request since we are just re-emitting a parked state
+                                onPark({ id: callId, name: clientToolName, arguments: pending.arguments });
+                                reemitted = true;
+                                break;
+                            }
+                        }
+                        if (!reemitted) {
+                            console.warn(`[API] Proxy Hijack: No pending tool call found for Turn ${hijackedTurnId}. Falling back.`);
+                            hijackedTurnId = null;
+                            // Fall through to NEW TURN CASE
+                        } else {
+                            return; // Request handled by re-emit
+                        }
+                    } else {
+                        // 3. Await the conclusion of the TASK from the new request side
+                        await parked.executePromise;
+                        return;
+                    }
                 }
             }
         }

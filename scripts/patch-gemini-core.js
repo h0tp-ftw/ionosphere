@@ -42,19 +42,32 @@ if (fs.existsSync(policyCatalogFile)) {
         console.log("  - Applied Silent Actions patch.");
     }
 
-    // Customize PREVIEW_CHAIN
-    const previewSearch = /const PREVIEW_CHAIN = \[[\s\S]*?\];/;
-    const previewReplace = `const PREVIEW_CHAIN = [
-    definePolicy({ model: PREVIEW_GEMINI_MODEL }),
-    definePolicy({ model: PREVIEW_GEMINI_FLASH_MODEL }),
+    // 1. Correct the Default 2.x Chain (3 models)
+    const defaultChainSearch = /const DEFAULT_CHAIN = \[[\s\S]*?\];/;
+    const defaultChainReplace = `const DEFAULT_CHAIN = [
     definePolicy({ model: DEFAULT_GEMINI_MODEL }),
     definePolicy({ model: DEFAULT_GEMINI_FLASH_MODEL }),
     definePolicy({ model: DEFAULT_GEMINI_FLASH_LITE_MODEL, isLastResort: true }),
 ];`;
 
-    const previewMatch = content.match(previewSearch);
-    if (previewMatch && previewMatch[0].split('definePolicy').length < 6) {
-        content = content.replace(previewSearch, previewReplace);
+    const defaultMatch = content.match(defaultChainSearch);
+    if (defaultMatch && defaultMatch[0].split('definePolicy').length < 4) {
+        content = content.replace(defaultChainSearch, defaultChainReplace);
+        console.log("  - Applied 3-Model Default Chain patch.");
+    }
+
+    // 2. Correct the Preview 3.x -> 2.x Chain (5 models)
+    const previewFuncSearch = /return \[[\s\S]*?definePolicy\(\{ model: previewModel \}\),[\s\S]*?definePolicy\(\{ model: PREVIEW_GEMINI_FLASH_MODEL, isLastResort: true \}\),[\s\S]*?\];/;
+    const previewFuncReplace = `return [
+            definePolicy({ model: previewModel }),
+            definePolicy({ model: PREVIEW_GEMINI_FLASH_MODEL }),
+            definePolicy({ model: DEFAULT_GEMINI_MODEL }),
+            definePolicy({ model: DEFAULT_GEMINI_FLASH_MODEL }),
+            definePolicy({ model: DEFAULT_GEMINI_FLASH_LITE_MODEL, isLastResort: true }),
+        ];`;
+
+    if (content.match(previewFuncSearch)) {
+        content = content.replace(previewFuncSearch, previewFuncReplace);
         console.log("  - Applied 5-Model Fallback Chain patch.");
     }
 

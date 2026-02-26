@@ -34,12 +34,16 @@ async function startBridge(scenario) {
     return new Promise((resolve, reject) => {
         let started = false;
         bridgeProc.stdout.on('data', (chunk) => {
-            if (!started && chunk.toString().includes('listening')) {
+            const msg = chunk.toString();
+            if (!started && (msg.includes('listening') || msg.includes('Starting Gemini'))) {
                 started = true;
-                setTimeout(resolve, 500);
+                setTimeout(resolve, 1000);
             }
         });
-        setTimeout(() => { if (!started) reject(new Error('Bridge did not start')); }, 5000);
+        bridgeProc.stderr.on('data', (chunk) => {
+            console.error(`[Bridge Error] ${chunk}`);
+        });
+        setTimeout(() => { if (!started) reject(new Error('Bridge did not start')); }, 10000);
     });
 }
 
@@ -76,6 +80,22 @@ test('Error Handling Robustness Suite', async (t) => {
         } catch (err) {
             assert.equal(err.status, 401);
             assert.ok(err.message.includes('Auth Expired'));
+        }
+    });
+
+    await t.test('False Auth Error (Path containing "auth")', async () => {
+        await startBridge('false_auth_path');
+        try {
+            await client.chat.completions.create({
+                model: 'gemini-2.0-flash',
+                messages: [{ role: 'user', content: 'false auth' }]
+            });
+            assert.fail('Should have failed');
+        } catch (err) {
+            // Should NOT be 401
+            assert.equal(err.status, 500);
+            assert.ok(err.message.includes('CLI failed'));
+            assert.ok(err.message.includes('google-gemini-cli-auth'));
         }
     });
 

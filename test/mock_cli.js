@@ -41,6 +41,9 @@ async function run() {
     } else if (SCENARIO === 'quota_error') {
         console.error("Fatal: RESOURCE_EXHAUSTED. (Simulated quota error)");
         process.exit(1);
+    } else if (SCENARIO === 'false_auth_path') {
+        console.error('Error executing tool list_directory: Path not in workspace: Attempted path "/home/ubuntu/openclaw/extensions/google-gemini-cli-auth" resolves outside allowed workspace directories.');
+        process.exit(1);
     } else if (SCENARIO === 'crash') {
         console.error("Simulated crash: SEGFAULT at 0x000");
         process.exit(1);

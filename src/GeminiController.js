@@ -344,7 +344,7 @@ export class GeminiController {
                         console.error(`[Gemini CLI STDERR] [Turn ${turnId}] ${stderrText}`);
 
                         // ... (keep matches as they were)
-                        const isAuthError = (/(please log in|auth|authorization)/i.test(stderrText) && !/unauthorized tool call/i.test(stderrText)) ||
+                        const isAuthError = (/(please log in|\bauthorization\b|authenticate|not authenticated)/i.test(stderrText) && !/unauthorized tool call/i.test(stderrText)) ||
                             (/credentials/i.test(stderrText) && !/loaded cached credentials/i.test(stderrText));
                         const isResourceError = /RESOURCE_EXHAUSTED|rateLimitExceeded|429|No capacity available/i.test(stderrText);
                         const isPolicyError = /denied by policy|unauthorized tool call|not available to this agent/i.test(stderrText);

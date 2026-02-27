@@ -366,38 +366,61 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         let lastMsg = messages[messages.length - 1];
 
         // Find existing session to hijack using robust logic (Deep Scan + Fingerprint)
-        let { turnId: hijackedTurnId, matchType } = findHijackedTurnId(messages, historyHash, fingerprint, activeTurnsByHash, parkedTurns, pendingToolCalls, process.env.GEMINI_DEBUG_HANDOFF === 'true') || {};
+        let { turnId: hijackedTurnId, matchType } = findHijackedTurnId(messages, historyHash, fingerprint, activeTurnsByHash, parkedTurns, pendingToolCalls, process.env.GEMINI_DEBUG_HANDOFF === "true") || {};
 
+        if (hijackedTurnId === activeTurnId) {
+            console.log(`[API] Self-collision detected for turn ${activeTurnId}. Clearing stale mapping.`);
+            activeTurnsByHash.delete(fingerprint);
+            activeTurnsByHash.delete(historyHash);
+            hijackedTurnId = null;
+        }
+
+        
         // Handle "New Instruction" Case (Preemption)
         if (hijackedTurnId) {
-            // Check if this is a "New Instruction" that requires preemption (killing old turn) instead of waiting.
-            // This happens when hash differs (so new messages) but fingerprint matches, and it's NOT a tool continuation we identified.
-
             const isToolMatch = matchType === 'tool_call';
+            const isHashMatch = activeTurnsByHash.get(historyHash) === hijackedTurnId;
 
-            if (!isToolMatch) {
-                // Not a tool match. Must be a fingerprint match.
-                // If the history hash is different, it means we have new messages (user instruction).
-                // If it's NOT a tool continuation (checked by isToolMatch), then it is a new user instruction.
-                const isHashMatch = activeTurnsByHash.get(historyHash) === hijackedTurnId;
+            // Preemption Rule: If the hash changed (new messages) and the last message is from a USER,
+            // we should consider if this is a new instruction that should kill the old turn.
+            if (lastMsg && lastMsg.role === 'user' && !isHashMatch) {
+                let shouldPreempt = false;
 
-                if (!isHashMatch) {
-                    // Hash mismatch + Fingerprint match + No Tool ID match = New Instruction on same thread.
-                    // If the last message is USER, we assume interruption and preempt.
+                if (isToolMatch) {
+                    // Even if we have a tool match, we preempt if the USER message DOES NOT look like a tool narration.
+                    // This allows users to "break out" of a tool wait (e.g. Weather -> "Wait, cancel that, say POP").
+                    let contentStr = "";
+                    if (typeof lastMsg.content === 'string') contentStr = lastMsg.content;
+                    else if (Array.isArray(lastMsg.content)) contentStr = lastMsg.content.map(p => p.text || p.content || "").join("");
 
-                    if (lastMsg && lastMsg.role === 'user') {
-                        console.log(`[API] One Session Rule: Preempting old turn ${hijackedTurnId} for new instruction on fingerprint ${fingerprint}`);
-                        controller.cancelCurrentTurn(hijackedTurnId);
-                        parkedTurns.delete(hijackedTurnId);
-                        // Clean up any pending tool calls for the preempted turn
-                        for (const [callKey, pending] of pendingToolCalls.entries()) {
-                            if (pending.turnId === hijackedTurnId) {
-                                pendingToolCalls.delete(callKey);
-                            }
-                        }
-                        await new Promise(r => setTimeout(r, 200));
-                        hijackedTurnId = null; // Proceed to NEW TURN
+                    const isNarration = contentStr.includes('] Result:') || contentStr.match(/\[.*?\]\s*Result:/i);
+                    if (process.env.GEMINI_DEBUG_HANDOFF === 'true') {
+                        console.log(`[API] Preemption Check: isToolMatch=${isToolMatch}, isNarration=${isNarration}, contentStr="${contentStr.substring(0, 50)}..."`);
                     }
+                    if (!isNarration) {
+                        console.log(`[API] One Session Rule: User provided new instruction while turn ${hijackedTurnId} was waiting for a tool. Preempting.`);
+                        shouldPreempt = true;
+                    }
+                } else {
+                    // Regular fingerprint match with no tool continuation: always preempt on new USER instruction
+                    console.log(`[API] One Session Rule: Preempting old turn ${hijackedTurnId} for new instruction on fingerprint ${fingerprint}`);
+                    shouldPreempt = true;
+                }
+
+                if (shouldPreempt) {
+                    controller.cancelCurrentTurn(hijackedTurnId);
+                    parkedTurns.delete(hijackedTurnId);
+                    activeTurnsByHash.delete(fingerprint);
+                    activeTurnsByHash.delete(historyHash);
+                    // Clean up any pending tool calls for the preempted turn
+                    for (const [callKey, pending] of pendingToolCalls.entries()) {
+                    
+                        if (pending.turnId === hijackedTurnId) {
+                            pendingToolCalls.delete(callKey);
+                        }
+                    }
+                    await new Promise(r => setTimeout(r, 200));
+                    hijackedTurnId = null; // Proceed to NEW TURN
                 }
             }
         }
@@ -699,7 +722,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             if (!proc || proc.killed) {
                 console.log(`[API] Handoff failed: Turn ${hijackedTurnId} is no longer active. Falling back to fresh turn.`);
                 parkedTurns.delete(hijackedTurnId);
-                hijackedTurnId = null;
+                    hijackedTurnId = null;
                 // Fall through to NEW TURN CASE
             } else {
                 const isToolContinuation = lastMsg && (lastMsg.role === 'tool' || lastMsg.role === 'function');
@@ -710,16 +733,26 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                     // Defense-in-depth: If last message is a new user instruction (not a retry),
                     // do NOT re-emit the old tool call. Cancel and start fresh.
                     if (lastMsg && lastMsg.role === 'user') {
-                        console.log(`[API] Handoff Guard: New user instruction detected on parked turn ${hijackedTurnId}. Preempting.`);
-                        controller.cancelCurrentTurn(hijackedTurnId);
-                        parkedTurns.delete(hijackedTurnId);
-                        for (const [callKey, pending] of pendingToolCalls.entries()) {
-                            if (pending.turnId === hijackedTurnId) {
-                                pendingToolCalls.delete(callKey);
+                        let contentStr = "";
+                        if (typeof lastMsg.content === 'string') contentStr = lastMsg.content;
+                        else if (Array.isArray(lastMsg.content)) contentStr = lastMsg.content.map(p => p.text || p.content || "").join("");
+
+                        const isNarration = contentStr.includes('] Result:') || contentStr.match(/\[.*?\]\s*Result:/i);
+
+                        if (!isNarration) {
+                            console.log(`[API] Handoff Guard: New user instruction detected on parked turn ${hijackedTurnId}. Preempting.`);
+                            controller.cancelCurrentTurn(hijackedTurnId);
+                            parkedTurns.delete(hijackedTurnId);
+                    for (const [callKey, pending] of pendingToolCalls.entries()) {
+                                if (pending.turnId === hijackedTurnId) {
+                                    pendingToolCalls.delete(callKey);
+                                }
                             }
+                            hijackedTurnId = null;
+                            // Fall through to NEW TURN CASE
+                        } else {
+                            console.log(`[API] Warm Handoff: Hijacking turn ${hijackedTurnId} as Proxy (Narration).`);
                         }
-                        hijackedTurnId = null;
-                        // Fall through to NEW TURN CASE
                     } else {
                         console.log(`[API] Warm Handoff: Hijacking turn ${hijackedTurnId} as Proxy (Retry).`);
                     }
@@ -739,10 +772,21 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                     // Deep-scan: Check the last 10 messages for tool results.
                     // We scan BACKWARDS to find the most recent/relevant results first.
                     let resolvedAny = false;
+
+                    // Race Condition Mitigation: wait a moment for the re-emission to arrive over IPC
+                    // if history indicates we have results to deliver.
                     const scanRange = messages.slice(-10);
+                    const hasUnresolvedResult = scanRange.some(m => (m.role === 'tool' || m.role === 'function' ||
+                        (m.role === 'user' && (typeof m.content === 'string' ? m.content : JSON.stringify(m.content)).includes('] Result:'))));
+
+                    if (hasUnresolvedResult && pendingToolCalls.size === 0) {
+                        if (process.env.GEMINI_DEBUG_HANDOFF === 'true') console.log(`[API] Handoff: History has results but no pending tools. Waiting 300ms for re-emission...`);
+                        await new Promise(r => setTimeout(r, 300));
+                    }
 
                     if (process.env.GEMINI_DEBUG_HANDOFF === 'true') {
                         console.log(`[FORENSICS] Handoff scanRange (last 10): ${JSON.stringify(scanRange.map(m => ({ role: m.role, tool_id: m.tool_call_id, content: typeof m.content === 'string' ? m.content.substring(0, 50) : 'obj' })), null, 2)}`);
+                        console.log(`[FORENSICS] Pending tools for turn ${hijackedTurnId}: ${Array.from(pendingToolCalls.keys()).filter(k => pendingToolCalls.get(k).turnId === hijackedTurnId)}`);
                     }
 
                     // First pass: look for AUTHENTIC tool results
@@ -934,8 +978,11 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                         // History Deduplication: Strip environment details from non-latest messages to prevent prompt bloat
                         if (msg !== lastUserMsg) {
                             text = text.replace(/<environment_details>[\s\S]*?<\/environment_details>/g, "[Environment details stripped for brevity]");
+                            conversationPromptSection += `USER: ${text}\n\n`;
+                        } else {
+                            // Highlight the latest instruction specifically to help with context drift in large prompts
+                            conversationPromptSection += `\n<LATEST_USER_INSTRUCTION>\nUSER: ${text}\n</LATEST_USER_INSTRUCTION>\n\n`;
                         }
-                        conversationPromptSection += `USER: ${text}\n\n`;
                     }
                     else if (msg.role === 'assistant') {
                         let content = text;
@@ -979,7 +1026,8 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
 
         // Debug Persistence: Create directory if needed
-        if (process.env.GEMINI_DEBUG_PROMPTS === 'true') {
+        // Debug Persistence: Create directory if needed
+        if (process.env.GEMINI_DEBUG_PROMPTS !== 'false') {
             const debugDir = path.join(process.cwd(), 'debug_prompts');
             if (!fs.existsSync(debugDir)) fs.mkdirSync(debugDir, { recursive: true });
         }
@@ -1069,8 +1117,9 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         });
 
         // Write raw request JSON for offline forensics
-        if (process.env.GEMINI_DEBUG_PROMPTS === 'true') {
+        if (process.env.GEMINI_DEBUG_PROMPTS !== 'false') {
             fs.writeFileSync(path.join(turnTempDir, 'request.json'), JSON.stringify(req.body, null, 2));
+            fs.writeFileSync(path.join(turnTempDir, 'serialized_prompt.txt'), (conversationPromptSection || conversationPrompt).trim());
         }
 
         // Config
@@ -1159,9 +1208,15 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 // Use fingerprint for concurrency gating to catch retries/metadata shifts
                 activeTurnsByHash.set(fingerprint, activeTurnId);
                 activeTurnsByHash.set(historyHash, activeTurnId);
-                console.log(`[Turn ${activeTurnId}] Executing for fingerprint: ${fingerprint}`);
+                const promptText = (conversationPromptSection || conversationPrompt).trim();
+                const promptSize = promptText.length;
+                console.log(`[Turn ${activeTurnId}] Executing for fingerprint: ${fingerprint} (Prompt Size: ${promptSize} chars)`);
 
-                await controller.sendPrompt(activeTurnId, (conversationPromptSection || conversationPrompt).trim(), turnTempDir, settingsPath, systemMessage.trim(), allCallbacks, {
+                if (promptSize > 300000) {
+                    console.warn(`[Turn ${activeTurnId}] WARNING: Large prompt detected (${promptSize} chars). Model may experience drift or ignore recent instructions.`);
+                }
+
+                await controller.sendPrompt(activeTurnId, promptText, turnTempDir, settingsPath, systemMessage.trim(), allCallbacks, {
                     IONOSPHERE_IPC: ipcPath,
                     IONOSPHERE_HISTORY_HASH: historyHash,
                     IONOSPHERE_HISTORY_TOOLS: historicalTools.join(',')

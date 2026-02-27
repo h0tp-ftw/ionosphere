@@ -39,11 +39,13 @@ test('generateConfig - telemetry is disabled by default', () => {
 test('generateConfig - sets maxSessionTurns to 50 (default)', () => {
     const { written } = generate();
     assert.equal(written.model?.maxSessionTurns, 50);
+
 });
 
 test('generateConfig - sets compressionThreshold to 0.7 (default)', () => {
     const { written } = generate();
     assert.equal(written.model?.compressionThreshold, 0.7);
+
 });
 
 test('generateConfig - builtin tools are allowed by default', () => {

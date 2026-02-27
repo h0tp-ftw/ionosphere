@@ -36,9 +36,9 @@ test('generateConfig - telemetry is disabled by default', () => {
     assert.equal(written.telemetry?.enabled, false);
 });
 
-test('generateConfig - sets maxSessionTurns to 12 (default)', () => {
+test('generateConfig - sets maxSessionTurns to 50 (default)', () => {
     const { written } = generate();
-    assert.equal(written.model?.maxSessionTurns, 12);
+    assert.equal(written.model?.maxSessionTurns, 50);
 });
 
 test('generateConfig - builtin tools are allowed by default', () => {
@@ -93,7 +93,7 @@ test('generateConfig - customSettings merges without overwriting base fields', (
     const { written } = generate({ customSettings, modelName: 'gemini-test' });
     // Base field preserved
     assert.equal(written.model?.name, 'gemini-test');
-    assert.equal(written.model?.maxSessionTurns, 12);
+    assert.equal(written.model?.maxSessionTurns, 50);
     // Custom field added
     assert.equal(written.model?.someExtraField, 'extra');
 });

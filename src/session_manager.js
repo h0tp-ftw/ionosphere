@@ -70,7 +70,7 @@ export const findHijackedTurnId = (messages, historyHash, fingerprint, activeTur
     // that matches a pending tool call, we hijack that turn.
     // This is robust against history truncation and non-last-message scenarios.
     const scanRange = messages.slice(-10); // Check last 10 messages to be safe
-    for (const msg of scanRange.reverse()) { // Reverse to prioritize recent
+    for (const msg of [...scanRange].reverse()) { // Reverse to prioritize recent
         if (msg.role === 'tool' || msg.role === 'function') {
             const callId = msg.tool_call_id;
             const shortKey = callId?.startsWith('call_') ? callId.substring(5) : callId;

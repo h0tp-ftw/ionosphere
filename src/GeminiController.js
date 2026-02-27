@@ -47,6 +47,10 @@ export class GeminiController {
         // Active callbacks for each turnId
         this.callbacksByTurn = new Map();
 
+        // Track last text response per fingerprint to prevent repetition loops
+        // Map<fingerprint, { text: string, count: number }>
+        this.textRepeatTracker = new Map();
+
         if (!fs.existsSync(this.tempDir)) {
             fs.mkdirSync(this.tempDir, { recursive: true });
         }
@@ -165,6 +169,7 @@ export class GeminiController {
 
                 proc.extraEnv = extraEnv; // Initialize with spawn env
                 proc.toolUsage = new Set(); // Track real tool calls in this turn
+                proc.accumulatedText = ''; // Track full text for repeat detection
                 this.processes.set(turnId, proc);
 
                 // 2-hour timeout for ReAct loops (human-in-the-loop scale)
@@ -277,8 +282,11 @@ export class GeminiController {
 
                             // Remove both action and result tags from the text before sending it to the client
                             cleanedContent = content.replace(actionRegex, '').replace(resultRegex, '');
-                            if (cleanedContent && activeCallbacks.onText) {
-                                activeCallbacks.onText(cleanedContent);
+                            if (cleanedContent) {
+                                proc.accumulatedText += cleanedContent;
+                                if (activeCallbacks.onText) {
+                                    activeCallbacks.onText(cleanedContent);
+                                }
                             }
                         }
 
@@ -407,6 +415,23 @@ export class GeminiController {
                     } catch (_) { }
 
                     if (code === 0 || code === null) {
+                        // After successful completion, check for across-turn repetition
+                        const fingerprint = proc.extraEnv?.IONOSPHERE_HISTORY_HASH || turnId;
+                        const fullText = proc.accumulatedText.trim();
+
+                        if (fullText.length > 50) { // Only track substantial responses
+                            const lastEntry = this.textRepeatTracker.get(fingerprint);
+                            if (lastEntry && lastEntry.text === fullText) {
+                                lastEntry.count++;
+                                console.warn(`[GeminiController] REPEAT DETECTED for fingerprint ${fingerprint}: Same text response ${lastEntry.count} times in a row.`);
+                                if (lastEntry.count >= 3) {
+                                    console.error(`[GeminiController] Severe repetition loop on ${fingerprint}. Consider clearing session.`);
+                                }
+                            } else {
+                                this.textRepeatTracker.set(fingerprint, { text: fullText, count: 1 });
+                            }
+                        }
+
                         resolve(lastResultJson);
                     } else {
                         const diagnostics = lastStderrLines.join('\n').trim();

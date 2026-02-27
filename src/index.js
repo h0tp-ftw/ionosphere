@@ -366,8 +366,16 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         let lastMsg = messages[messages.length - 1];
 
         // Find existing session to hijack using robust logic (Deep Scan + Fingerprint)
-        let { turnId: hijackedTurnId, matchType } = findHijackedTurnId(messages, historyHash, fingerprint, activeTurnsByHash, parkedTurns, pendingToolCalls, process.env.GEMINI_DEBUG_HANDOFF === 'true') || {};
+        let { turnId: hijackedTurnId, matchType } = findHijackedTurnId(messages, historyHash, fingerprint, activeTurnsByHash, parkedTurns, pendingToolCalls, process.env.GEMINI_DEBUG_HANDOFF === "true") || {};
 
+        if (hijackedTurnId === activeTurnId) {
+            console.log(`[API] Self-collision detected for turn ${activeTurnId}. Clearing stale mapping.`);
+            activeTurnsByHash.delete(fingerprint);
+            activeTurnsByHash.delete(historyHash);
+            hijackedTurnId = null;
+        }
+
+        
         // Handle "New Instruction" Case (Preemption)
         if (hijackedTurnId) {
             const isToolMatch = matchType === 'tool_call';
@@ -402,8 +410,11 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 if (shouldPreempt) {
                     controller.cancelCurrentTurn(hijackedTurnId);
                     parkedTurns.delete(hijackedTurnId);
+                    activeTurnsByHash.delete(fingerprint);
+                    activeTurnsByHash.delete(historyHash);
                     // Clean up any pending tool calls for the preempted turn
                     for (const [callKey, pending] of pendingToolCalls.entries()) {
+                    
                         if (pending.turnId === hijackedTurnId) {
                             pendingToolCalls.delete(callKey);
                         }
@@ -711,7 +722,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             if (!proc || proc.killed) {
                 console.log(`[API] Handoff failed: Turn ${hijackedTurnId} is no longer active. Falling back to fresh turn.`);
                 parkedTurns.delete(hijackedTurnId);
-                hijackedTurnId = null;
+                    hijackedTurnId = null;
                 // Fall through to NEW TURN CASE
             } else {
                 const isToolContinuation = lastMsg && (lastMsg.role === 'tool' || lastMsg.role === 'function');
@@ -732,7 +743,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                             console.log(`[API] Handoff Guard: New user instruction detected on parked turn ${hijackedTurnId}. Preempting.`);
                             controller.cancelCurrentTurn(hijackedTurnId);
                             parkedTurns.delete(hijackedTurnId);
-                            for (const [callKey, pending] of pendingToolCalls.entries()) {
+                    for (const [callKey, pending] of pendingToolCalls.entries()) {
                                 if (pending.turnId === hijackedTurnId) {
                                     pendingToolCalls.delete(callKey);
                                 }

@@ -56,6 +56,15 @@ async function run() {
             await delay(50);
         }
         emit({ type: 'result', status: 'success', stats: { total_tokens: 500, input_tokens: 50, output_tokens: 450, duration_ms: 300, tool_calls: 0 } });
+    } else if (SCENARIO === 'stdin_echo') {
+        // Read stdin to verify it was piped correctly
+        let stdinData = '';
+        process.stdin.setEncoding('utf8');
+        process.stdin.on('data', (chunk) => { stdinData += chunk; });
+        await new Promise(resolve => process.stdin.once('end', resolve));
+        const preview = stdinData.substring(0, 200).replace(/\n/g, '\\n');
+        emit({ type: 'message', role: 'assistant', content: `STDIN_RECEIVED:${stdinData.length}:${preview}`, delta: true });
+        emit({ type: 'result', status: 'success', stats: { total_tokens: 100, input_tokens: 50, output_tokens: 50, duration_ms: 10, tool_calls: 0 } });
     } else {
         // Default text
         emit({ type: 'message', role: 'assistant', content: 'Hello! This is a mock response.', delta: true });

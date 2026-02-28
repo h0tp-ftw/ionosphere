@@ -3,7 +3,7 @@ import EventEmitter from 'events';
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
-import { randomUUID } from 'crypto';
+
 import { createError, ErrorType, ErrorCode } from './errorHandler.js';
 
 /**
@@ -91,14 +91,12 @@ export class GeminiController {
 
             const args = ['-y', '-o', 'stream-json'];
 
-            // Write prompt to a temp file
-            const tempPromptPath = path.join(workspacePath, `prompt-${randomUUID()}.txt`);
-            fs.writeFileSync(tempPromptPath, text, 'utf-8');
-
-            // Pass attachments and the prompt file via the -p flag.
-            // Gemini CLI resolves @references in the positional query argument if joined.
-            const promptRefs = [...attachments, tempPromptPath].map(p => `@${p}`).join(' ');
-            args.push('-p', promptRefs);
+            // Feed main prompt text via stdin — bypasses read_many_files 2000-line truncation.
+            // Attachments (images, PDFs, etc.) still go as @refs via -p since they need binary handling.
+            if (attachments.length > 0) {
+                const attachmentRefs = attachments.map(p => `@${p}`).join(' ');
+                args.push('-p', attachmentRefs);
+            }
 
             let systemPromptPath = null;
             if (systemPrompt !== null) {
@@ -110,7 +108,7 @@ export class GeminiController {
             if (process.env.GEMINI_DEBUG_PROMPTS === 'true') {
                 const debugDir = path.join(this.cwd, 'debug_prompts');
                 if (!fs.existsSync(debugDir)) fs.mkdirSync(debugDir, { recursive: true });
-                fs.copyFileSync(tempPromptPath, path.join(debugDir, `turn-${turnId}-prompt.txt`));
+                fs.writeFileSync(path.join(debugDir, `turn-${turnId}-prompt.txt`), text, 'utf-8');
                 if (systemPromptPath) {
                     fs.copyFileSync(systemPromptPath, path.join(debugDir, `turn-${turnId}-system.md`));
                 }
@@ -153,19 +151,19 @@ export class GeminiController {
                 if (process.env.GEMINI_DEBUG_PROMPTS === 'true') {
                     const hijackedFrom = this.callbacksByTurn.get(turnId)?.hijackedFrom;
                     const context = hijackedFrom ? ` (Hijacked from ${hijackedFrom})` : "";
-                    console.log(`[GeminiController] TURN=${turnId}${context} PROMPT_FILE=${tempPromptPath} HASH=${extraEnv.IONOSPHERE_HISTORY_HASH || 'none'}`);
-                    try {
-                        const raw = fs.readFileSync(tempPromptPath, 'utf8');
-                        console.log(`[GeminiController] RAW PROMPT (First 500 chars):\n${raw.substring(0, 500)}...`);
-                    } catch (_) { }
+                    console.log(`[GeminiController] TURN=${turnId}${context} STDIN_PROMPT=true HASH=${extraEnv.IONOSPHERE_HISTORY_HASH || 'none'}`);
+                    console.log(`[GeminiController] RAW PROMPT (First 500 chars):\n${text.substring(0, 500)}...`);
                 }
 
                 const proc = spawn(executable, finalArgs, {
                     cwd: workspacePath,
                     env: spawnEnv,
-                    stdio: ['ignore', 'pipe', 'pipe'],
+                    stdio: ['pipe', 'pipe', 'pipe'],
                     shell: process.platform === 'win32',
                 });
+
+                // Write prompt text to stdin and signal EOF — complements any @ref attachments in -p
+                proc.stdin.end(text, 'utf-8');
 
                 proc.extraEnv = extraEnv; // Initialize with spawn env
                 proc.toolUsage = new Set(); // Track real tool calls in this turn
@@ -409,10 +407,6 @@ export class GeminiController {
                     }
 
                     this.processes.delete(turnId);
-
-                    try {
-                        if (fs.existsSync(tempPromptPath)) fs.unlinkSync(tempPromptPath);
-                    } catch (_) { }
 
                     if (code === 0 || code === null) {
                         // After successful completion, check for across-turn repetition

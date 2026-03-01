@@ -375,7 +375,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             hijackedTurnId = null;
         }
 
-        
+
         // Handle "New Instruction" Case (Preemption)
         if (hijackedTurnId) {
             const isToolMatch = matchType === 'tool_call';
@@ -414,7 +414,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                     activeTurnsByHash.delete(historyHash);
                     // Clean up any pending tool calls for the preempted turn
                     for (const [callKey, pending] of pendingToolCalls.entries()) {
-                    
+
                         if (pending.turnId === hijackedTurnId) {
                             pendingToolCalls.delete(callKey);
                         }
@@ -722,7 +722,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             if (!proc || proc.killed) {
                 console.log(`[API] Handoff failed: Turn ${hijackedTurnId} is no longer active. Falling back to fresh turn.`);
                 parkedTurns.delete(hijackedTurnId);
-                    hijackedTurnId = null;
+                hijackedTurnId = null;
                 // Fall through to NEW TURN CASE
             } else {
                 const isToolContinuation = lastMsg && (lastMsg.role === 'tool' || lastMsg.role === 'function');
@@ -743,7 +743,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                             console.log(`[API] Handoff Guard: New user instruction detected on parked turn ${hijackedTurnId}. Preempting.`);
                             controller.cancelCurrentTurn(hijackedTurnId);
                             parkedTurns.delete(hijackedTurnId);
-                    for (const [callKey, pending] of pendingToolCalls.entries()) {
+                            for (const [callKey, pending] of pendingToolCalls.entries()) {
                                 if (pending.turnId === hijackedTurnId) {
                                     pendingToolCalls.delete(callKey);
                                 }
@@ -1277,6 +1277,7 @@ const MODELS_LIST = [
     { id: "auto-gemini-3", context_window: 1000000, description: "Auto-selects an appropriate Gemini 3.0 model, and fallbacks if unavailable." },
     { id: "auto-gemini-2.5", context_window: 1000000, description: "Auto-selects an appropriate Gemini 2.5 model, and fallbacks if unavailable." },
     { id: "gemini-3-pro-preview", context_window: 1000000, description: "Gemini 3.0 Pro Preview" },
+    { id: "gemini-3.1-pro-preview", context_window: 1000000, description: "Gemini 3.1 Pro Preview" },
     { id: "gemini-3-flash-preview", context_window: 1000000, description: "Gemini 3.0 Flash Preview" },
     { id: "gemini-2.5-pro", context_window: 1000000, description: "Gemini 2.5 Pro" },
     { id: "gemini-2.5-flash", context_window: 1000000, description: "Gemini 2.5 Flash" },

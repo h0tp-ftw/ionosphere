@@ -1274,15 +1274,15 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 });
 
 const MODELS_LIST = [
-    { id: "auto-gemini-3", context_window: 1000000, description: "Auto-selects an appropriate Gemini 3.0 model, and fallbacks if unavailable." },
-    { id: "auto-gemini-2.5", context_window: 1000000, description: "Auto-selects an appropriate Gemini 2.5 model, and fallbacks if unavailable." },
-    { id: "gemini-3-pro-preview", context_window: 1000000, description: "Gemini 3.0 Pro Preview" },
-    { id: "gemini-3.1-pro-preview", context_window: 1000000, description: "Gemini 3.1 Pro Preview" },
-    { id: "gemini-3-flash-preview", context_window: 1000000, description: "Gemini 3.0 Flash Preview" },
-    { id: "gemini-2.5-pro", context_window: 1000000, description: "Gemini 2.5 Pro" },
-    { id: "gemini-2.5-flash", context_window: 1000000, description: "Gemini 2.5 Flash" },
-    { id: "gemini-2.5-flash-lite", context_window: 1000000, description: "Gemini 2.5 Flash Lite" },
-    { id: "gemini-2.0-flash", context_window: 1000000, description: "Gemini 2.0 Flash" }
+    { id: "auto-gemini-3", context_window: 700000, description: "Auto-selects an appropriate Gemini 3.0 model, and fallbacks if unavailable." },
+    { id: "auto-gemini-2.5", context_window: 700000, description: "Auto-selects an appropriate Gemini 2.5 model, and fallbacks if unavailable." },
+    { id: "gemini-3-pro-preview", context_window: 700000, description: "Gemini 3.0 Pro Preview" },
+    { id: "gemini-3.1-pro-preview", context_window: 700000, description: "Gemini 3.1 Pro Preview" },
+    { id: "gemini-3-flash-preview", context_window: 700000, description: "Gemini 3.0 Flash Preview" },
+    { id: "gemini-2.5-pro", context_window: 700000, description: "Gemini 2.5 Pro" },
+    { id: "gemini-2.5-flash", context_window: 700000, description: "Gemini 2.5 Flash" },
+    { id: "gemini-2.5-flash-lite", context_window: 700000, description: "Gemini 2.5 Flash Lite" },
+    { id: "gemini-2.0-flash", context_window: 700000, description: "Gemini 2.0 Flash" }
 ];
 
 app.get('/v1/models', (req, res) => {

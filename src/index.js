@@ -119,6 +119,8 @@ const PORT = process.env.PORT || 3000;
 const sessionMode = process.env.SESSION_MODE || 'stateless';
 console.log(`Starting Gemini Ionosphere (${sessionMode === 'stateful' ? 'Session-Aware' : 'Stateless'} Mode)...`);
 const controller = new GeminiController();
+const WARM_HANDOFF_ENABLED = process.env.WARM_HANDOFF_ENABLED !== 'false';
+console.log(`[Config] Warm Handoff: ${WARM_HANDOFF_ENABLED ? 'ENABLED' : 'DISABLED'}`);
 
 // Global state for Warm Stateless Handoff
 // pendingToolCalls: callKey -> { socket, turnId }
@@ -685,6 +687,10 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             // In Warm Stateless Handoff, we keep the CLI parked and alive.
             // It will be resolved by the next HTTP request (the tool result),
             // or cleaned up by the GC/finally block if abandoned.
+            if (!WARM_HANDOFF_ENABLED) {
+                console.log(`[Turn ${activeTurnId}] Cold Handoff: Terminating process after yielding response.`);
+                controller.cancelCurrentTurn(activeTurnId);
+            }
         };
 
         // (Concurrency Gating consolidated into section 2/2.5)
@@ -1079,6 +1085,8 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                                     cleanupWorkspace: () => fs.rmSync(turnTempDir, { recursive: true, force: true }),
                                     historyHash
                                 });
+                            } else if (!WARM_HANDOFF_ENABLED) {
+                                console.log(`[Turn ${activeTurnId}] Cold Handoff: Skipping parking for tool call ${msg.name}`);
                             }
 
                             // Trigger dispatcher

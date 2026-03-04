@@ -138,6 +138,7 @@ Any of the following model identifiers can be passed in the `model` field of the
 - `auto-gemini-3` (Auto-selecting Gemini 3)
 - `auto-gemini-2.5` (Auto-selecting Gemini 2.5)
 - `gemini-3-pro-preview`
+- `gemini-3.1-pro-preview`
 - `gemini-3-flash-preview`
 - `gemini-2.5-flash`
 - `gemini-2.5-pro`

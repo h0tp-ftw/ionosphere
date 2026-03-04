@@ -119,6 +119,8 @@ const PORT = process.env.PORT || 3000;
 const sessionMode = process.env.SESSION_MODE || 'stateless';
 console.log(`Starting Gemini Ionosphere (${sessionMode === 'stateful' ? 'Session-Aware' : 'Stateless'} Mode)...`);
 const controller = new GeminiController();
+const WARM_HANDOFF_ENABLED = process.env.WARM_HANDOFF_ENABLED !== 'false';
+console.log(`[Config] Warm Handoff: ${WARM_HANDOFF_ENABLED ? 'ENABLED' : 'DISABLED'}`);
 
 // Global state for Warm Stateless Handoff
 // pendingToolCalls: callKey -> { socket, turnId }
@@ -375,7 +377,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             hijackedTurnId = null;
         }
 
-        
+
         // Handle "New Instruction" Case (Preemption)
         if (hijackedTurnId) {
             const isToolMatch = matchType === 'tool_call';
@@ -414,7 +416,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                     activeTurnsByHash.delete(historyHash);
                     // Clean up any pending tool calls for the preempted turn
                     for (const [callKey, pending] of pendingToolCalls.entries()) {
-                    
+
                         if (pending.turnId === hijackedTurnId) {
                             pendingToolCalls.delete(callKey);
                         }
@@ -685,6 +687,10 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             // In Warm Stateless Handoff, we keep the CLI parked and alive.
             // It will be resolved by the next HTTP request (the tool result),
             // or cleaned up by the GC/finally block if abandoned.
+            if (!WARM_HANDOFF_ENABLED) {
+                console.log(`[Turn ${activeTurnId}] Cold Handoff: Terminating process after yielding response.`);
+                controller.cancelCurrentTurn(activeTurnId);
+            }
         };
 
         // (Concurrency Gating consolidated into section 2/2.5)
@@ -722,7 +728,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             if (!proc || proc.killed) {
                 console.log(`[API] Handoff failed: Turn ${hijackedTurnId} is no longer active. Falling back to fresh turn.`);
                 parkedTurns.delete(hijackedTurnId);
-                    hijackedTurnId = null;
+                hijackedTurnId = null;
                 // Fall through to NEW TURN CASE
             } else {
                 const isToolContinuation = lastMsg && (lastMsg.role === 'tool' || lastMsg.role === 'function');
@@ -743,7 +749,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                             console.log(`[API] Handoff Guard: New user instruction detected on parked turn ${hijackedTurnId}. Preempting.`);
                             controller.cancelCurrentTurn(hijackedTurnId);
                             parkedTurns.delete(hijackedTurnId);
-                    for (const [callKey, pending] of pendingToolCalls.entries()) {
+                            for (const [callKey, pending] of pendingToolCalls.entries()) {
                                 if (pending.turnId === hijackedTurnId) {
                                     pendingToolCalls.delete(callKey);
                                 }
@@ -1079,6 +1085,8 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                                     cleanupWorkspace: () => fs.rmSync(turnTempDir, { recursive: true, force: true }),
                                     historyHash
                                 });
+                            } else if (!WARM_HANDOFF_ENABLED) {
+                                console.log(`[Turn ${activeTurnId}] Cold Handoff: Skipping parking for tool call ${msg.name}`);
                             }
 
                             // Trigger dispatcher
@@ -1274,14 +1282,15 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 });
 
 const MODELS_LIST = [
-    { id: "auto-gemini-3", context_window: 1000000, description: "Auto-selects an appropriate Gemini 3.0 model, and fallbacks if unavailable." },
-    { id: "auto-gemini-2.5", context_window: 1000000, description: "Auto-selects an appropriate Gemini 2.5 model, and fallbacks if unavailable." },
-    { id: "gemini-3-pro-preview", context_window: 1000000, description: "Gemini 3.0 Pro Preview" },
-    { id: "gemini-3-flash-preview", context_window: 1000000, description: "Gemini 3.0 Flash Preview" },
-    { id: "gemini-2.5-pro", context_window: 1000000, description: "Gemini 2.5 Pro" },
-    { id: "gemini-2.5-flash", context_window: 1000000, description: "Gemini 2.5 Flash" },
-    { id: "gemini-2.5-flash-lite", context_window: 1000000, description: "Gemini 2.5 Flash Lite" },
-    { id: "gemini-2.0-flash", context_window: 1000000, description: "Gemini 2.0 Flash" }
+    { id: "auto-gemini-3", context_window: 700000, description: "Auto-selects an appropriate Gemini 3.0 model, and fallbacks if unavailable." },
+    { id: "auto-gemini-2.5", context_window: 700000, description: "Auto-selects an appropriate Gemini 2.5 model, and fallbacks if unavailable." },
+    { id: "gemini-3-pro-preview", context_window: 700000, description: "Gemini 3.0 Pro Preview" },
+    { id: "gemini-3.1-pro-preview", context_window: 700000, description: "Gemini 3.1 Pro Preview" },
+    { id: "gemini-3-flash-preview", context_window: 700000, description: "Gemini 3.0 Flash Preview" },
+    { id: "gemini-2.5-pro", context_window: 700000, description: "Gemini 2.5 Pro" },
+    { id: "gemini-2.5-flash", context_window: 700000, description: "Gemini 2.5 Flash" },
+    { id: "gemini-2.5-flash-lite", context_window: 700000, description: "Gemini 2.5 Flash Lite" },
+    { id: "gemini-2.0-flash", context_window: 700000, description: "Gemini 2.0 Flash" }
 ];
 
 app.get('/v1/models', (req, res) => {

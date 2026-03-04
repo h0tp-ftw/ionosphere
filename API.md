@@ -180,6 +180,12 @@ curl http://localhost:3000/v1/models -H "Authorization: Bearer <your-api-key>"
       "owned_by": "google"
     },
     {
+      "id": "gemini-3.1-pro-preview",
+      "object": "model",
+      "created": 1686935002,
+      "owned_by": "google"
+    },
+    {
       "id": "gemini-3-flash-preview",
       "object": "model",
       "created": 1686935002,

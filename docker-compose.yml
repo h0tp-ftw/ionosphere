@@ -23,7 +23,7 @@ services:
       - GEMINI_DEBUG_IPC=${GEMINI_DEBUG_IPC:-true}
       - GEMINI_DEBUG_RAW=${GEMINI_DEBUG_RAW:-true}
       - GEMINI_MAX_TURNS=${GEMINI_MAX_TURNS:-50}
-      - WARM_HANDOFF_ENABLED=${WARM_HANDOFF_ENABLED:-false}
+      - WARM_HANDOFF_ENABLED=${WARM_HANDOFF_ENABLED:-true}
       - CI=${CI:-true}
     command: node src/index.js
     ports:

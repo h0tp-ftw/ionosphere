@@ -230,8 +230,8 @@ export class GeminiController {
                         if (content) {
                             // Intercept "leaked" tool calls that the model might write as text heritage
                             // NEW FORMAT: <action id="...">Called tool '...' with args: ...</action>
-                            const actionRegex = /<action id="([^"]*)">Called tool '([^']+)' with args: (.*?)<\/action>/gs;
-                            const resultRegex = /<result id="([^"]*)">([\s\S]*?)<\/result>/gs;
+                            const actionRegex = /<action id="([^"]*)"[^>]*>Called tool '([^']+)' with args: (.*?)<\/action>/gs;
+                            const resultRegex = /<result id="([^"]*)">[\s\S]*?<\/result>/gs;
                             let match;
                             let cleanedContent = content;
 
@@ -278,8 +278,22 @@ export class GeminiController {
                                 }
                             }
 
-                            // Remove both action and result tags from the text before sending it to the client
-                            cleanedContent = content.replace(actionRegex, '').replace(resultRegex, '');
+                            // Strip <tool_code>print(...)</tool_code> blocks.
+                            // These are emitted by the Gemini model's pre-training code-execution behavior and
+                            // are NOT routed through any tool execution path in this pipeline — they are phantom
+                            // output that must be removed to prevent leaking raw XML into the chat reply stream.
+                            if (content.includes('<tool_code>') && process.env.GEMINI_DEBUG_RESPONSES === 'true') {
+                                console.log(`[GeminiController] Stripping <tool_code> block(s) from message text for Turn ${turnId}`);
+                            }
+
+                            // Remove action, result, and tool_code tags from the text before sending it to the client.
+                            // Use fresh RegExp instances for each replace() call to avoid lastIndex state interference
+                            // from the exec() loops above (which share the same /gs regex objects).
+                            cleanedContent = content
+                                .replace(/<action id="([^"]*)"[^>]*>Called tool '([^']+)' with args: (.*?)<\/action>/gs, '')
+                                .replace(/<result id="([^"]*)">[\s\S]*?<\/result>/gs, '')
+                                .replace(/<tool_code>[\s\S]*?<\/tool_code>/g, '');
+
                             if (cleanedContent) {
                                 proc.accumulatedText += cleanedContent;
                                 if (activeCallbacks.onText) {

@@ -29,13 +29,8 @@ export const getConversationFingerprint = (messages) => {
             text = content.map(p => (typeof p === 'object' && p.type === 'text') ? p.text : "").join("");
         }
 
-        // Drift Resistance: Try to isolate the core <user_message>
-        const userMsgMatch = text.match(/<user_message>([\s\S]*?)<\/user_message>/);
-        if (userMsgMatch) text = userMsgMatch[1];
-        else {
-            // Fallback: Strip known dynamic blocks like <environment_details>
-            text = text.replace(/<environment_details>[\s\S]*?<\/environment_details>/g, "");
-        }
+        // Use the text as-is for fingerprinting (normalization follows)
+        // (Legacy XML tag stripping removed)
 
         // Normalization: Remove all non-alphanumeric for fingerprint anchor
         return text.toLowerCase().replace(/[^a-z0-9]/g, "").trim();

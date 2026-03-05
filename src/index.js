@@ -981,9 +981,8 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                     }
 
                     if (msg.role === 'user') {
-                        // History Deduplication: Strip environment details from non-latest messages to prevent prompt bloat
+                        // History Deduplication: Prevent prompt bloat in older messages
                         if (msg !== lastUserMsg) {
-                            text = text.replace(/<environment_details>[\s\S]*?<\/environment_details>/g, "[Environment details stripped for brevity]");
                             conversationPromptSection += `USER: ${text}\n\n`;
                         } else {
                             // Highlight the latest instruction specifically to help with context drift in large prompts

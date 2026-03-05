@@ -59,7 +59,6 @@ export class StreamingCleaner {
         const actionRegex = /\[Action \(id: ([^)]*)\): Called tool '([^']+)' with args: (.*?)\]/gs;
         const lookahead = isFinal ? '(?=\\n\\n|\\[Action|\\[Tool Result|USER:|$)' : '(?=\\n\\n|\\[Action|\\[Tool Result|USER:)';
         const resultRegex = new RegExp(`\\[Tool Result \\(id: ([^)]*)\\)\\]:[^]*?${lookahead}`, 'gs');
-        const toolCodeRegex = /<tool_code>[^]*?<\/tool_code>/g;
 
         // Before stripping, intercept "leaked" tool calls for Turn forensics/hijacking.
         // We only do this if we find a complete tag.
@@ -91,8 +90,7 @@ export class StreamingCleaner {
         // Perform cleaning on the buffer
         let cleaned = this.buffer
             .replace(actionRegex, '')
-            .replace(resultRegex, '')
-            .replace(toolCodeRegex, '');
+            .replace(resultRegex, '');
 
         // Safely emit text that is NOT likely part of a pending tag or lookahead.
         // We buffer aggressively if not final.

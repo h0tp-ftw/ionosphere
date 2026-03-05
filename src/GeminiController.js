@@ -229,9 +229,9 @@ export class GeminiController {
                         const content = (typeof json.content === 'object') ? json.content.text : json.content;
                         if (content) {
                             // Intercept "leaked" tool calls that the model might write as text heritage
-                            // NEW FORMAT: <action id="...">Called tool '...' with args: ...</action>
-                            const actionRegex = /<action id="([^"]*)"[^>]*>Called tool '([^']+)' with args: (.*?)<\/action>/gs;
-                            const resultRegex = /<result id="([^"]*)">[\s\S]*?<\/result>/gs;
+                            // NEW FORMAT: [Action (id: ...): Called tool '...' with args: ...]
+                            const actionRegex = /\[Action \(id: ([^)]*)\): Called tool '([^']+)' with args: (.*?)\]/gs;
+                            const resultRegex = /\[Tool Result \(id: ([^)]*)\)\]:[\s\S]*?(?=\n\n|\[Action|\[Tool Result|USER:|$)/gs;
                             let match;
                             let cleanedContent = content;
 
@@ -290,8 +290,8 @@ export class GeminiController {
                             // Use fresh RegExp instances for each replace() call to avoid lastIndex state interference
                             // from the exec() loops above (which share the same /gs regex objects).
                             cleanedContent = content
-                                .replace(/<action id="([^"]*)"[^>]*>Called tool '([^']+)' with args: (.*?)<\/action>/gs, '')
-                                .replace(/<result id="([^"]*)">[\s\S]*?<\/result>/gs, '')
+                                .replace(/\[Action \(id: ([^)]*)\): Called tool '([^']+)' with args: (.*?)\]/gs, '')
+                                .replace(/\[Tool Result \(id: ([^)]*)\)\]:[\s\S]*?(?=\n\n|\[Action|\[Tool Result|USER:|$)/gs, '')
                                 .replace(/<tool_code>[\s\S]*?<\/tool_code>/g, '');
 
                             if (cleanedContent) {

@@ -987,7 +987,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                             conversationPromptSection += `USER: ${text}\n\n`;
                         } else {
                             // Highlight the latest instruction specifically to help with context drift in large prompts
-                            conversationPromptSection += `\n<LATEST_USER_INSTRUCTION>\nUSER: ${text}\n</LATEST_USER_INSTRUCTION>\n\n`;
+                            conversationPromptSection += `\n[LATEST INSTRUCTION]\nUSER: ${text}\n\n`;
                         }
                     }
                     else if (msg.role === 'assistant') {
@@ -1000,19 +1000,18 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                                 // Consistency Normalization: History now uses natural names.
                                 // Collisions are prevented by the hardened CLI environment.
 
-                                // Handle both string arguments (OpenAI format) and object arguments (accumulatedToolCalls)
                                 const argsStr = typeof (tc.function?.arguments || tc.arguments) === 'string'
                                     ? (tc.function?.arguments || tc.arguments)
                                     : JSON.stringify(tc.function?.arguments || tc.arguments || {});
 
-                                content += `\n<action id="${callId}">Called tool '${toolName}' with args: ${argsStr}</action>`;
+                                content += `\n[Action (id: ${callId}): Called tool '${toolName}' with args: ${argsStr}]`;
                             }
                         }
                         conversationPromptSection += `ASSISTANT: ${content.trim()}\n\n`;
                     } else if (msg.role === 'tool' || msg.role === 'function') {
                         const callId = msg.tool_call_id || 'unknown';
                         const resultStr = typeof text === 'string' ? text : JSON.stringify(text);
-                        conversationPromptSection += `<result id="${callId}">\n${resultStr}\n</result>\n\n`;
+                        conversationPromptSection += `[Tool Result (id: ${callId})]:\n${resultStr}\n\n`;
                     }
                 }
             }

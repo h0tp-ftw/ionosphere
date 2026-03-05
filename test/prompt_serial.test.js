@@ -31,6 +31,10 @@ function serializeMessages(messages, turnTempDir) {
     let conversationPrompt = '';
     let imageCounter = 0;
 
+    // Filter only user messages to determine which is the last one
+    const userMessages = messages.filter(m => m.role === 'user');
+    const lastUserMsg = userMessages[userMessages.length - 1];
+
     for (const msg of messages) {
         if (msg.role === 'system') {
             let text = Array.isArray(msg.content)
@@ -60,20 +64,25 @@ function serializeMessages(messages, turnTempDir) {
             }
 
             if (msg.role === 'user') {
-                conversationPrompt += `USER: ${textContent}\n\n`;
+                if (msg === lastUserMsg) {
+                    conversationPrompt += `\n[LATEST INSTRUCTION]\nUSER: ${textContent}\n\n`;
+                } else {
+                    conversationPrompt += `USER: ${textContent}\n\n`;
+                }
             } else if (msg.role === 'assistant') {
                 let content = textContent;
                 if (msg.tool_calls && msg.tool_calls.length > 0) {
                     for (const tc of msg.tool_calls) {
+                        const id = tc.id || 'unknown';
                         const name = tc.function?.name || tc.name || 'unknown';
                         const args = tc.function?.arguments || tc.arguments || '{}';
-                        content += `\n[ACTION: Called tool '${name}' with args: ${args}]`;
+                        content += `\n[Action (id: ${id}): Called tool '${name}' with args: ${args}]`;
                     }
                 }
                 conversationPrompt += `ASSISTANT: ${content.trim()}\n\n`;
             } else if (msg.role === 'tool' || msg.role === 'function') {
-                const toolName = msg.name || msg.tool_call_id || 'unknown';
-                conversationPrompt += `[TOOL RESULT (${toolName})]:\n${textContent}\n\n`;
+                const callId = msg.tool_call_id || msg.name || 'unknown';
+                conversationPrompt += `[Tool Result (id: ${callId})]:\n${textContent}\n\n`;
             }
         }
     }
@@ -114,7 +123,8 @@ test('prompt_serial - user message is prefixed with USER:', () => {
         { role: 'user', content: 'Hello there.' }
     ], os.tmpdir());
 
-    assert.match(prompt, /^USER: Hello there\./);
+    assert.match(prompt, /USER: Hello there\./);
+    assert.match(prompt, /\[LATEST INSTRUCTION\]/);
 });
 
 // ─── Assistant Messages ───────────────────────────────────────────────────────
@@ -138,7 +148,7 @@ test('prompt_serial - assistant tool_calls are narrated with ACTION format', () 
         }]
     }], os.tmpdir());
 
-    assert.match(prompt, /\[ACTION: Called tool 'get_weather' with args: \{"city":"London"\}\]/);
+    assert.match(prompt, /\[Action \(id: call_abc\): Called tool 'get_weather' with args: \{"city":"London"\}\]/);
 });
 
 test('prompt_serial - multiple tool_calls all narrated', () => {
@@ -164,7 +174,7 @@ test('prompt_serial - role:tool produces TOOL RESULT block with tool_call_id', (
         content: 'Sunny, 22°C'
     }], os.tmpdir());
 
-    assert.match(prompt, /\[TOOL RESULT \(call_abc\)\]:/);
+    assert.match(prompt, /\[Tool Result \(id: call_abc\)\]:/);
     assert.match(prompt, /Sunny, 22°C/);
 });
 
@@ -175,7 +185,7 @@ test('prompt_serial - role:function also produces TOOL RESULT block', () => {
         content: 'Rainy'
     }], os.tmpdir());
 
-    assert.match(prompt, /\[TOOL RESULT \(get_weather\)\]/);
+    assert.match(prompt, /\[Tool Result \(id: get_weather\)\]/);
 });
 
 // ─── Sanitization ─────────────────────────────────────────────────────────────
@@ -247,8 +257,9 @@ test('prompt_serial - full conversation serializes correctly in order', () => {
     ], os.tmpdir());
 
     const parts = prompt.split('\n\n').filter(Boolean);
-    assert.ok(parts[0].startsWith('USER: What time is it?'));
-    assert.ok(parts[1].includes('ACTION: Called tool \'get_time\''));
-    assert.ok(parts[2].includes('TOOL RESULT (call_t1)'));
-    assert.ok(parts[3].startsWith('USER: Thanks!'));
+    assert.ok(parts[0].includes('USER: What time is it?'));
+    assert.ok(parts[1].includes('Action (id: unknown): Called tool \'get_time\''));
+    assert.ok(parts[2].includes('Tool Result (id: call_t1)'));
+    assert.ok(parts[3].includes('USER: Thanks!'));
+    assert.ok(parts[3].includes('[LATEST INSTRUCTION]'));
 });

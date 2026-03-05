@@ -36,6 +36,101 @@ export class JsonlAccumulator extends EventEmitter {
 }
 
 /**
+ * Buffers text chunks to ensure that tags (like [Action...]) and newlines 
+ * are not incorrectly stripped or leaked when split across chunks.
+ */
+export class StreamingCleaner {
+    constructor(on_text, turnId, processes) {
+        this.on_text = on_text;
+        this.turnId = turnId;
+        this.processes = processes;
+        this.buffer = '';
+    }
+
+    push(chunk) {
+        this.buffer += chunk;
+        this.process(false);
+    }
+
+    process(isFinal = false) {
+        // Regexes used for cleaning. 
+        // IMPORTANT: 'resultRegex' lookahead must NOT include '$' unless it's the final flush,
+        // otherwise it will consume trailing text as if it were part of a result tag.
+        const actionRegex = /\[Action \(id: ([^)]*)\): Called tool '([^']+)' with args: (.*?)\]/gs;
+        const lookahead = isFinal ? '(?=\\n\\n|\\[Action|\\[Tool Result|USER:|$)' : '(?=\\n\\n|\\[Action|\\[Tool Result|USER:)';
+        const resultRegex = new RegExp(`\\[Tool Result \\(id: ([^)]*)\\)\\]:[^]*?${lookahead}`, 'gs');
+        const toolCodeRegex = /<tool_code>[^]*?<\/tool_code>/g;
+
+        // Before stripping, intercept "leaked" tool calls for Turn forensics/hijacking.
+        // We only do this if we find a complete tag.
+        let match;
+        const proc = this.processes.get(this.turnId);
+        if (proc && proc.activeCallbacks) {
+            const tempActionRegex = new RegExp(actionRegex);
+            while ((match = tempActionRegex.exec(this.buffer)) !== null) {
+                const [fullMatch, callId, toolName, argsStr] = match;
+                const alreadySeen = Array.from(proc.toolUsage || []).includes(toolName);
+                const isLikelyHallucination = !argsStr || argsStr.trim() === '{}' || argsStr.trim().length < 2;
+
+                if (!alreadySeen && !isLikelyHallucination) {
+                    if (process.env.GEMINI_DEBUG_RESPONSES === 'true') {
+                        console.log(`[GeminiController] Intercepted leaked tool call in streaming buffer for Turn ${this.turnId}: ${toolName} (${callId})`);
+                    }
+                    if (proc.activeCallbacks.onToolCall) {
+                        proc.activeCallbacks.onToolCall({
+                            id: callId.startsWith('leak_') ? callId : `leak_${callId}`,
+                            name: toolName,
+                            arguments: argsStr.trim()
+                        });
+                    }
+                    proc.toolUsage.add(toolName);
+                }
+            }
+        }
+
+        // Perform cleaning on the buffer
+        let cleaned = this.buffer
+            .replace(actionRegex, '')
+            .replace(resultRegex, '')
+            .replace(toolCodeRegex, '');
+
+        // Safely emit text that is NOT likely part of a pending tag or lookahead.
+        // We buffer aggressively if not final.
+        if (isFinal) {
+            if (cleaned) this.on_text(cleaned);
+            this.buffer = '';
+        } else {
+            const bufferMargin = 200; // Increased to handle long tool arguments
+            const safeLength = cleaned.length - bufferMargin;
+            if (safeLength > 0) {
+                // Find the latest point that is definitely NOT part of a tag prefix.
+                // We look for the LAST occurrence of '[', '<', or even '\n' (as it might be part of \n\n)
+                const lastTagStart = Math.max(cleaned.lastIndexOf('['), cleaned.lastIndexOf('<'));
+                const lastBoundary = Math.max(lastTagStart, cleaned.lastIndexOf('\n'));
+
+                let emitEnd = cleaned.length;
+                if (lastBoundary !== -1 && lastBoundary > safeLength) {
+                    emitEnd = lastBoundary;
+                } else if (lastBoundary === -1) {
+                    // No potential tags in the last 200 chars, safe to emit
+                    emitEnd = cleaned.length;
+                }
+
+                const toEmit = cleaned.slice(0, emitEnd);
+                if (toEmit) {
+                    this.on_text(toEmit);
+                    this.buffer = cleaned.slice(emitEnd);
+                }
+            }
+        }
+    }
+
+    flush() {
+        this.process(true);
+    }
+}
+
+/**
  * GeminiController — Stateless CLI Spawner
  */
 export class GeminiController {
@@ -218,6 +313,7 @@ export class GeminiController {
 
                 accumulator.on('line', (json) => {
                     const activeCallbacks = this.callbacksByTurn.get(turnId) || {};
+                    proc.activeCallbacks = activeCallbacks; // Shared reference for StreamingCleaner
 
                     if (process.env.GEMINI_DEBUG_RAW === 'true') {
                         console.log(`[Turn ${turnId}] CLI Raw Line: ${JSON.stringify(json)}`);
@@ -228,81 +324,21 @@ export class GeminiController {
                     if (json.type === 'message' && json.role === 'assistant') {
                         const content = (typeof json.content === 'object') ? json.content.text : json.content;
                         if (content) {
-                            // Intercept "leaked" tool calls that the model might write as text heritage
-                            // NEW FORMAT: [Action (id: ...): Called tool '...' with args: ...]
-                            const actionRegex = /\[Action \(id: ([^)]*)\): Called tool '([^']+)' with args: (.*?)\]/gs;
-                            const resultRegex = /\[Tool Result \(id: ([^)]*)\)\]:[\s\S]*?(?=\n\n|\[Action|\[Tool Result|USER:|$)/gs;
-                            let match;
-                            let cleanedContent = content;
-
-                            while ((match = actionRegex.exec(content)) !== null) {
-                                const [fullMatch, callId, toolName, argsStr] = match;
-
-                                // HACK: Only dispatch the leak if we HAVEN'T already seen a real tool call for this name in this turn
-                                // This prevents the "Echo Loop" where history narration triggers a new call.
-                                const alreadySeen = Array.from(this.processes.get(turnId)?.toolUsage || []).includes(toolName);
-                                const isLikelyHallucination = !argsStr || argsStr.trim() === '{}' || argsStr.trim().length < 2;
-
-                                if (!alreadySeen && !isLikelyHallucination) {
-                                    if (process.env.GEMINI_DEBUG_RESPONSES === 'true') {
-                                        console.log(`[GeminiController] Intercepted leaked tool call in text for Turn ${turnId}: ${toolName} (${callId})`);
+                            // Use StreamingCleaner logic to handle chunk-boundary state
+                            if (!proc.cleaner) {
+                                proc.cleaner = new StreamingCleaner((text) => {
+                                    proc.accumulatedText += text;
+                                    if (activeCallbacks.onText) {
+                                        activeCallbacks.onText(text);
                                     }
-
-                                    // Apply Repeat Breaker to leaks too!
-                                    let parsedArgs = {};
-                                    try { parsedArgs = JSON.parse(argsStr); } catch (e) { }
-                                    if (checkRepeatLimit(toolName, parsedArgs) === 'KILL') return;
-
-                                    if (activeCallbacks.onToolCall) {
-                                        activeCallbacks.onToolCall({
-                                            id: callId.startsWith('leak_') ? callId : `leak_${callId}`,
-                                            name: toolName,
-                                            arguments: argsStr.trim()
-                                        });
-                                    }
-                                } else if (isLikelyHallucination) {
-                                    if (process.env.GEMINI_DEBUG_RESPONSES === 'true') {
-                                        console.log(`[GeminiController] Ignoring likely hallucinated tool call leak: ${toolName} with args: ${argsStr}`);
-                                    }
-                                } else {
-                                    if (process.env.GEMINI_DEBUG_RESPONSES === 'true') {
-                                        console.log(`[GeminiController] Suppressing echo-leak for tool '${toolName}' on Turn ${turnId}. (Already called in this turn)`);
-                                    }
-                                }
+                                }, turnId, this.processes);
                             }
-
-                            // Suppress echoed results as well
-                            while ((match = resultRegex.exec(content)) !== null) {
-                                if (process.env.GEMINI_DEBUG_RESPONSES === 'true') {
-                                    console.log(`[GeminiController] Suppressing echo-leak for result: ${match[1]}`);
-                                }
-                            }
-
-                            // Strip <tool_code>print(...)</tool_code> blocks.
-                            // These are emitted by the Gemini model's pre-training code-execution behavior and
-                            // are NOT routed through any tool execution path in this pipeline — they are phantom
-                            // output that must be removed to prevent leaking raw XML into the chat reply stream.
-                            if (content.includes('<tool_code>') && process.env.GEMINI_DEBUG_RESPONSES === 'true') {
-                                console.log(`[GeminiController] Stripping <tool_code> block(s) from message text for Turn ${turnId}`);
-                            }
-
-                            // Remove action, result, and tool_code tags from the text before sending it to the client.
-                            // Use fresh RegExp instances for each replace() call to avoid lastIndex state interference
-                            // from the exec() loops above (which share the same /gs regex objects).
-                            cleanedContent = content
-                                .replace(/\[Action \(id: ([^)]*)\): Called tool '([^']+)' with args: (.*?)\]/gs, '')
-                                .replace(/\[Tool Result \(id: ([^)]*)\)\]:[\s\S]*?(?=\n\n|\[Action|\[Tool Result|USER:|$)/gs, '')
-                                .replace(/<tool_code>[\s\S]*?<\/tool_code>/g, '');
-
-                            if (cleanedContent) {
-                                proc.accumulatedText += cleanedContent;
-                                if (activeCallbacks.onText) {
-                                    activeCallbacks.onText(cleanedContent);
-                                }
-                            }
+                            proc.cleaner.push(content);
                         }
-
                     } else if (json.type === 'tool_use' || json.type === 'toolCall') {
+                        // Flush any pending text before a tool use event
+                        if (proc.cleaner) proc.cleaner.flush();
+
                         const toolName = json.tool_name || json.name;
                         const argsObj = json.arguments || {};
 
@@ -415,6 +451,8 @@ export class GeminiController {
                     clearTimeout(timeout);
                     const usageSummary = Array.from(this.processes.get(turnId)?.toolUsage || []).join(', ') || 'none';
                     console.log(`[GeminiController] Process closed for turn ${turnId} with code ${code}. Tool Usage: [${usageSummary}]`);
+
+                    if (proc.cleaner) proc.cleaner.flush();
 
                     if (accumulator.buffer) {
                         accumulator.push('\n');

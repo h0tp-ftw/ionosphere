@@ -89,6 +89,7 @@ if (fs.existsSync(configTarget)) {
 
             const disableTools = process.env.GEMINI_DISABLE_TOOLS === 'true';
             const disableSearch = process.env.GEMINI_DISABLE_WEB_SEARCH === 'true';
+            const hardened = process.env.GEMINI_HARDENED === 'true';
 
             // Essential list that is ALWAYS allowed (attachments)
             const internalAllowList = ['read_many_files'];
@@ -101,6 +102,9 @@ if (fs.existsSync(configTarget)) {
             if (!isAllowed) {
                 if (searchTools.includes(toolName) || searchTools.includes(normalizedClassName)) {
                     isAllowed = !disableSearch;
+                } else if (hardened) {
+                    // [HARDENING] Strict mode: ONLY internalAllowList (and Search) are allowed.
+                    isAllowed = false;
                 } else {
                     // All other native tools (filesystem, etc)
                     isAllowed = !disableTools;

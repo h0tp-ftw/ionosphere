@@ -1283,12 +1283,34 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 // Use fingerprint for concurrency gating to catch retries/metadata shifts
                 activeTurnsByHash.set(fingerprint, activeTurnId);
                 activeTurnsByHash.set(historyHash, activeTurnId);
-                const promptText = (conversationPromptSection || conversationPrompt).trim();
+                let promptText = (conversationPromptSection || conversationPrompt).trim();
+
+                // Active Repetition Mitigation: If the model has been repeating itself,
+                // inject a directive to break the loop before it starts.
+                const repeatMitigation = controller.getRepeatMitigation(historyHash);
+                if (repeatMitigation) {
+                    console.warn(`[Turn ${activeTurnId}] REPEAT MITIGATION ACTIVE: Injecting anti-repetition directive.`);
+                    promptText += repeatMitigation;
+                }
+
                 const promptSize = promptText.length;
-                console.log(`[Turn ${activeTurnId}] Executing for fingerprint: ${fingerprint} (Prompt Size: ${promptSize} chars)`);
+                console.log(`[Turn ${activeTurnId}] Executing for fingerprint: ${fingerprint} (Prompt Size: ${promptSize} chars, Messages: ${messages.length}, Hash: ${historyHash.substring(0, 8)})`);
 
                 if (promptSize > 300000) {
                     console.warn(`[Turn ${activeTurnId}] WARNING: Large prompt detected (${promptSize} chars). Model may experience drift or ignore recent instructions.`);
+                }
+
+                // ROOT CAUSE FORENSICS: Log the exact prompt tail and history structure
+                // to help diagnose WHY the model enters repetition loops.
+                if (process.env.GEMINI_DEBUG_REPETITION === 'true') {
+                    const msgSummary = messages.map((m, i) => `  [${i}] ${m.role}${m.tool_call_id ? ` (tool:${m.tool_call_id})` : ''}: ${(typeof m.content === 'string' ? m.content : JSON.stringify(m.content) || '').substring(0, 80)}...`).join('\n');
+                    console.log(`[REPETITION FORENSICS] Turn ${activeTurnId}\n  Hash: ${historyHash}\n  Fingerprint: ${fingerprint}\n  Message count: ${messages.length}\n  Prompt size: ${promptSize}\n  Repeat tracker entry: ${JSON.stringify(controller.textRepeatTracker.get(historyHash) || 'none')}\n  Messages:\n${msgSummary}\n  Prompt tail (last 500 chars):\n${promptText.slice(-500)}`);
+
+                    // Save full prompt to debug_prompts for offline analysis
+                    const debugDir = path.join(process.cwd(), 'debug_prompts');
+                    if (!fs.existsSync(debugDir)) fs.mkdirSync(debugDir, { recursive: true });
+                    fs.writeFileSync(path.join(debugDir, `repetition-forensic-${activeTurnId}.txt`), promptText, 'utf-8');
+                    fs.writeFileSync(path.join(debugDir, `repetition-forensic-${activeTurnId}-messages.json`), JSON.stringify(messages, null, 2), 'utf-8');
                 }
 
                 await controller.sendPrompt(activeTurnId, promptText, turnTempDir, settingsPath, systemMessage.trim(), allCallbacks, {

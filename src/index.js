@@ -217,8 +217,12 @@ setInterval(() => {
                     if (now - stats.mtimeMs > 15 * 60 * 1000) {
                         // Check if turn is still parked
                         if (!parkedTurns.has(entry.name)) {
-                            console.log(`[GC] Sweeping abandoned workspace: ${entry.name}`);
-                            fs.rmSync(dirPath, { recursive: true, force: true });
+                            if (process.env.GEMINI_DEBUG_KEEP_TEMP === 'true') {
+                                console.log(`[GC] Skipping cleanup of workspace due to GEMINI_DEBUG_KEEP_TEMP: ${entry.name}`);
+                            } else {
+                                console.log(`[GC] Sweeping abandoned workspace: ${entry.name}`);
+                                fs.rmSync(dirPath, { recursive: true, force: true });
+                            }
                         }
                     }
                 }
@@ -453,6 +457,18 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         let finalStats = null;
         let responseSent = false;
 
+        const turnTempDir = path.join(baseTempDir, activeTurnId); // Needed early for parsed logger
+
+        const logParsedOutput = (data) => {
+            if (process.env.GEMINI_DEBUG_KEEP_TEMP === 'true') {
+                try {
+                    const parsedFile = path.join(turnTempDir, 'cli_parsed_output.txt');
+                    const toLog = typeof data === 'string' ? data : JSON.stringify(data, null, 2) + '\n';
+                    fs.appendFileSync(parsedFile, toLog);
+                } catch (e) { }
+            }
+        };
+
         if (isStreaming) {
             res.setHeader('Content-Type', 'text/event-stream');
             res.setHeader('Cache-Control', 'no-cache');
@@ -485,6 +501,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
         const sendChunk = (chunk) => {
             if (isStreaming && !res.writableEnded) {
+                logParsedOutput(chunk);
                 res.write(`data: ${JSON.stringify(chunk)}\n\n`);
             }
         };
@@ -569,7 +586,10 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 sendChunk({ error: errorObj });
                 if (!res.writableEnded) res.end();
             } else {
-                if (!res.headersSent) res.status(status).json({ error: errorObj });
+                if (!res.headersSent) {
+                    logParsedOutput({ error: errorObj });
+                    res.status(status).json({ error: errorObj });
+                }
             }
             if (heartbeatInterval) clearInterval(heartbeatInterval);
         };
@@ -596,12 +616,13 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                     }
                 });
                 if (!res.writableEnded) {
+                    logParsedOutput('data: [DONE]\n\n');
                     res.write('data: [DONE]\n\n');
                     res.end();
                 }
             } else {
                 if (!res.headersSent) {
-                    res.json({
+                    const payload = {
                         id: `chatcmpl-${randomUUID()}`,
                         object: 'chat.completion',
                         created: Math.floor(Date.now() / 1000),
@@ -620,7 +641,9 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                             completion_tokens: finalStats.output_tokens || 0,
                             total_tokens: (finalStats.input_tokens || 0) + (finalStats.output_tokens || 0)
                         }
-                    });
+                    };
+                    logParsedOutput(payload);
+                    res.json(payload);
                 }
             }
             if (heartbeatInterval) clearInterval(heartbeatInterval);
@@ -672,6 +695,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                     }]
                 });
                 if (!res.writableEnded) {
+                    logParsedOutput('data: [DONE]\n\n');
                     res.write('data: [DONE]\n\n');
                     res.end();
                 }
@@ -696,6 +720,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                         total_tokens: (finalStats?.input_tokens || 0) + (finalStats?.output_tokens || 0)
                     }
                 };
+                logParsedOutput(payload);
                 res.json(payload);
             }
             responseSent = true;
@@ -937,7 +962,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
 
         // --- NEW TURN CASE ---
-        const turnTempDir = path.join(baseTempDir, activeTurnId);
+        // (turnTempDir is already defined earlier)
         if (!fs.existsSync(turnTempDir)) fs.mkdirSync(turnTempDir, { recursive: true });
 
         // Serialize history (Strict Stateless Narrator)
@@ -1120,7 +1145,11 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                                 parkedTurns.set(activeTurnId, {
                                     controller,
                                     executePromise: globalPromiseMap.get(activeTurnId),
-                                    cleanupWorkspace: () => fs.rmSync(turnTempDir, { recursive: true, force: true }),
+                                    cleanupWorkspace: () => {
+                                        if (process.env.GEMINI_DEBUG_KEEP_TEMP !== 'true') {
+                                            fs.rmSync(turnTempDir, { recursive: true, force: true });
+                                        }
+                                    },
                                     historyHash
                                 });
                             } else if (!WARM_HANDOFF_ENABLED) {
@@ -1303,7 +1332,11 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 if (process.platform !== 'win32') {
                     try { if (fs.existsSync(ipcPath)) fs.unlinkSync(ipcPath); } catch (_) { }
                 }
-                fs.rmSync(turnTempDir, { recursive: true, force: true });
+                if (process.env.GEMINI_DEBUG_KEEP_TEMP === 'true') {
+                    console.log(`[Turn ${activeTurnId}] Retaining workspace due to GEMINI_DEBUG_KEEP_TEMP: ${turnTempDir}`);
+                } else {
+                    fs.rmSync(turnTempDir, { recursive: true, force: true });
+                }
             }
         };
 

@@ -382,6 +382,13 @@ export class GeminiController {
                 });
 
                 proc.stdout.on('data', (chunk) => {
+                    if (process.env.GEMINI_DEBUG_KEEP_TEMP === 'true') {
+                        try {
+                            fs.appendFileSync(path.join(workspacePath, 'cli_raw_output.txt'), chunk);
+                        } catch (e) {
+                            // Ignore
+                        }
+                    }
                     accumulator.push(chunk);
                 });
 

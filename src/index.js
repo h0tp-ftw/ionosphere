@@ -626,13 +626,30 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             if (heartbeatInterval) clearInterval(heartbeatInterval);
         };
 
+        // Synchronization State for Spawn Cutoff Fix
+        const stdoutToolCalls = new Set();
+        let pendingParkExecute = null;
+
         const onEvent = (json) => {
             if (process.env.GEMINI_DEBUG_RAW === 'true') {
                 console.log(`[Turn ${activeTurnId}] CLI Event: ${json.type}`);
             }
+            if (json.type === 'toolCall' || json.type === 'tool_use') {
+                const toolName = json.tool_name || json.name;
+                stdoutToolCalls.add(toolName);
+                if (pendingParkExecute && pendingParkExecute.name === toolName) {
+                    if (process.env.GEMINI_DEBUG_RAW === 'true') {
+                        console.log(`[Sync] CLI emitted toolCall for ${toolName}. Flushing pending park.`);
+                    }
+                    if (pendingParkExecute.timer) clearTimeout(pendingParkExecute.timer);
+                    const execute = pendingParkExecute.execute;
+                    pendingParkExecute = null;
+                    execute();
+                }
+            }
         };
 
-        const onPark = (msg) => {
+        const executePark = (msg) => {
             if (responseSent || res.writableEnded) {
                 if (process.env.GEMINI_DEBUG_HANDOFF === 'true') console.log(`[Turn ${activeTurnId}] Suppressing onPark: responseSent=${responseSent}, writableEnded=${res.writableEnded}`);
                 return;
@@ -690,6 +707,29 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             if (!WARM_HANDOFF_ENABLED) {
                 console.log(`[Turn ${activeTurnId}] Cold Handoff: Terminating process after yielding response.`);
                 controller.cancelCurrentTurn(activeTurnId);
+            }
+        };
+
+        const onPark = (msg) => {
+            const toolName = msg.name.startsWith('ionosphere__') ? msg.name.substring(12) : msg.name;
+            if (stdoutToolCalls.has(toolName)) {
+                if (process.env.GEMINI_DEBUG_RAW === 'true') {
+                    console.log(`[Sync] Tool ${toolName} already emitted by stdout. Executing park immediately.`);
+                }
+                executePark(msg);
+            } else {
+                if (process.env.GEMINI_DEBUG_RAW === 'true') {
+                    console.log(`[Sync] Tool ${toolName} not yet emitted by stdout. Delaying park execution.`);
+                }
+                pendingParkExecute = {
+                    name: toolName,
+                    execute: () => executePark(msg),
+                    timer: setTimeout(() => {
+                        console.warn(`[Sync] Timeout waiting for stdout to emit toolCall for ${toolName}. Forcing park execution.`);
+                        pendingParkExecute = null;
+                        executePark(msg);
+                    }, 2000)
+                };
             }
         };
 

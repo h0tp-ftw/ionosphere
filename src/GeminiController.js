@@ -45,6 +45,7 @@ export class StreamingCleaner {
         this.turnId = turnId;
         this.processes = processes;
         this.buffer = '';
+        this.flushed = false; // Guard against double-flush
     }
 
     push(chunk) {
@@ -95,8 +96,11 @@ export class StreamingCleaner {
         // Safely emit text that is NOT likely part of a pending tag or lookahead.
         // We buffer aggressively if not final.
         if (isFinal) {
-            if (cleaned) this.on_text(cleaned);
+            if (cleaned && !this.flushed) {
+                this.on_text(cleaned);
+            }
             this.buffer = '';
+            this.flushed = true;
         } else {
             const bufferMargin = 200; // Increased to handle long tool arguments
             const safeLength = cleaned.length - bufferMargin;
@@ -124,6 +128,7 @@ export class StreamingCleaner {
     }
 
     flush() {
+        if (this.flushed) return; // Idempotent
         this.process(true);
     }
 }
@@ -141,7 +146,7 @@ export class GeminiController {
         this.callbacksByTurn = new Map();
 
         // Track last text response per fingerprint to prevent repetition loops
-        // Map<fingerprint, { text: string, count: number }>
+        // Map<fingerprint, { text: string, count: number, mitigate: boolean }>
         this.textRepeatTracker = new Map();
 
         if (!fs.existsSync(this.tempDir)) {
@@ -326,8 +331,42 @@ export class GeminiController {
                             if (!proc.cleaner) {
                                 proc.cleaner = new StreamingCleaner((text) => {
                                     proc.accumulatedText += text;
-                                    if (activeCallbacks.onText) {
-                                        activeCallbacks.onText(text);
+
+                                    // Within-turn substring repetition detection:
+                                    // If any 200+ char block appears 3+ times, the model is looping.
+                                    const accumulated = proc.accumulatedText;
+                                    if (accumulated.length > 600) {
+                                        const checkLen = 200;
+                                        const tail = accumulated.slice(-checkLen);
+                                        // Count how many times this tail appears in the full text
+                                        let count = 0;
+                                        let searchFrom = 0;
+                                        while (true) {
+                                            const idx = accumulated.indexOf(tail, searchFrom);
+                                            if (idx === -1) break;
+                                            count++;
+                                            searchFrom = idx + 1;
+                                        }
+                                        if (count >= 3) {
+                                            console.error(`[GeminiController] WITHIN-TURN REPETITION: Turn ${turnId} has repeated a ${checkLen}-char block ${count} times. Killing process.`);
+                                            // Re-read callbacks at kill time for safety
+                                            const killCallbacks = this.callbacksByTurn.get(turnId) || {};
+                                            if (killCallbacks.onError) {
+                                                killCallbacks.onError({
+                                                    message: `Response terminated: Model entered a text repetition loop (same ${checkLen}-char block repeated ${count} times).`,
+                                                    type: 'server_error',
+                                                    code: 'repetition_loop'
+                                                });
+                                            }
+                                            proc.kill('SIGKILL');
+                                            return;
+                                        }
+                                    }
+
+                                    // Re-read active callbacks to ensure we use the latest reference
+                                    const currentCallbacks = this.callbacksByTurn.get(turnId) || {};
+                                    if (currentCallbacks.onText) {
+                                        currentCallbacks.onText(text);
                                     }
                                 }, turnId, this.processes);
                             }
@@ -450,6 +489,8 @@ export class GeminiController {
                     const usageSummary = Array.from(this.processes.get(turnId)?.toolUsage || []).join(', ') || 'none';
                     console.log(`[GeminiController] Process closed for turn ${turnId} with code ${code}. Tool Usage: [${usageSummary}]`);
 
+                    // CRITICAL: Flush cleaner BEFORE deleting process/callbacks
+                    // so that any remaining buffered text reaches the response.
                     if (proc.cleaner) proc.cleaner.flush();
 
                     if (accumulator.buffer) {
@@ -467,12 +508,13 @@ export class GeminiController {
                             const lastEntry = this.textRepeatTracker.get(fingerprint);
                             if (lastEntry && lastEntry.text === fullText) {
                                 lastEntry.count++;
-                                console.warn(`[GeminiController] REPEAT DETECTED for fingerprint ${fingerprint}: Same text response ${lastEntry.count} times in a row.`);
+                                lastEntry.mitigate = true; // Flag for active intervention
+                                console.warn(`[GeminiController] REPEAT DETECTED for fingerprint ${fingerprint}: Same text response ${lastEntry.count} times in a row. Mitigation ARMED.`);
                                 if (lastEntry.count >= 3) {
-                                    console.error(`[GeminiController] Severe repetition loop on ${fingerprint}. Consider clearing session.`);
+                                    console.error(`[GeminiController] Severe repetition loop on ${fingerprint}. Anti-repetition directive will be injected.`);
                                 }
                             } else {
-                                this.textRepeatTracker.set(fingerprint, { text: fullText, count: 1 });
+                                this.textRepeatTracker.set(fingerprint, { text: fullText, count: 1, mitigate: false });
                             }
                         }
 
@@ -520,6 +562,23 @@ export class GeminiController {
             this.processes.delete(turnId);
             this.callbacksByTurn.delete(turnId);
         }
+    }
+
+    /**
+     * Returns an anti-repetition directive string if the model has been
+     * producing repeated text for the given fingerprint. Returns empty string otherwise.
+     * Called by index.js before sendPrompt() to break repetition loops.
+     */
+    getRepeatMitigation(fingerprint) {
+        const entry = this.textRepeatTracker.get(fingerprint);
+        if (entry && entry.mitigate && entry.count >= 2) {
+            const severity = entry.count >= 3 ? 'CRITICAL' : 'WARNING';
+            console.log(`[GeminiController] Repeat mitigation triggered for ${fingerprint} (count=${entry.count}, severity=${severity})`);
+            // Clear the flag after one mitigation attempt to avoid infinite directives
+            entry.mitigate = false;
+            return `\n\n[SYSTEM ${severity}: Your previous ${entry.count} responses were IDENTICAL. This is a repetition loop. You MUST provide a substantially DIFFERENT response. Do NOT repeat the same text. If you are stuck, acknowledge the issue and ask the user for clarification instead of repeating yourself.]\n`;
+        }
+        return '';
     }
 
     /**

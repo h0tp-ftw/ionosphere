@@ -515,8 +515,8 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
         const responseModel = req.body.model || process.env.GEMINI_MODEL || "gemini-2.5-flash-lite";
 
         let scrubBuffer = '';
-        const sentinelCall = '⟬⟬tool_call:';
-        const sentinelResult = '⟬⟬tool_result:';
+        const sentinelCall = '⟬tool_call:';
+        const sentinelResult = '⟬tool_result:';
 
         const onText = (incomingText) => {
             if (responseSent || res.writableEnded) {
@@ -531,11 +531,11 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             scrubBuffer = '';
 
             // Strip any fully formed sentinels
-            textToProcess = textToProcess.replace(/⟬⟬tool_(call|result):.*?⟭⟭/gs, '');
+            textToProcess = textToProcess.replace(/⟬tool_(call|result):.*?⟭/gs, '');
 
             // Protection against chunk boundaries splitting a sentinel.
             // We iterate left-to-right to find the FIRST valid prefix match. 
-            // This correctly handles "⟬⟬tool_call" without failing on the inner "⟬".
+            // This correctly handles "⟬tool_call".
             let openIdx = -1;
             for (let i = 0; i < textToProcess.length; i++) {
                 if (textToProcess[i] === '⟬') {
@@ -1106,14 +1106,14 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                                     ? (tc.function?.arguments || tc.arguments)
                                     : JSON.stringify(tc.function?.arguments || tc.arguments || {});
 
-                                content += `\n⟬⟬tool_call:${callId}:${toolName}:${argsStr}⟭⟭`;
+                                content += `\n⟬tool_call:${callId}:${toolName}:${argsStr}⟭`;
                             }
                         }
                         conversationPromptSection += `ASSISTANT: ${content.trim()}\n\n`;
                     } else if (msg.role === 'tool' || msg.role === 'function') {
                         const callId = msg.tool_call_id || 'unknown';
                         const resultStr = typeof text === 'string' ? text : JSON.stringify(text);
-                        conversationPromptSection += `⟬⟬tool_result:${callId}:${resultStr}⟭⟭\n\n`;
+                        conversationPromptSection += `⟬tool_result:${callId}:${resultStr}⟭\n\n`;
                     }
                 }
             }

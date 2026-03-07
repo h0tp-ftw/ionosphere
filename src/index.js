@@ -579,6 +579,8 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 return;
             }
             if (disconnectTimeout) clearTimeout(disconnectTimeout);
+            const _proc = controller.processes.get(activeTurnId);
+            if (_proc && _proc.cleaner) _proc.cleaner.flush();
             responseSent = true;
 
             const errorObj = formatErrorResponse(err);
@@ -602,6 +604,8 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 return;
             }
             if (disconnectTimeout) clearTimeout(disconnectTimeout);
+            const _proc = controller.processes.get(activeTurnId);
+            if (_proc && _proc.cleaner) _proc.cleaner.flush();
             responseSent = true;
             finalStats = json.stats || {};
             if (isStreaming) {
@@ -680,6 +684,7 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 return;
             }
             if (disconnectTimeout) clearTimeout(disconnectTimeout);
+            if (proc && proc.cleaner) proc.cleaner.flush();
             responseSent = true; // Mark BEFORE sending to ensure no close-race
             console.log(`[Turn ${activeTurnId}] Yielding response on Parked state. Tool: ${msg.name}`);
 

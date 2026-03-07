@@ -94,7 +94,6 @@ export class StreamingCleaner {
             .replace(resultRegex, '');
 
         // Safely emit text that is NOT likely part of a pending tag or lookahead.
-        // We buffer aggressively if not final.
         if (isFinal) {
             if (cleaned && !this.flushed) {
                 this.on_text(cleaned);
@@ -102,27 +101,38 @@ export class StreamingCleaner {
             this.buffer = '';
             this.flushed = true;
         } else {
-            const bufferMargin = 200; // Increased to handle long tool arguments
+            const bufferMargin = 40; // Reduced margin (enough for [Action... prefix)
             const safeLength = cleaned.length - bufferMargin;
-            if (safeLength > 0) {
-                // Find the latest point that is definitely NOT part of a tag prefix.
-                // We look for the LAST occurrence of '[', '<', or even '\n' (as it might be part of \n\n)
-                const lastTagStart = Math.max(cleaned.lastIndexOf('['), cleaned.lastIndexOf('<'));
-                const lastBoundary = Math.max(lastTagStart, cleaned.lastIndexOf('\n'));
 
-                let emitEnd = cleaned.length;
-                if (lastBoundary !== -1 && lastBoundary > safeLength) {
-                    emitEnd = lastBoundary;
-                } else if (lastBoundary === -1) {
-                    // No potential tags in the last 200 chars, safe to emit
-                    emitEnd = cleaned.length;
-                }
+            // Find the latest point that is definitely NOT part of a tag prefix.
+            // Triggers for potential tags:
+            // '[' (Action/Result), 'U' (USER:), '\n' (\n\n boundary), '<' (old style tags)
+            const lastPotentialTag = Math.max(
+                cleaned.lastIndexOf('['),
+                cleaned.lastIndexOf('<'),
+                cleaned.lastIndexOf('U'),
+                cleaned.lastIndexOf('\n')
+            );
 
-                const toEmit = cleaned.slice(0, emitEnd);
-                if (toEmit) {
-                    this.on_text(toEmit);
-                    this.buffer = cleaned.slice(emitEnd);
-                }
+            let emitEnd = cleaned.length;
+            if (lastPotentialTag !== -1 && lastPotentialTag > safeLength) {
+                // Withhold if trigger is in the "danger zone" (trailing margin)
+                emitEnd = lastPotentialTag;
+            } else if (safeLength < 0 && lastPotentialTag === -1) {
+                // Buffer is small and NO triggers found: emit all
+                emitEnd = cleaned.length;
+            } else if (safeLength > 0 && lastPotentialTag === -1) {
+                // Buffer is large and NO triggers found in the whole thing: emit all
+                emitEnd = cleaned.length;
+            } else if (safeLength > 0 && lastPotentialTag <= safeLength) {
+                // Trigger exists but is BEFORE the danger zone: emit all
+                emitEnd = cleaned.length;
+            }
+
+            const toEmit = cleaned.slice(0, emitEnd);
+            if (toEmit) {
+                this.on_text(toEmit);
+                this.buffer = cleaned.slice(emitEnd);
             }
         }
     }

@@ -534,16 +534,24 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
             textToProcess = textToProcess.replace(/⟬⟬tool_(call|result):.*?⟭⟭/gs, '');
 
             // Protection against chunk boundaries splitting a sentinel.
-            const openIdx = textToProcess.lastIndexOf('⟬');
-            if (openIdx !== -1) {
-                const tail = textToProcess.substring(openIdx);
-                // If tail is a full prefix (we are inside a tag) OR tail is a partial prefix (chunk ended mid-prefix)
-                if (tail.startsWith(sentinelCall) || tail.startsWith(sentinelResult) ||
-                    sentinelCall.startsWith(tail) || sentinelResult.startsWith(tail)) {
-
-                    scrubBuffer = tail;
-                    textToProcess = textToProcess.substring(0, openIdx);
+            // We iterate left-to-right to find the FIRST valid prefix match. 
+            // This correctly handles "⟬⟬tool_call" without failing on the inner "⟬".
+            let openIdx = -1;
+            for (let i = 0; i < textToProcess.length; i++) {
+                if (textToProcess[i] === '⟬') {
+                    const tail = textToProcess.substring(i);
+                    // If tail is a full prefix (we are inside a tag) OR tail is a partial prefix (chunk ended mid-prefix)
+                    if (tail.startsWith(sentinelCall) || tail.startsWith(sentinelResult) ||
+                        sentinelCall.startsWith(tail) || sentinelResult.startsWith(tail)) {
+                        openIdx = i;
+                        break;
+                    }
                 }
+            }
+
+            if (openIdx !== -1) {
+                scrubBuffer = textToProcess.substring(openIdx);
+                textToProcess = textToProcess.substring(0, openIdx);
             }
 
             if (!textToProcess) return; // Nothing left to send this tick

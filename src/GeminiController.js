@@ -147,8 +147,9 @@ export class StreamingCleaner {
 /**
  * GeminiController — Stateless CLI Spawner
  */
-export class GeminiController {
+export class GeminiController extends EventEmitter {
   constructor(cwd = process.cwd()) {
+    super();
     this.cwd = cwd;
     this.tempDir = path.join(this.cwd, "temp");
     this.processes = new Map();

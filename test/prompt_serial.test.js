@@ -76,13 +76,13 @@ function serializeMessages(messages, turnTempDir) {
                         const id = tc.id || 'unknown';
                         const name = tc.function?.name || tc.name || 'unknown';
                         const args = tc.function?.arguments || tc.arguments || '{}';
-                        content += `\n[Action (id: ${id}): Called tool '${name}' with args: ${args}]`;
+                        content += `\n⟬⟬tool_call:${id}:${name}:${args}⟭⟭`;
                     }
                 }
                 conversationPrompt += `ASSISTANT: ${content.trim()}\n\n`;
             } else if (msg.role === 'tool' || msg.role === 'function') {
                 const callId = msg.tool_call_id || msg.name || 'unknown';
-                conversationPrompt += `[Tool Result (id: ${callId})]:\n${textContent}\n\n`;
+                conversationPrompt += `⟬⟬tool_result:${callId}:${textContent}⟭⟭\n\n`;
             }
         }
     }
@@ -148,7 +148,7 @@ test('prompt_serial - assistant tool_calls are narrated with ACTION format', () 
         }]
     }], os.tmpdir());
 
-    assert.match(prompt, /\[Action \(id: call_abc\): Called tool 'get_weather' with args: \{"city":"London"\}\]/);
+    assert.match(prompt, /⟬⟬tool_call:call_abc:get_weather:\{"city":"London"\}⟭⟭/);
 });
 
 test('prompt_serial - multiple tool_calls all narrated', () => {
@@ -174,7 +174,7 @@ test('prompt_serial - role:tool produces TOOL RESULT block with tool_call_id', (
         content: 'Sunny, 22°C'
     }], os.tmpdir());
 
-    assert.match(prompt, /\[Tool Result \(id: call_abc\)\]:/);
+    assert.match(prompt, /⟬⟬tool_result:call_abc:/);
     assert.match(prompt, /Sunny, 22°C/);
 });
 
@@ -185,7 +185,7 @@ test('prompt_serial - role:function also produces TOOL RESULT block', () => {
         content: 'Rainy'
     }], os.tmpdir());
 
-    assert.match(prompt, /\[Tool Result \(id: get_weather\)\]/);
+    assert.match(prompt, /⟬⟬tool_result:get_weather/);
 });
 
 // ─── Sanitization ─────────────────────────────────────────────────────────────
@@ -258,8 +258,8 @@ test('prompt_serial - full conversation serializes correctly in order', () => {
 
     const parts = prompt.split('\n\n').filter(Boolean);
     assert.ok(parts[0].includes('USER: What time is it?'));
-    assert.ok(parts[1].includes('Action (id: unknown): Called tool \'get_time\''));
-    assert.ok(parts[2].includes('Tool Result (id: call_t1)'));
+    assert.ok(parts[1].includes('⟬⟬tool_call:unknown:get_time:{}⟭⟭'));
+    assert.ok(parts[2].includes('⟬⟬tool_result:call_t1'));
     assert.ok(parts[3].includes('USER: Thanks!'));
     assert.ok(parts[3].includes('[LATEST INSTRUCTION]'));
 });

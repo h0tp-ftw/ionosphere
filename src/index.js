@@ -514,14 +514,42 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
 
         const responseModel = req.body.model || process.env.GEMINI_MODEL || "gemini-2.5-flash-lite";
 
-        const onText = (text) => {
+        let scrubBuffer = '';
+        const sentinelCall = '⟬⟬tool_call:';
+        const sentinelResult = '⟬⟬tool_result:';
+
+        const onText = (incomingText) => {
             if (responseSent || res.writableEnded) {
                 if (process.env.GEMINI_DEBUG_HANDOFF === 'true') console.log(`[Turn ${activeTurnId}] Suppressing onText: responseSent=${responseSent}, writableEnded=${res.writableEnded}`);
                 return;
             }
             const contextMsg = hijackedTurnId ? `[HIJACKED from ${hijackedTurnId}] ` : "";
+
+            // Event-Level Scrubbing (Option B)
+            // We combine with any leftover buffer and strip sentinels instantly.
+            let textToProcess = scrubBuffer + incomingText;
+            scrubBuffer = '';
+
+            // Strip any fully formed sentinels
+            textToProcess = textToProcess.replace(/⟬⟬tool_(call|result):.*?⟭⟭/gs, '');
+
+            // Protection against chunk boundaries splitting a sentinel.
+            const openIdx = textToProcess.lastIndexOf('⟬');
+            if (openIdx !== -1) {
+                const tail = textToProcess.substring(openIdx);
+                // If tail is a full prefix (we are inside a tag) OR tail is a partial prefix (chunk ended mid-prefix)
+                if (tail.startsWith(sentinelCall) || tail.startsWith(sentinelResult) ||
+                    sentinelCall.startsWith(tail) || sentinelResult.startsWith(tail)) {
+
+                    scrubBuffer = tail;
+                    textToProcess = textToProcess.substring(0, openIdx);
+                }
+            }
+
+            if (!textToProcess) return; // Nothing left to send this tick
+
             if (process.env.GEMINI_DEBUG_RESPONSES === 'true') {
-                console.log(`[Turn ${activeTurnId}] ${contextMsg}SSE Text Chunk: ${text.substring(0, 50)}...`);
+                console.log(`[Turn ${activeTurnId}] ${contextMsg}SSE Text Chunk: ${textToProcess.substring(0, 50)}...`);
             }
             if (isStreaming) {
                 sendChunk({
@@ -529,10 +557,10 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                     object: 'chat.completion.chunk',
                     created: Math.floor(Date.now() / 1000),
                     model: responseModel,
-                    choices: [{ index: 0, delta: { content: text } }]
+                    choices: [{ index: 0, delta: { content: textToProcess } }]
                 });
             } else {
-                accumulatedText += text;
+                accumulatedText += textToProcess;
             }
         };
 
@@ -579,8 +607,6 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 return;
             }
             if (disconnectTimeout) clearTimeout(disconnectTimeout);
-            const _proc = controller.processes.get(activeTurnId);
-            if (_proc && _proc.cleaner) _proc.cleaner.flush();
             responseSent = true;
 
             const errorObj = formatErrorResponse(err);
@@ -604,8 +630,6 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 return;
             }
             if (disconnectTimeout) clearTimeout(disconnectTimeout);
-            const _proc = controller.processes.get(activeTurnId);
-            if (_proc && _proc.cleaner) _proc.cleaner.flush();
             responseSent = true;
             finalStats = json.stats || {};
             if (isStreaming) {
@@ -684,7 +708,6 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                 return;
             }
             if (disconnectTimeout) clearTimeout(disconnectTimeout);
-            if (proc && proc.cleaner) proc.cleaner.flush();
             responseSent = true; // Mark BEFORE sending to ensure no close-race
             console.log(`[Turn ${activeTurnId}] Yielding response on Parked state. Tool: ${msg.name}`);
 
@@ -1075,14 +1098,14 @@ app.post('/v1/chat/completions', handleUpload, async (req, res) => {
                                     ? (tc.function?.arguments || tc.arguments)
                                     : JSON.stringify(tc.function?.arguments || tc.arguments || {});
 
-                                content += `\n[Action (id: ${callId}): Called tool '${toolName}' with args: ${argsStr}]`;
+                                content += `\n⟬⟬tool_call:${callId}:${toolName}:${argsStr}⟭⟭`;
                             }
                         }
                         conversationPromptSection += `ASSISTANT: ${content.trim()}\n\n`;
                     } else if (msg.role === 'tool' || msg.role === 'function') {
                         const callId = msg.tool_call_id || 'unknown';
                         const resultStr = typeof text === 'string' ? text : JSON.stringify(text);
-                        conversationPromptSection += `[Tool Result (id: ${callId})]:\n${resultStr}\n\n`;
+                        conversationPromptSection += `⟬⟬tool_result:${callId}:${resultStr}⟭⟭\n\n`;
                     }
                 }
             }

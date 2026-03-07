@@ -35,113 +35,7 @@ export class JsonlAccumulator extends EventEmitter {
     }
 }
 
-/**
- * Buffers text chunks to ensure that tags (like [Action...]) and newlines 
- * are not incorrectly stripped or leaked when split across chunks.
- */
-export class StreamingCleaner {
-    constructor(on_text, turnId, processes) {
-        this.on_text = on_text;
-        this.turnId = turnId;
-        this.processes = processes;
-        this.buffer = '';
-        this.flushed = false; // Guard against double-flush
-    }
 
-    push(chunk) {
-        this.buffer += chunk;
-        this.process(false);
-    }
-
-    process(isFinal = false) {
-        // Regexes used for cleaning. 
-        // IMPORTANT: 'resultRegex' lookahead must NOT include '$' unless it's the final flush,
-        // otherwise it will consume trailing text as if it were part of a result tag.
-        const actionRegex = /\[Action \(id: ([^)]*)\): Called tool '([^']+)' with args: (.*?)\]/gs;
-        const lookahead = isFinal ? '(?=\\n\\n|\\[Action|\\[Tool Result|USER:|$)' : '(?=\\n\\n|\\[Action|\\[Tool Result|USER:)';
-        const resultRegex = new RegExp(`\\[Tool Result \\(id: ([^)]*)\\)\\]:[^]*?${lookahead}`, 'gs');
-
-        // Before stripping, intercept "leaked" tool calls for Turn forensics/hijacking.
-        // We only do this if we find a complete tag.
-        let match;
-        const proc = this.processes.get(this.turnId);
-        if (proc && proc.activeCallbacks) {
-            const tempActionRegex = new RegExp(actionRegex);
-            while ((match = tempActionRegex.exec(this.buffer)) !== null) {
-                const [fullMatch, callId, toolName, argsStr] = match;
-                const alreadySeen = Array.from(proc.toolUsage || []).includes(toolName);
-                const isLikelyHallucination = !argsStr || argsStr.trim() === '{}' || argsStr.trim().length < 2;
-
-                if (!alreadySeen && !isLikelyHallucination) {
-                    if (process.env.GEMINI_DEBUG_RESPONSES === 'true') {
-                        console.log(`[GeminiController] Intercepted leaked tool call in streaming buffer for Turn ${this.turnId}: ${toolName} (${callId})`);
-                    }
-                    if (proc.activeCallbacks.onToolCall) {
-                        proc.activeCallbacks.onToolCall({
-                            id: callId.startsWith('leak_') ? callId : `leak_${callId}`,
-                            name: toolName,
-                            arguments: argsStr.trim()
-                        });
-                    }
-                    proc.toolUsage.add(toolName);
-                }
-            }
-        }
-
-        // Perform cleaning on the buffer
-        let cleaned = this.buffer
-            .replace(actionRegex, '')
-            .replace(resultRegex, '');
-
-        // Safely emit text that is NOT likely part of a pending tag or lookahead.
-        if (isFinal) {
-            if (cleaned && !this.flushed) {
-                this.on_text(cleaned);
-            }
-            this.buffer = '';
-            this.flushed = true;
-        } else {
-            const bufferMargin = 40; // Reduced margin (enough for [Action... prefix)
-            const safeLength = cleaned.length - bufferMargin;
-
-            // Find the latest point that is definitely NOT part of a tag prefix.
-            // Triggers for potential tags:
-            // '[' (Action/Result), 'U' (USER:), '\n' (\n\n boundary), '<' (old style tags)
-            const lastPotentialTag = Math.max(
-                cleaned.lastIndexOf('['),
-                cleaned.lastIndexOf('<'),
-                cleaned.lastIndexOf('U'),
-                cleaned.lastIndexOf('\n')
-            );
-
-            let emitEnd = cleaned.length;
-            if (lastPotentialTag !== -1 && lastPotentialTag > safeLength) {
-                // Withhold if trigger is in the "danger zone" (trailing margin)
-                emitEnd = lastPotentialTag;
-            } else if (safeLength < 0 && lastPotentialTag === -1) {
-                // Buffer is small and NO triggers found: emit all
-                emitEnd = cleaned.length;
-            } else if (safeLength > 0 && lastPotentialTag === -1) {
-                // Buffer is large and NO triggers found in the whole thing: emit all
-                emitEnd = cleaned.length;
-            } else if (safeLength > 0 && lastPotentialTag <= safeLength) {
-                // Trigger exists but is BEFORE the danger zone: emit all
-                emitEnd = cleaned.length;
-            }
-
-            const toEmit = cleaned.slice(0, emitEnd);
-            if (toEmit) {
-                this.on_text(toEmit);
-                this.buffer = cleaned.slice(emitEnd);
-            }
-        }
-    }
-
-    flush() {
-        if (this.flushed) return; // Idempotent
-        this.process(true);
-    }
-}
 
 /**
  * GeminiController — Stateless CLI Spawner
@@ -337,51 +231,46 @@ export class GeminiController {
                     if (json.type === 'message' && json.role === 'assistant') {
                         const content = (typeof json.content === 'object') ? json.content.text : json.content;
                         if (content) {
-                            // Use StreamingCleaner logic to handle chunk-boundary state
-                            if (!proc.cleaner) {
-                                proc.cleaner = new StreamingCleaner((text) => {
-                                    proc.accumulatedText += text;
+                            proc.accumulatedText += content;
 
-                                    // Within-turn substring repetition detection:
-                                    // If any 200+ char block appears 3+ times, the model is looping.
-                                    const accumulated = proc.accumulatedText;
-                                    if (accumulated.length > 600) {
-                                        const checkLen = 200;
-                                        const tail = accumulated.slice(-checkLen);
-                                        // Count how many times this tail appears in the full text
-                                        let count = 0;
-                                        let searchFrom = 0;
-                                        while (true) {
-                                            const idx = accumulated.indexOf(tail, searchFrom);
-                                            if (idx === -1) break;
-                                            count++;
-                                            searchFrom = idx + 1;
-                                        }
-                                        if (count >= 3) {
-                                            console.error(`[GeminiController] WITHIN-TURN REPETITION: Turn ${turnId} has repeated a ${checkLen}-char block ${count} times. Killing process.`);
-                                            // Re-read callbacks at kill time for safety
-                                            const killCallbacks = this.callbacksByTurn.get(turnId) || {};
-                                            if (killCallbacks.onError) {
-                                                killCallbacks.onError({
-                                                    message: `Response terminated: Model entered a text repetition loop (same ${checkLen}-char block repeated ${count} times).`,
-                                                    type: 'server_error',
-                                                    code: 'repetition_loop'
-                                                });
-                                            }
-                                            proc.kill('SIGKILL');
-                                            return;
-                                        }
+                            // Within-turn substring repetition detection:
+                            // If any 200+ char block appears 3+ times, the model is looping.
+                            const accumulated = proc.accumulatedText;
+                            if (accumulated.length > 600) {
+                                const checkLen = 200;
+                                const tail = accumulated.slice(-checkLen);
+                                // Count how many times this tail appears in the full text
+                                let count = 0;
+                                let searchFrom = 0;
+                                while (true) {
+                                    const idx = accumulated.indexOf(tail, searchFrom);
+                                    if (idx === -1) break;
+                                    count++;
+                                    searchFrom = idx + 1;
+                                }
+                                if (count >= 3) {
+                                    console.error(`[GeminiController] WITHIN-TURN REPETITION: Turn ${turnId} has repeated a ${checkLen}-char block ${count} times. Killing process.`);
+                                    // Re-read callbacks at kill time for safety
+                                    const killCallbacks = this.callbacksByTurn.get(turnId) || {};
+                                    if (killCallbacks.onError) {
+                                        killCallbacks.onError({
+                                            message: `Response terminated: Model entered a text repetition loop (same ${checkLen}-char block repeated ${count} times).`,
+                                            type: 'server_error',
+                                            code: 'repetition_loop'
+                                        });
                                     }
-
-                                    // Re-read active callbacks to ensure we use the latest reference
-                                    const currentCallbacks = this.callbacksByTurn.get(turnId) || {};
-                                    if (currentCallbacks.onText) {
-                                        currentCallbacks.onText(text);
-                                    }
-                                }, turnId, this.processes);
+                                    proc.kill('SIGKILL');
+                                    return;
+                                }
                             }
-                            proc.cleaner.push(content);
+
+                            // Event-level instant emission (Filtering is now handled in index.js via Option B)
+                            const currentCallbacks = this.callbacksByTurn.get(turnId) || {};
+                            if (currentCallbacks.onText) {
+                                currentCallbacks.onText(content);
+                            }
                         }
+
                     } else if (json.type === 'tool_use' || json.type === 'toolCall') {
                         // Flush any pending text before a tool use event
                         if (proc.cleaner) proc.cleaner.flush();

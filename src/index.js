@@ -365,9 +365,11 @@ setInterval(
               // Check if turn is still parked
               if (!parkedTurns.has(entry.name)) {
                 if (process.env.GEMINI_DEBUG_KEEP_TEMP === "true") {
-                  console.log(
-                    `[GC] Skipping cleanup of workspace due to GEMINI_DEBUG_KEEP_TEMP: ${entry.name}`,
-                  );
+                  if (process.env.GEMINI_DEBUG_RAW === "true") {
+                    console.log(
+                      `[GC] Skipping cleanup of workspace due to GEMINI_DEBUG_KEEP_TEMP: ${entry.name}`,
+                    );
+                  }
                 } else {
                   console.log(
                     `[GC] Sweeping abandoned workspace: ${entry.name}`,
@@ -681,7 +683,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
 
     const turnTempDir = path.join(baseTempDir, activeTurnId); // Needed early for parsed logger
 
-    const logParsedOutput = async (data) => {
+    const logParsedOutput = (data) => {
       if (process.env.GEMINI_DEBUG_KEEP_TEMP === "true") {
         try {
           const parsedFile = path.join(turnTempDir, "cli_parsed_output.txt");
@@ -689,8 +691,8 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
             typeof data === "string"
               ? data
               : JSON.stringify(data, null, 2) + "\n";
-          // Using fsp.appendFile (imported earlier or use fs.promises)
-          await fs.promises.appendFile(parsedFile, toLog);
+          // Using fs.appendFileSync
+          fs.appendFileSync(parsedFile, toLog);
         } catch (e) {
           console.error(`[DEBUG] logParsedOutput failed:`, e.message);
         }
@@ -705,9 +707,12 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
     req.setTimeout(0);
     res.setTimeout(0);
 
+        let heartbeatInterval = null;
+
     // Handle client disconnect mid-turn
     let disconnectTimeout = null;
     res.on("close", () => {
+      if (heartbeatInterval) clearInterval(heartbeatInterval);
       if (!responseSent) {
         if (isStreaming) {
           console.log(
@@ -741,7 +746,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
       }
     };
 
-    const heartbeatInterval = isStreaming
+    heartbeatInterval = isStreaming
       ? setInterval(() => {
           if (!res.writableEnded) res.write(": ping\n\n");
         }, 15000)
@@ -847,7 +852,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         if (!res.writableEnded) res.end();
       } else {
         if (!res.headersSent) {
-          await logParsedOutput({ error: errorObj }).catch(() => {});
+          logParsedOutput({ error: errorObj });
           res.status(status).json({ error: errorObj });
         }
       }
@@ -914,7 +919,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
                 (finalStats.output_tokens || 0),
             },
           };
-          await logParsedOutput(payload).catch(() => {});
+          logParsedOutput(payload);
           res.json(payload);
         }
       }

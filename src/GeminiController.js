@@ -504,6 +504,9 @@ export class GeminiController {
           } else if (json.type === "error") {
             if (activeCallbacks.onError) activeCallbacks.onError(json);
           } else if (json.type === "result") {
+            // Flush any pending text before the final result event
+            if (proc.cleaner) proc.cleaner.flush();
+
             lastResultJson = json;
             if (json.stats) {
               const { input_tokens, output_tokens, total_tokens } = json.stats;
@@ -528,10 +531,10 @@ export class GeminiController {
           }
         });
 
-        proc.stdout.on("data", async (chunk) => {
+        proc.stdout.on("data", (chunk) => {
           if (process.env.GEMINI_DEBUG_KEEP_TEMP === "true") {
             try {
-              await fsp.appendFile(
+              fs.appendFileSync(
                 path.join(workspacePath, "cli_raw_output.txt"),
                 chunk,
               );

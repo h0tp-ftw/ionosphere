@@ -218,7 +218,9 @@ setInterval(() => {
                         // Check if turn is still parked
                         if (!parkedTurns.has(entry.name)) {
                             if (process.env.GEMINI_DEBUG_KEEP_TEMP === 'true') {
-                                console.log(`[GC] Skipping cleanup of workspace due to GEMINI_DEBUG_KEEP_TEMP: ${entry.name}`);
+                                if (process.env.GEMINI_DEBUG_RAW === 'true') {
+                                    console.log(`[GC] Skipping cleanup of workspace due to GEMINI_DEBUG_KEEP_TEMP: ${entry.name}`);
+                                }
                             } else {
                                 console.log(`[GC] Sweeping abandoned workspace: ${entry.name}`);
                                 fs.rmSync(dirPath, { recursive: true, force: true });

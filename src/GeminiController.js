@@ -217,7 +217,7 @@ export class GeminiController {
 
       // Structured History Mode: pipe Content[] JSON instead of flat text
       if (structuredContents) {
-        args.push("--structured-history");
+        extraEnv.IONOSPHERE_STRUCTURED_HISTORY = "true";
       }
 
       // Feed main prompt text via stdin — bypasses read_many_files 2000-line truncation.

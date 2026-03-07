@@ -188,6 +188,7 @@ For a deep dive into how it works, including the request lifecycle and security 
 - **Infinite Looping**: Complex tool interactions may occasionally cause loops.
 - **Process Overhead**: Higher latency due to containerized I/O and process spawning compared to direct API usage. Not suitable for high-frequency parallel executions.
 - **Stateless**: Ionosphere does not persist state between requests (by design).
+- **Prompt Flattening & Tool Call Leaks**: Because Ionosphere flattens previous tool calls into plain text history, the model naturally "learns" the syntax and may hallucinate it in normal prose. To prevent this, Ionosphere uses highly obscure sentinels (e.g., `⟬⟬tool_call:...⟭⟭`) combined with an aggressive event scrubber to intercept and hide these leaks from the client stream.
 
 ---
 

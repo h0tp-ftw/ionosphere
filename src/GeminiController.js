@@ -421,10 +421,7 @@ export class GeminiController extends EventEmitter {
                     // If any 200+ char block appears 3+ times, the model is looping.
                     const accumulated = proc.accumulatedText;
                     if (accumulated.length > 600) {
-                      // This is a placeholder for a potential future feature.
-                      // If `parkedTurns` and `activeTurnId` were defined and used,
-                      // the line `this.emit(`parked:${activeTurnId}`, parkedInfo);`
-                      // would be placed here.
+
                       const checkLen = 200;
                       const tail = accumulated.slice(-checkLen);
                       // Count how many times this tail appears in the full text

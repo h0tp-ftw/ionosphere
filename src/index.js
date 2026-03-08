@@ -1998,6 +1998,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
 
     await enqueueControllerPrompt(executeTask);
   } catch (err) {
+    if (heartbeatInterval) clearInterval(heartbeatInterval);
     console.error(
       `[API Error] Critical failure in /v1/chat/completions: ${err.stack || err.message}`,
     );

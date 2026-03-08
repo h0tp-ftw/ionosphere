@@ -783,6 +783,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
     res.setTimeout(0);
 
     let heartbeatInterval = null;
+    let parkDebounceTimer = null;
 
     // Handle client disconnect mid-turn
     let disconnectTimeout = null;
@@ -932,6 +933,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         }
       }
       if (heartbeatInterval) clearInterval(heartbeatInterval);
+      if (parkDebounceTimer) clearTimeout(parkDebounceTimer);
     };
 
     const onResult = async (json) => {
@@ -999,6 +1001,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         }
       }
       if (heartbeatInterval) clearInterval(heartbeatInterval);
+      if (parkDebounceTimer) clearTimeout(parkDebounceTimer);
     };
 
     // Synchronization State for Spawn Cutoff Fix
@@ -1035,6 +1038,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         return;
       }
       if (disconnectTimeout) clearTimeout(disconnectTimeout);
+      if (parkDebounceTimer) clearTimeout(parkDebounceTimer);
       responseSent = true; // Mark BEFORE sending to ensure no close-race
       console.log(
         `[Turn ${activeTurnId}] Yielding response on Parked state. Tool: ${msg.name}`,
@@ -1114,10 +1118,13 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
       if (stdoutToolCalls.has(toolName)) {
         if (process.env.GEMINI_DEBUG_RAW === "true") {
           console.log(
-            `[Sync] Tool ${toolName} already emitted by stdout. Executing park immediately.`,
+            `[Sync] Tool ${toolName} already emitted by stdout. Executing debounced park.`,
           );
         }
-        executePark(msg);
+        if (parkDebounceTimer) clearTimeout(parkDebounceTimer);
+        parkDebounceTimer = setTimeout(() => {
+          executePark(msg);
+        }, 200);
       } else {
         if (process.env.GEMINI_DEBUG_RAW === "true") {
           console.log(
@@ -1126,12 +1133,18 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         }
         pendingParkExecute = {
           name: toolName,
-          execute: () => executePark(msg),
+          execute: () => {
+            if (parkDebounceTimer) clearTimeout(parkDebounceTimer);
+            parkDebounceTimer = setTimeout(() => {
+              executePark(msg);
+            }, 200);
+          },
           timer: setTimeout(() => {
             console.warn(
               `[Sync] Timeout waiting for stdout to emit toolCall for ${toolName}. Forcing park execution.`,
             );
             pendingParkExecute = null;
+            if (parkDebounceTimer) clearTimeout(parkDebounceTimer);
             executePark(msg);
           }, 2000),
         };

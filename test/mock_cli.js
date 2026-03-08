@@ -16,6 +16,8 @@ async function run() {
 
     if (SCENARIO === 'tool_use' || SCENARIO === 'tool_park') {
         const ipcPath = process.env.IONOSPHERE_IPC || process.env.TOOL_BRIDGE_IPC;
+        // Optimization: Emit to stdout FIRST to avoid Ionosphere sync delay
+        emit({ type: 'tool_use', tool_name: 'get_weather', arguments: { city: 'London' } });
         if (ipcPath) {
             const client = net.connect(ipcPath, () => {
                 client.write(JSON.stringify({ event: 'tool_call', name: 'get_weather', arguments: '{"city":"London"}' }) + '\n');
@@ -31,6 +33,26 @@ async function run() {
             });
             // If it's a park scenario, we don't exit, we wait for the result which might come in a later process hijack
             await new Promise(() => { });
+        }
+    } else if (SCENARIO === 'parallel_tool_use') {
+        const ipcPath = process.env.IONOSPHERE_IPC || process.env.TOOL_BRIDGE_IPC;
+        // Emit multiple tool calls to stdout
+        emit({ type: 'tool_use', tool_name: 'tool_1', arguments: { id: 1 } });
+        emit({ type: 'tool_use', tool_name: 'tool_2', arguments: { id: 2 } });
+        emit({ type: 'tool_use', tool_name: 'tool_3', arguments: { id: 3 } });
+        
+        if (ipcPath) {
+            // Send parallel IPC messages
+            const calls = ['tool_1', 'tool_2', 'tool_3'];
+            for (const name of calls) {
+                const client = net.connect(ipcPath, () => {
+                    client.write(JSON.stringify({ event: 'tool_call', name: name, arguments: `{"id":${name.slice(-1)}}` }) + '\n');
+                });
+            }
+            // Wait for debounce period
+            await delay(500);
+            emit({ type: 'result', status: 'success', stats: { total_tokens: 100, input_tokens: 50, output_tokens: 50, duration_ms: 10, tool_calls: 3 } });
+            process.exit(0);
         }
     } else if (SCENARIO === 'vision') {
         emit({ type: 'message', role: 'assistant', content: 'I see a beautiful landscape with mountains.', delta: true });

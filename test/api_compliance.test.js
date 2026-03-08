@@ -231,6 +231,43 @@ test('api_compliance - tool call chunks have correct OpenAI structure', async ()
     }
 });
 
+test('api_compliance - multiple parallel tool calls are aggregated correctly', async () => {
+    await startBridge('parallel_tool_use');
+    try {
+        const { body } = await postCompletion({
+            model: 'gemini-2.5-flash-lite',
+            messages: [{ role: 'user', content: 'use many tools' }],
+            stream: true,
+            tools: [
+                { type: 'function', function: { name: 'tool_1', parameters: { type: 'object', properties: {} } } },
+                { type: 'function', function: { name: 'tool_2', parameters: { type: 'object', properties: {} } } },
+                { type: 'function', function: { name: 'tool_3', parameters: { type: 'object', properties: {} } } }
+            ]
+        });
+
+        const chunks = parseSseChunks(body)
+            .filter(l => l !== '[DONE]')
+            .map(l => JSON.parse(l));
+
+        const toolChunks = chunks.filter(c => c.choices?.[0]?.delta?.tool_calls);
+        
+        // We expect at least 3 tool calls (one per tool)
+        // Note: they might be spread across multiple chunks or consolidated.
+        const allToolCalls = toolChunks.flatMap(c => c.choices[0].delta.tool_calls);
+        
+        const names = allToolCalls.map(tc => tc.function?.name).filter(Boolean);
+        assert.ok(names.includes('tool_1'), 'Missing tool_1');
+        assert.ok(names.includes('tool_2'), 'Missing tool_2');
+        assert.ok(names.includes('tool_3'), 'Missing tool_3');
+        assert.equal(names.length, 3, 'Should have exactly 3 tool calls');
+
+        const finalChunk = chunks.find(c => c.choices?.[0]?.finish_reason === 'tool_calls');
+        assert.ok(finalChunk, 'Should conclude with finish_reason: tool_calls');
+    } finally {
+        await stopBridge();
+    }
+});
+
 test('api_compliance - chunk structure has required OpenAI fields', async () => {
     await startBridge('text');
     try {

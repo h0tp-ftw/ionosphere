@@ -125,6 +125,7 @@ const buildGeminiHistory = (messages) => {
               name: originalName,
               args: typeof args === "object" ? args : { raw: args },
             },
+            thoughtSignature: "skip_thought_signature_validator",
           });
         }
       }

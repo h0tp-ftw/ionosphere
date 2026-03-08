@@ -286,4 +286,77 @@ if (fs.existsSync(nonInteractiveTarget)) {
   fs.writeFileSync(nonInteractiveTarget, niContent, "utf8");
 }
 
+// 4. Patch GeminiClient.js (Prevent internal leakage on tool errors)
+const clientTarget = path.resolve(
+  __dirname,
+  "..",
+  "node_modules",
+  "@google",
+  "gemini-cli-core",
+  "dist",
+  "src",
+  "core",
+  "client.js",
+);
+if (fs.existsSync(clientTarget)) {
+  console.log(`[Patcher] Patching client.js for Leak Prevention: ${clientTarget}`);
+  let clientContent = fs.readFileSync(clientTarget, "utf8");
+
+  const hasPendingSearch = "const hasPendingToolCall = !!lastMessage &&\n            lastMessage.role === 'model' &&\n            (lastMessage.parts?.some((p) => 'functionCall' in p) || false);";
+  
+  const leakFixReplace = `const hasPendingToolCall = !!lastMessage &&
+            lastMessage.role === 'model' &&
+            (lastMessage.parts?.some((p) => 'functionCall' in p) || false);
+        // [IONOSPHERE] Also avoid injecting context if the last message was a tool response
+        // indicating a validation error. The model should focus on fixing the call.
+        const isToolError = !!lastMessage &&
+            lastMessage.role === 'user' &&
+            (lastMessage.parts?.some((p) => 'functionResponse' in p &&
+            !!p.functionResponse &&
+            typeof p.functionResponse.response === 'object' &&
+            p.functionResponse.response !== null &&
+            'error' in p.functionResponse.response) ||
+            false);`;
+
+  if (clientContent.includes("const hasPendingToolCall")) {
+      clientContent = clientContent.replace(hasPendingSearch, leakFixReplace);
+      clientContent = clientContent.replace(
+          "if (this.config.getIdeMode() && !hasPendingToolCall) {",
+          "if (this.config.getIdeMode() && !hasPendingToolCall && !isToolError) {"
+      );
+      console.log("  - Applied State Leakage prevention patch.");
+  }
+
+  fs.writeFileSync(clientTarget, clientContent, "utf8");
+}
+
+// 5. Patch scheduler.js (Model-correctable validation errors)
+const schedulerTarget = path.resolve(
+  __dirname,
+  "..",
+  "node_modules",
+  "@google",
+  "gemini-cli-core",
+  "dist",
+  "src",
+  "scheduler",
+  "scheduler.js",
+);
+if (fs.existsSync(schedulerTarget)) {
+  console.log(`[Patcher] Patching scheduler.js for model-correctable errors: ${schedulerTarget}`);
+  let schedulerContent = fs.readFileSync(schedulerTarget, "utf8");
+
+  const validationErrorSearch = "response: createErrorResponse(request, e instanceof Error ? e : new Error(String(e)), ToolErrorType.INVALID_TOOL_PARAMS),";
+  const validationErrorReplace = `response: createErrorResponse(request, e instanceof Error ? e : new Error(String(e)), this.config.getDisableToolValidation()
+                        ? ToolErrorType.EXECUTION_FAILED
+                        : ToolErrorType.INVALID_TOOL_PARAMS),`;
+
+  if (schedulerContent.includes(validationErrorSearch)) {
+      schedulerContent = schedulerContent.replace(validationErrorSearch, validationErrorReplace);
+      console.log("  - Applied model-correctable validation error patch.");
+  }
+
+  fs.writeFileSync(schedulerTarget, schedulerContent, "utf8");
+}
+
 console.log("[Patcher] Patching complete.");

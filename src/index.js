@@ -408,13 +408,18 @@ async function enqueueControllerPrompt(executeTask) {
     await new Promise((resolve) => requestQueue.push(resolve));
   }
   currentlyRunning++;
+  const start = Date.now();
   console.log(
-    `[Queue] CLI started. Active: ${currentlyRunning}/${MAX_CONCURRENT_CLI}, Parked: ${parkedTurns.size}, Queue: ${requestQueue.length}`,
+    `[Queue] CLI task started. Active: ${currentlyRunning}/${MAX_CONCURRENT_CLI}, Parked: ${parkedTurns.size}, Queue: ${requestQueue.length}`,
   );
   try {
     await executeTask();
   } finally {
+    const duration = Date.now() - start;
     currentlyRunning--;
+    console.log(
+      `[Queue] CLI task finished after ${duration}ms. Active: ${currentlyRunning}/${MAX_CONCURRENT_CLI}, Queue: ${requestQueue.length}`,
+    );
     if (requestQueue.length > 0) {
       const next = requestQueue.shift();
       next();

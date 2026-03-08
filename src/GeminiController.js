@@ -289,7 +289,16 @@ export class GeminiController extends EventEmitter {
         const stdinContent = structuredContents
           ? JSON.stringify(structuredContents)
           : text;
-        proc.stdin.end(stdinContent, "utf-8");
+        
+        proc.stdin.on("error", (err) => {
+          console.error(`[GeminiController] [Turn ${turnId}] Stdin Error:`, err.message);
+        });
+
+        try {
+          proc.stdin.end(stdinContent, "utf-8");
+        } catch (err) {
+          console.error(`[GeminiController] [Turn ${turnId}] Failed to end stdin:`, err.message);
+        }
 
         proc.extraEnv = extraEnv; // Initialize with spawn env
         proc.toolUsage = new Set(); // Track real tool calls in this turn
@@ -319,6 +328,24 @@ export class GeminiController extends EventEmitter {
             console.log(
               `[Turn ${turnId}] CLI Raw Line: ${json.type}${json.role ? " [" + json.role + "]" : ""}`,
             );
+          }
+
+          // Reset stall detector on any output
+          if (proc.stallTimer) {
+            clearTimeout(proc.stallTimer);
+            proc.stallTimer = null;
+          }
+          
+          // Re-arm stall detector if the turn isn't finished
+          // We only arm it after 'init' to allow for startup time
+          if (json.type !== "result" && json.type !== "error") {
+            const STALL_TIMEOUT_MS = parseInt(process.env.CLI_STALL_TIMEOUT_MS) || 30000;
+            proc.stallTimer = setTimeout(() => {
+              console.warn(
+                `[GeminiController] [STALL DETECTED] [Turn ${turnId}] No CLI output for ${STALL_TIMEOUT_MS / 1000}s. Last event: ${json.type}.`,
+              );
+              // For now, we only log. In the future, we might auto-restart.
+            }, STALL_TIMEOUT_MS);
           }
 
           if (json.type === "message" && json.role === "assistant") {
@@ -481,6 +508,10 @@ export class GeminiController extends EventEmitter {
           if (rawLogStream) {
             rawLogStream.end();
           }
+          if (proc.stallTimer) {
+            clearTimeout(proc.stallTimer);
+            proc.stallTimer = null;
+          }
           clearTimeout(timeout);
           const usageSummary =
             Array.from(this.processes.get(turnId)?.toolUsage || []).join(
@@ -518,6 +549,10 @@ export class GeminiController extends EventEmitter {
         });
 
         proc.on("error", (err) => {
+          if (proc.stallTimer) {
+            clearTimeout(proc.stallTimer);
+            proc.stallTimer = null;
+          }
           clearTimeout(timeout);
           this.processes.delete(turnId);
           this.callbacksByTurn.delete(turnId);

@@ -24,6 +24,17 @@ if (!ipcPath) {
     process.exit(1);
 }
 
+// Log environment state for diagnostics
+process.stderr.write(`[ToolBridge] Starting with IPC path: ${ipcPath}\n`);
+if (process.env.GEMINI_DEBUG === 'true') {
+    const safeEnv = { ...process.env };
+    // Redact potential keys/secrets
+    for (const key of Object.keys(safeEnv)) {
+        if (key.match(/key|token|auth|secret|password/i)) safeEnv[key] = '[REDACTED]';
+    }
+    process.stderr.write(`[ToolBridge] ENV: ${JSON.stringify(safeEnv, null, 2)}\n`);
+}
+
 // --- ERROR HANDLING ---
 process.on('uncaughtException', (err) => {
     process.stderr.write(`[ToolBridge] FATAL UNCAUGHT EXCEPTION: ${err.stack || err}\n`);
@@ -163,4 +174,4 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 // 3. Connect
 const transport = new StdioServerTransport();
 await server.connect(transport);
-process.stderr.write(`[ToolBridge] Base Server Bridge started. Handling ${toolsRegistry.size} tools.\n`);
+process.stderr.write(`[ToolBridge] MCP Server connected to transport. Handling ${toolsRegistry.size} tools. Ready for handshake.\n`);

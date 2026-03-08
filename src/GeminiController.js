@@ -144,6 +144,8 @@ export class StreamingCleaner {
   }
 }
 
+const MAX_REPEAT_TRACKER_SIZE = 100;
+
 /**
  * GeminiController — Stateless CLI Spawner
  */
@@ -333,19 +335,16 @@ export class GeminiController extends EventEmitter {
         }, TURN_TIMEOUT_MS);
 
         const checkRepeatLimit = (toolName, argsObj, activeCallbacks) => {
-          const currentEnv = proc?.extraEnv || extraEnv;
+          if (!proc) return false;
+          const currentEnv = proc.extraEnv || extraEnv;
           if (!currentEnv.IONOSPHERE_HISTORY_HASH) return false;
           const hash = currentEnv.IONOSPHERE_HISTORY_HASH;
 
           // Scope repeat tracker to the process/turn to prevent persistence bugs on retries
           if (!proc.repeatTracker) proc.repeatTracker = new Map();
 
-          // Normalize toolName to be prefix-agnostic for loop tracking
-          const normalizedToolName = toolName.startsWith("ionosphere__")
-            ? toolName.slice(12)
-            : toolName;
           const toolArgs = JSON.stringify(argsObj || {});
-          const key = `${hash}:${normalizedToolName}:${toolArgs}`;
+          const key = `${hash}:${toolName}:${toolArgs}`;
 
           // Check if this is a "historical" tool call being parroted
           const isHistorical = (
@@ -532,16 +531,21 @@ export class GeminiController extends EventEmitter {
           }
         });
 
+        let rawLogStream = null;
+        if (process.env.GEMINI_DEBUG_KEEP_TEMP === "true") {
+          try {
+            rawLogStream = fs.createWriteStream(
+              path.join(workspacePath, "cli_raw_output.txt"),
+              { flags: "a" },
+            );
+          } catch (e) {
+            // Ignore
+          }
+        }
+
         proc.stdout.on("data", (chunk) => {
-          if (process.env.GEMINI_DEBUG_KEEP_TEMP === "true") {
-            try {
-              fs.appendFileSync(
-                path.join(workspacePath, "cli_raw_output.txt"),
-                chunk,
-              );
-            } catch (e) {
-              // Ignore
-            }
+          if (rawLogStream) {
+            rawLogStream.write(chunk);
           }
           accumulator.push(chunk);
         });
@@ -655,6 +659,9 @@ export class GeminiController extends EventEmitter {
         });
 
         proc.on("close", (code) => {
+          if (rawLogStream) {
+            rawLogStream.end();
+          }
           clearTimeout(timeout);
           const usageSummary =
             Array.from(this.processes.get(turnId)?.toolUsage || []).join(
@@ -695,6 +702,11 @@ export class GeminiController extends EventEmitter {
                   );
                 }
               } else {
+                // Prune if map grows too large to prevent memory leak
+                if (this.textRepeatTracker.size >= MAX_REPEAT_TRACKER_SIZE) {
+                  const firstKey = this.textRepeatTracker.keys().next().value;
+                  this.textRepeatTracker.delete(firstKey);
+                }
                 this.textRepeatTracker.set(fingerprint, {
                   text: fullText,
                   count: 1,

@@ -74,74 +74,119 @@ const loosenSchema = (obj) => {
  */
 const buildGeminiHistory = (messages) => {
   const contents = [];
+  const toolNameResolver = new Map(); // Maps tool_call_id -> original tool name
 
-  for (const msg of messages) {
+  let currentUserParts = [];
+  let currentModelParts = [];
+
+  const flushUser = () => {
+    if (currentUserParts.length > 0) {
+      contents.push({ role: "user", parts: [...currentUserParts] });
+      currentUserParts = [];
+    }
+  };
+
+  const flushModel = () => {
+    if (currentModelParts.length > 0) {
+      contents.push({ role: "model", parts: [...currentModelParts] });
+      currentModelParts = [];
+    }
+  };
+
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
     if (msg.role === "system") continue;
 
-    if (msg.role === "user") {
-      const parts = [];
-      const content = msg.content;
+    if (msg.role === "assistant") {
+      flushUser(); // Switching to model turn
 
-      if (Array.isArray(content)) {
-        for (const p of content) {
-          if (p.type === "text") {
-            parts.push({ text: p.text });
-          } else if (p.type === "image_url" && p.image_url?.url) {
-            const url = p.image_url.url;
-            const match = url.match(/^data:([^;]+);base64,(.+)$/);
-            if (match) {
-              parts.push({
-                inlineData: { mimeType: match[1], data: match[2] },
-              });
-            } else {
-              parts.push({ text: `[Image: ${url}]` });
-            }
-          }
-        }
-      } else if (typeof content === "string") {
-        parts.push({ text: content });
-      }
-
-      if (parts.length > 0) {
-        contents.push({ role: "user", parts });
-      }
-    } else if (msg.role === "assistant") {
-      const parts = [];
       if (typeof msg.content === "string" && msg.content.trim()) {
-        parts.push({ text: msg.content });
+        currentModelParts.push({ text: msg.content });
       }
 
       if (msg.tool_calls) {
         for (const tc of msg.tool_calls) {
+          const callId = tc.id || tc.tool_call_id || "unknown";
+          const originalName = tc.function?.name || tc.name || "unknown";
+
+          // Remember the name for future 'tool' responses
+          toolNameResolver.set(callId, originalName);
+
           let args = tc.function?.arguments || tc.arguments || "{}";
           if (typeof args === "string") {
             try {
               args = JSON.parse(args);
             } catch {
-              /* keep as-is */
+              /* keep string */
             }
           }
-          parts.push({
+          currentModelParts.push({
             functionCall: {
-              name: tc.function?.name || tc.name || "unknown",
+              name: originalName,
               args: typeof args === "object" ? args : { raw: args },
             },
           });
         }
       }
-
-      if (parts.length > 0) {
-        contents.push({ role: "model", parts });
-      }
     } else if (msg.role === "tool" || msg.role === "function") {
+      flushModel(); // Tool responses belong to the user turn
+
       const callId = msg.tool_call_id || "unknown";
+      const resolvedName = toolNameResolver.get(callId) || msg.name || callId;
       let responseContent = msg.content;
+
+      // Extract narrated results if the tool response was missing
+      if (
+        typeof responseContent === "string" &&
+        responseContent.trim().toLowerCase() === "result missing"
+      ) {
+        const nextMsg = messages[i + 1];
+        if (nextMsg && nextMsg.role === "user") {
+          let nextContent = "";
+          if (Array.isArray(nextMsg.content)) {
+            nextContent = nextMsg.content
+              .map((p) => (p.type === "text" ? p.text : ""))
+              .join("");
+          } else if (typeof nextMsg.content === "string") {
+            nextContent = nextMsg.content;
+          }
+
+          const prefixRegex = new RegExp(`\\[${resolvedName.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}.*?\\]\\\\s*Result:\\\\s*\\\\n?`, "i");
+          const matchStart = nextContent.match(prefixRegex);
+          
+          if (matchStart) {
+            const startIndex = matchStart.index + matchStart[0].length;
+            let endIndex = nextContent.length;
+            const nextMarks = [
+              nextContent.indexOf("\\n<environment_details>", startIndex),
+              nextContent.indexOf("\\n<feedback>", startIndex),
+              nextContent.indexOf("\\n[", startIndex)
+            ].filter(idx => idx !== -1);
+            
+            if (nextMarks.length > 0) {
+              endIndex = Math.min(...nextMarks);
+            }
+
+            responseContent = nextContent.substring(startIndex, endIndex).trim();
+            
+            const beforeBlock = nextContent.substring(0, matchStart.index);
+            const afterBlock = nextContent.substring(endIndex);
+            const scrubbedContent = (beforeBlock + afterBlock).trim();
+            
+            if (Array.isArray(nextMsg.content)) {
+              nextMsg.content = [{ type: "text", text: scrubbedContent }];
+            } else {
+              nextMsg.content = scrubbedContent;
+            }
+          }
+        }
+      }
 
       if (typeof responseContent === "string") {
         try {
           responseContent = JSON.parse(responseContent);
         } catch {
-          /* keep as string */
+          /* keep string */
         }
       }
 
@@ -150,12 +195,38 @@ const buildGeminiHistory = (messages) => {
           ? responseContent
           : { output: responseContent };
 
-      contents.push({
-        role: "user",
-        parts: [{ functionResponse: { name: msg.name || callId, response } }],
+      currentUserParts.push({
+        functionResponse: { name: resolvedName, response },
       });
+    } else if (msg.role === "user") {
+      flushModel(); // User payload belongs to the user turn
+
+      const content = msg.content;
+      if (Array.isArray(content)) {
+        for (const p of content) {
+          if (p.type === "text") {
+            currentUserParts.push({ text: p.text });
+          } else if (p.type === "image_url" && p.image_url?.url) {
+            const url = p.image_url.url;
+            const match = url.match(/^data:([^;]+);base64,(.+)$/);
+            if (match) {
+              currentUserParts.push({
+                inlineData: { mimeType: match[1], data: match[2] },
+              });
+            } else {
+              currentUserParts.push({ text: `[Image: ${url}]` });
+            }
+          }
+        }
+      } else if (typeof content === "string") {
+        currentUserParts.push({ text: content });
+      }
     }
   }
+
+  // Flush any remaining parts at the end of the conversation
+  flushUser();
+  flushModel();
 
   return contents;
 };
@@ -691,7 +762,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
             typeof data === "string"
               ? data
               : JSON.stringify(data, null, 2) + "\n";
-          // Using fs.appendFileSync
+          // Using fs.appendFileSync to strictly avoid dangling promises in tests
           fs.appendFileSync(parsedFile, toLog);
         } catch (e) {
           console.error(`[DEBUG] logParsedOutput failed:`, e.message);
@@ -707,7 +778,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
     req.setTimeout(0);
     res.setTimeout(0);
 
-        let heartbeatInterval = null;
+    let heartbeatInterval = null;
 
     // Handle client disconnect mid-turn
     let disconnectTimeout = null;

@@ -165,3 +165,13 @@ env var is set.
 
 The Warm Stateless Handoff strategy (parking, hijacking) is **unchanged** —
 it operates at the HTTP/IPC layer, orthogonal to how the prompt is serialized.
+
+---
+
+## Known Edge Cases & Resolved Issues
+
+During the integration of this protocol alongside existing debugging features, a few critical event loop and Promise resolution issues were discovered and fixed:
+
+1. **Event Loop Hangs (Heartbeats)**: To prevent test suites (like `node:test`) and the server itself from hanging indefinitely after a client disconnects, any intervals (like the `heartbeatInterval` used to keep connections alive during long `gemini-cli` generation times) **must** be explicitly cleared in the `res.on("close")` and `res.on("finish")` handlers.
+2. **Unhandled Promise Rejections & Sync I/O Latency**: Node.js strictly tracks "floating promises" inside test suites. When adding logging or debugging features inside synchronous event listeners (like `proc.stdout.on('data')` or `proc.on('close')`), using `async/await` and `fsp.appendFile()` without awaiting them will cause tests to crash with `Promise resolution is still pending` errors. **However**, you must NOT replace these with `fs.appendFileSync()` inside high-frequency streams (like `stdout.on('data')`), as synchronous disk I/O blocks the Node event loop and causes massive latency bottlenecks. Instead, use non-blocking, promise-free solutions like `fs.createWriteStream()` for streams, or callback-based `fs.appendFile(path, data, () => {})` for single fire-and-forget writes.
+3. **Empty Tool Call Responses (StreamingCleaner)**: The `StreamingCleaner` class in `GeminiController.js` buffers text chunks to ensure that tags (like `[Tool Result]`) aren't incorrectly split. It intentionally holds back fragments shorter than 200 characters. When reading the final outcome of a process via the `result` event, you **must explicitly call `proc.cleaner.flush()`** before returning the payload, otherwise small non-streaming responses may be returned as empty strings.

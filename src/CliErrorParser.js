@@ -1,0 +1,94 @@
+import { createError, ErrorType, ErrorCode } from "./errorHandler.js";
+
+/**
+ * Parses stderr output from the Gemini CLI to identify specific error types.
+ */
+export class CliErrorParser {
+  /**
+   * Identifies if an error is fatal and should terminate the process.
+   */
+  parseStderr(stderrText, activeCallbacks) {
+    if (!stderrText) return null;
+
+    const isAuthError =
+      (/(please log in|\bauthorization\b|authenticate|not authenticated)/i.test(
+        stderrText,
+      ) &&
+        !/unauthorized tool call/i.test(stderrText)) ||
+      (/credentials/i.test(stderrText) &&
+        !/loaded cached credentials/i.test(stderrText));
+
+    const isResourceError =
+      /RESOURCE_EXHAUSTED|rateLimitExceeded|429|No capacity available/i.test(
+        stderrText,
+      );
+
+    const isPolicyError =
+      /denied by policy|unauthorized tool call|not available to this agent/i.test(
+        stderrText,
+      );
+
+    const isNotFound = /Tool "([^"]+)" not found/i.test(stderrText);
+
+    const isModelError =
+      /ModelNotFoundError|entity was not found/i.test(stderrText);
+
+    if (isAuthError) {
+      const errorMsg = `Fatal: CLI Auth Expired or Missing. Raw: ${stderrText}`;
+      if (activeCallbacks.onError)
+        activeCallbacks.onError(
+          createError(errorMsg, ErrorType.AUTHENTICATION, ErrorCode.INVALID_API_KEY),
+        );
+      return { type: "FATAL", message: errorMsg };
+    }
+
+    if (isResourceError) {
+      const errorMsg = `Gemini API Quota/Capacity Exhausted (429). Raw: ${stderrText}`;
+      if (process.env.GEMINI_SILENT_FALLBACK === "true") {
+        console.log(`[CliErrorParser] Seamless Fallback: Ignoring 429 error.`);
+        return { type: "IGNORE", message: errorMsg };
+      }
+      if (activeCallbacks.onError)
+        activeCallbacks.onError(
+          createError(errorMsg, ErrorType.RATE_LIMIT, ErrorCode.RATE_LIMIT_EXCEEDED),
+        );
+      return { type: "FATAL", message: errorMsg };
+    }
+
+    if (isModelError) {
+      const errorMsg = `Fatal: Model not found or inaccessible. Raw: ${stderrText}`;
+      if (activeCallbacks.onError)
+        activeCallbacks.onError(
+          createError(errorMsg, ErrorType.INVALID_REQUEST, ErrorCode.MODEL_NOT_FOUND),
+        );
+      return { type: "FATAL", message: errorMsg };
+    }
+
+    if (isPolicyError) {
+      const errorMsg = `Fatal: Tool use or action denied by policy. Raw: ${stderrText}`;
+      if (activeCallbacks.onError)
+        activeCallbacks.onError(
+          createError(errorMsg, ErrorType.PERMISSION, ErrorCode.POLICY_DENIED),
+        );
+      return { type: "FATAL", message: errorMsg };
+    }
+
+    if (isNotFound) {
+      const match = stderrText.match(/Tool "([^"]+)" not found/i);
+      const toolName = match ? match[1] : "unknown";
+      const errorMsg = `Fatal: Tool "${toolName}" not found. This environment does not support ${toolName}.`;
+      
+      if (activeCallbacks.onEvent) {
+        activeCallbacks.onEvent({
+          type: "tool_result",
+          tool_name: toolName,
+          result: errorMsg,
+          is_error: true,
+        });
+      }
+      return { type: "SOFT", message: errorMsg, toolName };
+    }
+
+    return null;
+  }
+}

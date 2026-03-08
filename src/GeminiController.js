@@ -1,11 +1,13 @@
 import { spawn } from "child_process";
 import EventEmitter from "events";
 import path from "path";
-import os from "os";
 import fs from "fs";
 import { promises as fsp } from "fs";
 
 import { createError, ErrorType, ErrorCode } from "./errorHandler.js";
+import { RepetitionBreaker } from "./RepetitionBreaker.js";
+import { CliRunner } from "./CliRunner.js";
+import { CliErrorParser } from "./CliErrorParser.js";
 
 /**
  * Accumulates chunked stdout into distinct JSON lines.
@@ -144,8 +146,6 @@ export class StreamingCleaner {
   }
 }
 
-const MAX_REPEAT_TRACKER_SIZE = 100;
-
 /**
  * GeminiController — Stateless CLI Spawner
  */
@@ -159,9 +159,10 @@ export class GeminiController extends EventEmitter {
     // Active callbacks for each turnId
     this.callbacksByTurn = new Map();
 
-    // Track last text response per fingerprint to prevent repetition loops
-    // Map<fingerprint, { text: string, count: number, mitigate: boolean }>
-    this.textRepeatTracker = new Map();
+    // Component instances
+    this.repetitionBreaker = new RepetitionBreaker();
+    this.cliRunner = new CliRunner(this.cwd);
+    this.errorParser = new CliErrorParser();
 
     if (!fs.existsSync(this.tempDir)) {
       fs.mkdirSync(this.tempDir, { recursive: true });
@@ -216,18 +217,9 @@ export class GeminiController extends EventEmitter {
     try {
       this.callbacksByTurn.set(turnId, callbacks);
 
-      const args = ["-y", "-o", "stream-json"];
-
       // Structured History Mode: pipe Content[] JSON instead of flat text
       if (structuredContents) {
         extraEnv.IONOSPHERE_STRUCTURED_HISTORY = "true";
-      }
-
-      // Feed main prompt text via stdin — bypasses read_many_files 2000-line truncation.
-      // Attachments (images, PDFs, etc.) still go as @refs via -p since they need binary handling.
-      if (attachments.length > 0) {
-        const attachmentRefs = attachments.map((p) => `@${p}`).join(" ");
-        args.push("-p", attachmentRefs);
       }
 
       let systemPromptPath = null;
@@ -235,6 +227,9 @@ export class GeminiController extends EventEmitter {
         systemPromptPath = path.join(workspacePath, "system.md");
         await fsp.writeFile(systemPromptPath, systemPrompt, "utf-8");
       }
+
+      const { executable, initialArgs } = this.cliRunner.getExecutableAndArgs();
+      const finalArgs = this.cliRunner.buildFinalArgs(initialArgs, { attachments });
 
       // Persistence for debugging
       if (process.env.GEMINI_DEBUG_PROMPTS === "true") {
@@ -254,24 +249,6 @@ export class GeminiController extends EventEmitter {
         }
       }
 
-      let cliPath =
-        process.env.GEMINI_CLI_PATH ||
-        path.join(this.cwd, "node_modules", ".bin", "gemini");
-      let finalArgs = [...args];
-      let executable = cliPath;
-
-      // Handle cases where cliPath contains the runner (e.g. "node cli.js")
-      if (cliPath.includes(" ")) {
-        const parts = cliPath.split(" ");
-        executable = parts[0];
-        finalArgs = [...parts.slice(1), ...finalArgs];
-      } else if (cliPath.endsWith(".js")) {
-        executable = "node";
-        finalArgs = [cliPath, ...finalArgs];
-      } else if (process.platform === "win32" && cliPath === "gemini") {
-        executable = "gemini.cmd";
-      }
-
       console.log(
         `[GeminiController] Spawning stateless CLI: ${executable} ${finalArgs.join(" ")}`,
       );
@@ -280,17 +257,7 @@ export class GeminiController extends EventEmitter {
         const accumulator = new JsonlAccumulator();
         let lastResultJson = null;
 
-        const spawnEnv = {
-          ...process.env,
-          GEMINI_SETTINGS_JSON: settingsPath,
-          GEMINI_PROMPT_AGENTSKILLS: "0",
-          GEMINI_PROMPT_AGENTCONTEXTS: "0",
-          ...extraEnv,
-        };
-
-        if (systemPromptPath) {
-          spawnEnv.GEMINI_SYSTEM_MD = systemPromptPath;
-        }
+        const spawnEnv = this.cliRunner.prepareEnv(settingsPath, extraEnv, systemPromptPath);
 
         if (process.env.GEMINI_DEBUG_PROMPTS === "true") {
           const hijackedFrom = this.callbacksByTurn.get(turnId)?.hijackedFrom;
@@ -334,63 +301,6 @@ export class GeminiController extends EventEmitter {
           reject(new Error(`Turn timed out after ${TURN_TIMEOUT_MS / 60000}m`));
         }, TURN_TIMEOUT_MS);
 
-        const checkRepeatLimit = (toolName, argsObj, activeCallbacks) => {
-          if (!proc) return false;
-          const currentEnv = proc.extraEnv || extraEnv;
-          if (!currentEnv.IONOSPHERE_HISTORY_HASH) return false;
-          const hash = currentEnv.IONOSPHERE_HISTORY_HASH;
-
-          // Scope repeat tracker to the process/turn to prevent persistence bugs on retries
-          if (!proc.repeatTracker) proc.repeatTracker = new Map();
-
-          const toolArgs = JSON.stringify(argsObj || {});
-          const key = `${hash}:${toolName}:${toolArgs}`;
-
-          // Check if this is a "historical" tool call being parroted
-          const isHistorical = (
-            currentEnv.IONOSPHERE_HISTORY_TOOLS || ""
-          ).includes(key);
-
-          if (isHistorical) {
-            console.log(
-              `[GeminiController] [FORENSICS] Tool '${toolName}' with args ${toolArgs} identified as historical echo (Key: ${key.substring(0, 15)}...). Ignoring.`,
-            );
-            return true; // Ignore historical echoes
-          }
-
-          const count = (proc.repeatTracker.get(key) || 0) + 1;
-          proc.repeatTracker.set(key, count);
-          console.log(
-            `[GeminiController] [FORENSICS] Repeat Tracker: ${toolName} count=${count} for key ${key.substring(0, 15)}...`,
-          );
-
-          const maxRepeats = parseInt(process.env.MAX_REPEAT_TOOL_CALLS) || 0;
-
-          if (maxRepeats > 0 && count >= maxRepeats) {
-            console.error(
-              `[GeminiController] Repeat Breaker: Tool '${toolName}' called ${count} times within the same Turn. Terminating process to prevent loop.`,
-            );
-            const errorMsg = `Loop detected: Model repeated tool '${toolName}' with same arguments ${count} times. Terminating for safety. (Limit: ${maxRepeats})`;
-            if (activeCallbacks.onError)
-              activeCallbacks.onError(
-                createError(
-                  errorMsg,
-                  ErrorType.INVALID_REQUEST,
-                  ErrorCode.POLICY_DENIED,
-                ),
-              );
-            if (activeCallbacks.onResult)
-              activeCallbacks.onResult({
-                type: "result",
-                text: errorMsg,
-                stats: {},
-              });
-            proc.kill();
-            return "KILL";
-          }
-          return false;
-        };
-
         accumulator.on("line", (json) => {
           const activeCallbacks = this.callbacksByTurn.get(turnId) || {};
           proc.activeCallbacks = activeCallbacks; // Shared reference for StreamingCleaner
@@ -415,41 +325,16 @@ export class GeminiController extends EventEmitter {
               if (!proc.cleaner) {
                 proc.cleaner = new StreamingCleaner(
                   (text) => {
-                    proc.accumulatedText += text;
+                    const shouldKill = this.repetitionBreaker.checkTextRepetition(
+                      proc,
+                      text,
+                      turnId,
+                      this.callbacksByTurn.get(turnId) || {}
+                    );
 
-                    // Within-turn substring repetition detection:
-                    // If any 200+ char block appears 3+ times, the model is looping.
-                    const accumulated = proc.accumulatedText;
-                    if (accumulated.length > 600) {
-
-                      const checkLen = 200;
-                      const tail = accumulated.slice(-checkLen);
-                      // Count how many times this tail appears in the full text
-                      let count = 0;
-                      let searchFrom = 0;
-                      while (true) {
-                        const idx = accumulated.indexOf(tail, searchFrom);
-                        if (idx === -1) break;
-                        count++;
-                        searchFrom = idx + 1;
-                      }
-                      if (count >= 3) {
-                        console.error(
-                          `[GeminiController] WITHIN-TURN REPETITION: Turn ${turnId} has repeated a ${checkLen}-char block ${count} times. Killing process.`,
-                        );
-                        // Re-read callbacks at kill time for safety
-                        const killCallbacks =
-                          this.callbacksByTurn.get(turnId) || {};
-                        if (killCallbacks.onError) {
-                          killCallbacks.onError({
-                            message: `Response terminated: Model entered a text repetition loop (same ${checkLen}-char block repeated ${count} times).`,
-                            type: "server_error",
-                            code: "repetition_loop",
-                          });
-                        }
-                        proc.kill("SIGKILL");
-                        return;
-                      }
+                    if (shouldKill) {
+                      proc.kill("SIGKILL");
+                      return;
                     }
 
                     // Re-read active callbacks to ensure we use the latest reference
@@ -476,8 +361,20 @@ export class GeminiController extends EventEmitter {
             this.processes.get(turnId)?.toolUsage.add(toolName);
 
             // Repeat Breaker Logic (Global per historyHash)
-            if (checkRepeatLimit(toolName, argsObj, activeCallbacks) === "KILL")
+            const repeatStatus = this.repetitionBreaker.checkToolRepeatLimit(
+              proc,
+              toolName,
+              argsObj,
+              extraEnv.IONOSPHERE_HISTORY_HASH,
+              extraEnv.IONOSPHERE_HISTORY_TOOLS,
+              activeCallbacks
+            );
+
+            if (repeatStatus === "KILL") {
+              proc.kill();
               return;
+            }
+            if (repeatStatus === "IGNORE") return;
 
             const transparentTools = ["google_web_search"];
             if (transparentTools.includes(toolName)) {
@@ -559,98 +456,9 @@ export class GeminiController extends EventEmitter {
             const activeCallbacks = this.callbacksByTurn.get(turnId) || {};
             console.error(`[Gemini CLI STDERR] [Turn ${turnId}] ${stderrText}`);
 
-            // ... (keep matches as they were)
-            const isAuthError =
-              (/(please log in|\bauthorization\b|authenticate|not authenticated)/i.test(
-                stderrText,
-              ) &&
-                !/unauthorized tool call/i.test(stderrText)) ||
-              (/credentials/i.test(stderrText) &&
-                !/loaded cached credentials/i.test(stderrText));
-            const isResourceError =
-              /RESOURCE_EXHAUSTED|rateLimitExceeded|429|No capacity available/i.test(
-                stderrText,
-              );
-            const isPolicyError =
-              /denied by policy|unauthorized tool call|not available to this agent/i.test(
-                stderrText,
-              );
-            const isNotFound = /Tool "([^"]+)" not found/i.test(stderrText);
-            const isModelError =
-              /ModelNotFoundError|entity was not found/i.test(stderrText);
-
-            if (isAuthError) {
-              const errorMsg = `Fatal: CLI Auth Expired or Missing. Raw: ${stderrText}`;
-              if (activeCallbacks.onError)
-                activeCallbacks.onError(
-                  createError(
-                    errorMsg,
-                    ErrorType.AUTHENTICATION,
-                    ErrorCode.INVALID_API_KEY,
-                  ),
-                );
+            const errorResult = this.errorParser.parseStderr(stderrText, activeCallbacks);
+            if (errorResult?.type === "FATAL") {
               proc.kill("SIGKILL");
-            } else if (isResourceError) {
-              const errorMsg = `Gemini API Quota/Capacity Exhausted (429). Raw: ${stderrText}`;
-              if (process.env.GEMINI_SILENT_FALLBACK === "true") {
-                console.log(
-                  `[GeminiController] Seamless Fallback: Ignoring 429 error to allow internal CLI fallback.`,
-                );
-              } else {
-                console.error(
-                  `[GeminiController] Fatal Resource Error: Killing process.`,
-                );
-                if (activeCallbacks.onError)
-                  activeCallbacks.onError(
-                    createError(
-                      errorMsg,
-                      ErrorType.RATE_LIMIT,
-                      ErrorCode.RATE_LIMIT_EXCEEDED,
-                    ),
-                  );
-                proc.kill("SIGKILL");
-              }
-            } else if (isModelError) {
-              const errorMsg = `Fatal: Model not found or inaccessible. Raw: ${stderrText}`;
-              if (activeCallbacks.onError)
-                activeCallbacks.onError(
-                  createError(
-                    errorMsg,
-                    ErrorType.INVALID_REQUEST,
-                    ErrorCode.MODEL_NOT_FOUND,
-                  ),
-                );
-              proc.kill("SIGKILL");
-            } else if (isPolicyError) {
-              const errorMsg = `Fatal: Tool use or action denied by policy. Raw: ${stderrText}`;
-              if (activeCallbacks.onError)
-                activeCallbacks.onError(
-                  createError(
-                    errorMsg,
-                    ErrorType.PERMISSION,
-                    ErrorCode.POLICY_DENIED,
-                  ),
-                );
-              proc.kill("SIGKILL");
-            } else if (isNotFound) {
-              const match = stderrText.match(/Tool "([^"]+)" not found/i);
-              const toolName = match ? match[1] : "unknown";
-              const errorMsg = `Fatal: Tool "${toolName}" not found. This environment does not support ${toolName}.`;
-              console.log(
-                `[GeminiController] Aggressively breaking loop: Tool '${toolName}' not found.`,
-              );
-
-              if (activeCallbacks.onEvent) {
-                activeCallbacks.onEvent({
-                  type: "tool_result",
-                  tool_name: toolName,
-                  result: errorMsg,
-                  is_error: true,
-                });
-              }
-              console.log(
-                `[GeminiController] Soft error: Missing tool ${toolName} reported back to model.`,
-              );
             }
           }
         });
@@ -682,35 +490,8 @@ export class GeminiController extends EventEmitter {
             // After successful completion, check for across-turn repetition
             const fingerprint =
               proc.extraEnv?.IONOSPHERE_HISTORY_HASH || turnId;
-            const fullText = proc.accumulatedText.trim();
-
-            if (fullText.length > 50) {
-              // Only track substantial responses
-              const lastEntry = this.textRepeatTracker.get(fingerprint);
-              if (lastEntry && lastEntry.text === fullText) {
-                lastEntry.count++;
-                lastEntry.mitigate = true; // Flag for active intervention
-                console.warn(
-                  `[GeminiController] REPEAT DETECTED for fingerprint ${fingerprint}: Same text response ${lastEntry.count} times in a row. Mitigation ARMED.`,
-                );
-                if (lastEntry.count >= 3) {
-                  console.error(
-                    `[GeminiController] Severe repetition loop on ${fingerprint}. Anti-repetition directive will be injected.`,
-                  );
-                }
-              } else {
-                // Prune if map grows too large to prevent memory leak
-                if (this.textRepeatTracker.size >= MAX_REPEAT_TRACKER_SIZE) {
-                  const firstKey = this.textRepeatTracker.keys().next().value;
-                  this.textRepeatTracker.delete(firstKey);
-                }
-                this.textRepeatTracker.set(fingerprint, {
-                  text: fullText,
-                  count: 1,
-                  mitigate: false,
-                });
-              }
-            }
+            const fullText = proc.accumulatedText || "";
+            this.repetitionBreaker.trackTurnResult(fingerprint, fullText);
 
             resolve(lastResultJson);
           } else {
@@ -773,17 +554,7 @@ export class GeminiController extends EventEmitter {
    * Called by index.js before sendPrompt() to break repetition loops.
    */
   getRepeatMitigation(fingerprint) {
-    const entry = this.textRepeatTracker.get(fingerprint);
-    if (entry && entry.mitigate && entry.count >= 2) {
-      const severity = entry.count >= 3 ? "CRITICAL" : "WARNING";
-      console.log(
-        `[GeminiController] Repeat mitigation triggered for ${fingerprint} (count=${entry.count}, severity=${severity})`,
-      );
-      // Clear the flag after one mitigation attempt to avoid infinite directives
-      entry.mitigate = false;
-      return `\n\n[SYSTEM ${severity}: Your previous ${entry.count} responses were IDENTICAL. This is a repetition loop. You MUST provide a substantially DIFFERENT response. Do NOT repeat the same text. If you are stuck, acknowledge the issue and ask the user for clarification instead of repeating yourself.]\n`;
-    }
-    return "";
+    return this.repetitionBreaker.getMitigationDirective(fingerprint);
   }
 
   /**

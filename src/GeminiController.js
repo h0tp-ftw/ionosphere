@@ -229,7 +229,9 @@ export class GeminiController extends EventEmitter {
       }
 
       const { executable, initialArgs } = this.cliRunner.getExecutableAndArgs();
-      const finalArgs = this.cliRunner.buildFinalArgs(initialArgs, { attachments });
+      const finalArgs = this.cliRunner.buildFinalArgs(initialArgs, {
+        attachments,
+      });
 
       // Persistence for debugging
       if (process.env.GEMINI_DEBUG_PROMPTS === "true") {
@@ -257,7 +259,11 @@ export class GeminiController extends EventEmitter {
         const accumulator = new JsonlAccumulator();
         let lastResultJson = null;
 
-        const spawnEnv = this.cliRunner.prepareEnv(settingsPath, extraEnv, systemPromptPath);
+        const spawnEnv = this.cliRunner.prepareEnv(
+          settingsPath,
+          extraEnv,
+          systemPromptPath,
+        );
 
         if (process.env.GEMINI_DEBUG_PROMPTS === "true") {
           const hijackedFrom = this.callbacksByTurn.get(turnId)?.hijackedFrom;
@@ -325,12 +331,13 @@ export class GeminiController extends EventEmitter {
               if (!proc.cleaner) {
                 proc.cleaner = new StreamingCleaner(
                   (text) => {
-                    const shouldKill = this.repetitionBreaker.checkTextRepetition(
-                      proc,
-                      text,
-                      turnId,
-                      this.callbacksByTurn.get(turnId) || {}
-                    );
+                    const shouldKill =
+                      this.repetitionBreaker.checkTextRepetition(
+                        proc,
+                        text,
+                        turnId,
+                        this.callbacksByTurn.get(turnId) || {},
+                      );
 
                     if (shouldKill) {
                       proc.kill("SIGKILL");
@@ -351,10 +358,14 @@ export class GeminiController extends EventEmitter {
               proc.cleaner.push(content);
             }
           } else if (json.type === "tool_use" || json.type === "toolCall") {
+            const toolName = json.tool_name || json.name;
+            if (process.env.GEMINI_DEBUG_PARALLEL === "true") {
+              console.log(
+                `[Turn ${turnId}] GeminiController: Received tool_use for ${toolName}`,
+              );
+            }
             // Flush any pending text before a tool use event
             if (proc.cleaner) proc.cleaner.flush();
-
-            const toolName = json.tool_name || json.name;
             const argsObj = json.arguments || {};
 
             // Track real usage to suppress "echo leaks"
@@ -367,7 +378,7 @@ export class GeminiController extends EventEmitter {
               argsObj,
               extraEnv.IONOSPHERE_HISTORY_HASH,
               extraEnv.IONOSPHERE_HISTORY_TOOLS,
-              activeCallbacks
+              activeCallbacks,
             );
 
             if (repeatStatus === "KILL") {
@@ -456,7 +467,10 @@ export class GeminiController extends EventEmitter {
             const activeCallbacks = this.callbacksByTurn.get(turnId) || {};
             console.error(`[Gemini CLI STDERR] [Turn ${turnId}] ${stderrText}`);
 
-            const errorResult = this.errorParser.parseStderr(stderrText, activeCallbacks);
+            const errorResult = this.errorParser.parseStderr(
+              stderrText,
+              activeCallbacks,
+            );
             if (errorResult?.type === "FATAL") {
               proc.kill("SIGKILL");
             }

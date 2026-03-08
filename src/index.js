@@ -753,6 +753,14 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
     let finalStats = null;
     let responseSent = false;
 
+    // Parallel Call Aggregation State
+    let expectedToolCallsCount = 0;
+    let receivedToolCallsCount = 0;
+    let parallelSafetyTimer = null;
+    const stdoutPendingQueues = new Map(); // toolName -> [toolId1, toolId2, ...]
+    const ipcHandledIds = new Set();
+    const transparentTools = ["google_web_search"];
+
     const turnTempDir = path.join(baseTempDir, activeTurnId); // Needed early for parsed logger
 
     const logParsedOutput = (data) => {
@@ -861,10 +869,32 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
     };
 
     const onToolCall = async (info) => {
+      if (process.env.GEMINI_DEBUG_PARALLEL === "true") {
+        console.log(`[Turn ${activeTurnId}] onToolCall entry: ${info.name} (ID: ${info.id}). responseSent=${responseSent}`);
+      }
+
+      if (!transparentTools.includes(info.name)) {
+        receivedToolCallsCount++;
+        
+        // Match with the first pending ID for this tool name
+        const queue = stdoutPendingQueues.get(info.name);
+        if (queue && queue.length > 0) {
+          const toolId = queue.shift();
+          ipcHandledIds.add(toolId);
+          if (process.env.GEMINI_DEBUG_PARALLEL === "true") {
+            console.log(`[Turn ${activeTurnId}] Parallel Sync: Matched IPC for ${info.name} to toolId ${toolId}`);
+          }
+        }
+
+        if (process.env.GEMINI_DEBUG_PARALLEL === "true") {
+          console.log(`[Turn ${activeTurnId}] Parallel Sync: Received count incremented to ${receivedToolCallsCount} for ${info.name}`);
+        }
+      }
+
       if (responseSent || res.writableEnded) {
-        if (process.env.GEMINI_DEBUG_HANDOFF === "true")
+        if (process.env.GEMINI_DEBUG_HANDOFF === "true" || process.env.GEMINI_DEBUG_PARALLEL === "true")
           console.log(
-            `[Turn ${activeTurnId}] Suppressing onToolCall: responseSent=${responseSent}, writableEnded=${res.writableEnded}`,
+            `[Turn ${activeTurnId}] Suppressing onToolCall: responseSent=${responseSent}, writableEnded=${res.writableEnded} for tool ${info.name}`,
           );
         return;
       }
@@ -918,6 +948,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         return;
       }
       if (disconnectTimeout) clearTimeout(disconnectTimeout);
+      if (process.env.GEMINI_DEBUG_PARALLEL === "true") console.log(`[Turn ${activeTurnId}] onError: Setting responseSent = true`);
       responseSent = true;
 
       const errorObj = formatErrorResponse(err);
@@ -945,6 +976,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         return;
       }
       if (disconnectTimeout) clearTimeout(disconnectTimeout);
+      if (process.env.GEMINI_DEBUG_PARALLEL === "true") console.log(`[Turn ${activeTurnId}] onResult: Setting responseSent = true`);
       responseSent = true;
       finalStats = json.stats || {};
       if (isStreaming) {
@@ -1004,9 +1036,9 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
       if (parkDebounceTimer) clearTimeout(parkDebounceTimer);
     };
 
-    // Synchronization State for Spawn Cutoff Fix
+    // Synchronization State for Spawn Cutoff Fix (Parallel Call Safe)
     const stdoutToolCalls = new Set();
-    let pendingParkExecute = null;
+    const pendingParkExecutes = new Map(); // ToolName -> { execute, timer }
 
     const onEvent = (json) => {
       if (process.env.GEMINI_DEBUG_RAW === "true") {
@@ -1014,31 +1046,98 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
       }
       if (json.type === "toolCall" || json.type === "tool_use") {
         const toolName = json.tool_name || json.name;
+        const toolId = json.tool_id || `${toolName}-${randomUUID()}`;
+
         stdoutToolCalls.add(toolName);
-        if (pendingParkExecute && pendingParkExecute.name === toolName) {
-          if (process.env.GEMINI_DEBUG_RAW === "true") {
+
+        if (!transparentTools.includes(toolName)) {
+          expectedToolCallsCount++;
+          if (!stdoutPendingQueues.has(toolName)) stdoutPendingQueues.set(toolName, []);
+          stdoutPendingQueues.get(toolName).push(toolId);
+          
+          if (process.env.GEMINI_DEBUG_PARALLEL === "true") {
+            console.log(`[Turn ${activeTurnId}] Parallel Sync: Expected count incremented to ${expectedToolCallsCount} for ${toolName} (${toolId})`);
+          }
+        }
+        
+        const pending = pendingParkExecutes.get(toolName);
+        if (pending) {
+          if (process.env.GEMINI_DEBUG_RAW === "true" || process.env.GEMINI_DEBUG_PARALLEL === "true") {
             console.log(
-              `[Sync] CLI emitted toolCall for ${toolName}. Flushing pending park.`,
+              `[Sync] CLI emitted toolCall for ${toolName}. Flushing pending park (Parallel Queue: ${pendingParkExecutes.size}).`,
             );
           }
-          if (pendingParkExecute.timer) clearTimeout(pendingParkExecute.timer);
-          const execute = pendingParkExecute.execute;
-          pendingParkExecute = null;
+          if (pending.timer) clearTimeout(pending.timer);
+          const execute = pending.execute;
+          pendingParkExecutes.delete(toolName);
           execute();
+        } else if (process.env.GEMINI_DEBUG_PARALLEL === "true") {
+          console.log(`[Sync] CLI emitted toolCall for ${toolName} but no pending park found.`);
+        }
+      } else if (json.type === "tool_result") {
+        const toolId = json.tool_id;
+        if (toolId && !ipcHandledIds.has(toolId)) {
+          // Internal failure or skipped MCP call
+          let foundName = null;
+          for (const [name, queue] of stdoutPendingQueues.entries()) {
+            const idx = queue.indexOf(toolId);
+            if (idx !== -1) {
+              queue.splice(idx, 1);
+              foundName = name;
+              break;
+            }
+          }
+
+          if (foundName && !transparentTools.includes(foundName)) {
+            receivedToolCallsCount++;
+            ipcHandledIds.add(toolId);
+            if (process.env.GEMINI_DEBUG_PARALLEL === "true") {
+              console.log(`[Turn ${activeTurnId}] Parallel Sync: Internal failure/result detected for ${foundName} (${toolId}). Received count incremented to ${receivedToolCallsCount}`);
+            }
+          }
         }
       }
     };
 
-    const executePark = (msg) => {
+    const executePark = (msg, force = false) => {
+      if (process.env.GEMINI_DEBUG_PARALLEL === "true") {
+        console.log(`[Turn ${activeTurnId}] executePark entry for ${msg.name}. responseSent=${responseSent}, force=${force}, received=${receivedToolCallsCount}, expected=${expectedToolCallsCount}`);
+      }
+
+      if (!force && receivedToolCallsCount < expectedToolCallsCount) {
+        if (process.env.GEMINI_DEBUG_PARALLEL === "true") {
+          console.log(`[Turn ${activeTurnId}] Parallel Sync: Delaying executePark for ${msg.name}. Waiting for ${expectedToolCallsCount - receivedToolCallsCount} more tools.`);
+        }
+        if (!parallelSafetyTimer) {
+          parallelSafetyTimer = setTimeout(() => {
+            if (process.env.GEMINI_DEBUG_PARALLEL === "true") {
+              console.warn(`[Turn ${activeTurnId}] Parallel sync safety timeout reached (1s). Forcing executePark for ${msg.name}. This usually happens when the CLI executes parallel tool calls sequentially.`);
+            }
+            parallelSafetyTimer = null;
+            executePark(msg, true);
+          }, 1000);
+        }
+        return;
+      }
+
+      if (parallelSafetyTimer) {
+        clearTimeout(parallelSafetyTimer);
+        parallelSafetyTimer = null;
+      }
+
       if (responseSent || res.writableEnded) {
-        if (process.env.GEMINI_DEBUG_HANDOFF === "true")
+        if (process.env.GEMINI_DEBUG_HANDOFF === "true" || process.env.GEMINI_DEBUG_PARALLEL === "true")
           console.log(
-            `[Turn ${activeTurnId}] Suppressing onPark: responseSent=${responseSent}, writableEnded=${res.writableEnded}`,
+            `[Turn ${activeTurnId}] Suppressing onPark/executePark: responseSent=${responseSent}, writableEnded=${res.writableEnded}`,
           );
         return;
       }
       if (disconnectTimeout) clearTimeout(disconnectTimeout);
       if (parkDebounceTimer) clearTimeout(parkDebounceTimer);
+      
+      if (process.env.GEMINI_DEBUG_PARALLEL === "true") {
+        console.log(`[Turn ${activeTurnId}] executePark: Setting responseSent = true for ${msg.name}`);
+      }
       responseSent = true; // Mark BEFORE sending to ensure no close-race
       console.log(
         `[Turn ${activeTurnId}] Yielding response on Parked state. Tool: ${msg.name}`,
@@ -1115,24 +1214,35 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
       const toolName = msg.name.startsWith("ionosphere__")
         ? msg.name.substring(12)
         : msg.name;
+
+      if (process.env.GEMINI_DEBUG_PARALLEL === "true") {
+        console.log(`[Turn ${activeTurnId}] onPark for ${toolName}. stdoutSeen=${stdoutToolCalls.has(toolName)}`);
+      }
+
+      // ALWAYS clear current debounce timer when a new tool activity arrives.
+      // This ensures parallel calls arriving in rapid succession (even if out of order)
+      // reset the "end-of-turn" countdown.
+      if (parkDebounceTimer) {
+        if (process.env.GEMINI_DEBUG_PARALLEL === "true") console.log(`[Sync] Clearing existing parkDebounceTimer due to new onPark for ${toolName}`);
+        clearTimeout(parkDebounceTimer);
+      }
+
       if (stdoutToolCalls.has(toolName)) {
-        if (process.env.GEMINI_DEBUG_RAW === "true") {
+        if (process.env.GEMINI_DEBUG_RAW === "true" || process.env.GEMINI_DEBUG_PARALLEL === "true") {
           console.log(
             `[Sync] Tool ${toolName} already emitted by stdout. Executing debounced park.`,
           );
         }
-        if (parkDebounceTimer) clearTimeout(parkDebounceTimer);
         parkDebounceTimer = setTimeout(() => {
           executePark(msg);
         }, 200);
       } else {
-        if (process.env.GEMINI_DEBUG_RAW === "true") {
+        if (process.env.GEMINI_DEBUG_RAW === "true" || process.env.GEMINI_DEBUG_PARALLEL === "true") {
           console.log(
-            `[Sync] Tool ${toolName} not yet emitted by stdout. Delaying park execution.`,
+            `[Sync] Tool ${toolName} not yet emitted by stdout. Delaying park execution (Queue Size: ${pendingParkExecutes.size + 1}).`,
           );
         }
-        pendingParkExecute = {
-          name: toolName,
+        pendingParkExecutes.set(toolName, {
           execute: () => {
             if (parkDebounceTimer) clearTimeout(parkDebounceTimer);
             parkDebounceTimer = setTimeout(() => {
@@ -1143,11 +1253,11 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
             console.warn(
               `[Sync] Timeout waiting for stdout to emit toolCall for ${toolName}. Forcing park execution.`,
             );
-            pendingParkExecute = null;
+            pendingParkExecutes.delete(toolName);
             if (parkDebounceTimer) clearTimeout(parkDebounceTimer);
             executePark(msg);
           }, 2000),
-        };
+        });
       }
     };
 

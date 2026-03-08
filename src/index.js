@@ -762,8 +762,11 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
             typeof data === "string"
               ? data
               : JSON.stringify(data, null, 2) + "\n";
-          // Using fs.appendFileSync to strictly avoid dangling promises in tests
-          fs.appendFileSync(parsedFile, toLog);
+          // GOOD: Non-blocking, fire-and-forget write. 
+          // Test-runner safe because we handle errors strictly via callback.
+          fs.appendFile(parsedFile, toLog, (err) => {
+            if (err) console.error(`[DEBUG] Failed to log parsed output: ${err.message}`);
+          });
         } catch (e) {
           console.error(`[DEBUG] logParsedOutput failed:`, e.message);
         }

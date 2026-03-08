@@ -144,23 +144,30 @@ if (fs.existsSync(configTarget)) {
         };`;
 
   if (
-    configContent.includes("const maybeRegister = (toolClass, registerFn) => {")
+    configContent.includes("const maybeRegister = (toolClass, registerFn) => {") &&
+    !configContent.includes("internalAllowList")
   ) {
     configContent = configContent.replace(
       maybeRegisterSearch,
       maybeRegisterReplace,
     );
     console.log("  - Applied Selective Blindness to native tool registration.");
+  } else if (configContent.includes("internalAllowList")) {
+    console.log(
+      "  - Selective Blindness patch already applied to native tool registration.",
+    );
   }
 
   // Disable native agents (Codebase Investigator, etc.)
-  const subAgentCall = /this\.registerSubAgentTools\(registry\);/;
+  const subAgentCall = /^[ \t]*this\.registerSubAgentTools\(registry\);/m;
   if (configContent.match(subAgentCall)) {
     configContent = configContent.replace(
       subAgentCall,
       "// [IONOSPHERE] Disabled native agents for security\n        // this.registerSubAgentTools(registry);",
     );
     console.log("  - Disabled native sub-agent registration.");
+  } else if (configContent.includes("[IONOSPHERE] Disabled native agents")) {
+    console.log("  - Native sub-agent registration already disabled.");
   }
 
   fs.writeFileSync(configTarget, configContent, "utf8");
@@ -286,7 +293,7 @@ if (fs.existsSync(nonInteractiveTarget)) {
   fs.writeFileSync(nonInteractiveTarget, niContent, "utf8");
 }
 
-// 4. Patch GeminiClient.js (Prevent internal leakage on tool errors)
+// 4. Patch GeminiClient.js (Lobotomy & Leak Prevention)
 const clientTarget = path.resolve(
   __dirname,
   "..",
@@ -299,32 +306,72 @@ const clientTarget = path.resolve(
   "client.js",
 );
 if (fs.existsSync(clientTarget)) {
-  console.log(`[Patcher] Patching client.js for Leak Prevention: ${clientTarget}`);
+  console.log(`[Patcher] Patching client.js (Lobotomy & Leak Prevention): ${clientTarget}`);
   let clientContent = fs.readFileSync(clientTarget, "utf8");
 
-  const hasPendingSearch = "const hasPendingToolCall = !!lastMessage &&\n            lastMessage.role === 'model' &&\n            (lastMessage.parts?.some((p) => 'functionCall' in p) || false);";
+  // 1. Lobotomize Internal Retries (Force 1 turn maximum)
+  if (clientContent.includes("const MAX_TURNS = 100;")) {
+      clientContent = clientContent.replace("const MAX_TURNS = 100;", "const MAX_TURNS = 1;");
+      console.log("  - Lobotomized: Internal retries restricted to 1 turn.");
+  }
+
+  // 2. Leak Prevention (isToolError suppression)
+  const hasPendingOriginal = "const hasPendingToolCall = !!lastMessage &&\n            lastMessage.role === 'model' &&\n            (lastMessage.parts?.some((p) => 'functionCall' in p) || false);";
   
   const leakFixReplace = `const hasPendingToolCall = !!lastMessage &&
             lastMessage.role === 'model' &&
             (lastMessage.parts?.some((p) => 'functionCall' in p) || false);
         // [IONOSPHERE] Also avoid injecting context if the last message was a tool response
-        // indicating a validation error. The model should focus on fixing the call.
+        // indicating a validation error, or a synthetic error message from the CLI.
         const isToolError = !!lastMessage &&
             lastMessage.role === 'user' &&
-            (lastMessage.parts?.some((p) => 'functionResponse' in p &&
+            (lastMessage.parts?.some((p) => ('functionResponse' in p &&
             !!p.functionResponse &&
             typeof p.functionResponse.response === 'object' &&
             p.functionResponse.response !== null &&
             'error' in p.functionResponse.response) ||
+            ('text' in p && p.text?.startsWith('[ERROR]'))) ||
             false);`;
 
-  if (clientContent.includes("const hasPendingToolCall")) {
-      clientContent = clientContent.replace(hasPendingSearch, leakFixReplace);
+  if (clientContent.includes("const hasPendingToolCall") && !clientContent.includes("isToolError")) {
+      clientContent = clientContent.replace(hasPendingOriginal, leakFixReplace);
       clientContent = clientContent.replace(
-          "if (this.config.getIdeMode() && !hasPendingToolCall) {",
-          "if (this.config.getIdeMode() && !hasPendingToolCall && !isToolError) {"
+          /if \(this\.config\.getIdeMode\(\) && !hasPendingToolCall\) \{/,
+          "if ((this.config.getIdeMode ? this.config.getIdeMode() : false) && !hasPendingToolCall && !isToolError) {"
       );
       console.log("  - Applied State Leakage prevention patch.");
+  } else if (clientContent.includes("isToolError")) {
+      console.log("  - State Leakage prevention patch already applied.");
+  }
+
+  fs.writeFileSync(clientTarget, clientContent, "utf8");
+}
+
+// 4.1 Patch GeminiClient.js startChat (Prevent initial context leakage on stateless restart)
+if (fs.existsSync(clientTarget)) {
+  console.log(`[Patcher] Patching client.js startChat for Leak Prevention: ${clientTarget}`);
+  let clientContent = fs.readFileSync(clientTarget, "utf8");
+
+  const startChatSearch = "const history = await getInitialChatHistory(this.config, extraHistory);";
+  const startChatReplace = `const lastMessage = extraHistory && extraHistory.length > 0
+            ? extraHistory[extraHistory.length - 1]
+            : undefined;
+        const isErrorState = !!lastMessage &&
+            lastMessage.role === 'user' &&
+            (lastMessage.parts?.some((p) => ('functionResponse' in p &&
+            !!p.functionResponse &&
+            typeof p.functionResponse.response === 'object' &&
+            p.functionResponse.response !== null &&
+            'error' in p.functionResponse.response) ||
+            ('text' in p && p.text?.startsWith('[ERROR]'))) ||
+            false);
+        const history = isErrorState && extraHistory
+            ? extraHistory
+            : await getInitialChatHistory(this.config, extraHistory);`;
+
+  if (clientContent.includes(startChatSearch)) {
+      clientContent = clientContent.replace(startChatSearch, startChatReplace);
+      console.log("  - Applied Stateless Restart Leakage prevention patch.");
   }
 
   fs.writeFileSync(clientTarget, clientContent, "utf8");
@@ -347,13 +394,15 @@ if (fs.existsSync(schedulerTarget)) {
   let schedulerContent = fs.readFileSync(schedulerTarget, "utf8");
 
   const validationErrorSearch = "response: createErrorResponse(request, e instanceof Error ? e : new Error(String(e)), ToolErrorType.INVALID_TOOL_PARAMS),";
-  const validationErrorReplace = `response: createErrorResponse(request, e instanceof Error ? e : new Error(String(e)), this.config.getDisableToolValidation()
+  const validationErrorReplace = `response: createErrorResponse(request, e instanceof Error ? e : new Error(String(e)), (this.config.getDisableToolValidation ? this.config.getDisableToolValidation() : false)
                         ? ToolErrorType.EXECUTION_FAILED
                         : ToolErrorType.INVALID_TOOL_PARAMS),`;
 
   if (schedulerContent.includes(validationErrorSearch)) {
       schedulerContent = schedulerContent.replace(validationErrorSearch, validationErrorReplace);
       console.log("  - Applied model-correctable validation error patch.");
+  } else if (schedulerContent.includes("this.config.getDisableToolValidation()")) {
+      console.log("  - Model-correctable validation error patch already applied.");
   }
 
   fs.writeFileSync(schedulerTarget, schedulerContent, "utf8");

@@ -330,12 +330,7 @@ if (fs.existsSync(clientTarget)) {
   const hasPendingOriginal =
     "const hasPendingToolCall = !!lastMessage &&\n            lastMessage.role === 'model' &&\n            (lastMessage.parts?.some((p) => 'functionCall' in p) || false);";
 
-  const leakFixReplace = `const hasPendingToolCall = !!lastMessage &&
-            lastMessage.role === 'model' &&
-            (lastMessage.parts?.some((p) => 'functionCall' in p) || false);
-        // [IONOSPHERE] Also avoid injecting context if the last message was a tool response
-        // indicating a validation error, or a synthetic error message from the CLI.
-        const isToolError = !!lastMessage &&
+  const leakFixReplace = `const isToolError = !!lastMessage &&
             lastMessage.role === 'user' &&
             (lastMessage.parts?.some((p) => ('functionResponse' in p &&
             !!p.functionResponse &&
@@ -349,9 +344,14 @@ if (fs.existsSync(clientTarget)) {
     clientContent.includes("const hasPendingToolCall") &&
     !clientContent.includes("isToolError")
   ) {
-    clientContent = clientContent.replace(hasPendingOriginal, leakFixReplace);
     clientContent = clientContent.replace(
-      /if \(this\.config\.getIdeMode\(\) && !hasPendingToolCall\) \{/,
+      "const hasPendingToolCall = !!lastMessage &&\n            lastMessage.role === 'model' &&\n            (lastMessage.parts?.some((p) => 'functionCall' in p) || false);",
+      (match) => `${match}\n        // [IONOSPHERE] Also avoid injecting context if the last message was a tool response
+        // indicating a validation error, or a synthetic error message from the CLI.
+        ${leakFixReplace}`
+    );
+    clientContent = clientContent.replace(
+      /if \(this\.config\.getIdeMode\(\) && !hasPendingToolCall\) \{/g,
       "if ((this.config.getIdeMode ? this.config.getIdeMode() : false) && !hasPendingToolCall && !isToolError) {",
     );
     console.log("  - Applied State Leakage prevention patch.");

@@ -144,7 +144,9 @@ if (fs.existsSync(configTarget)) {
         };`;
 
   if (
-    configContent.includes("const maybeRegister = (toolClass, registerFn) => {") &&
+    configContent.includes(
+      "const maybeRegister = (toolClass, registerFn) => {",
+    ) &&
     !configContent.includes("internalAllowList")
   ) {
     configContent = configContent.replace(
@@ -249,9 +251,10 @@ if (fs.existsSync(nonInteractiveTarget)) {
     "            let currentMessages;\n" +
     "            if (process.env.IONOSPHERE_STRUCTURED_HISTORY === 'true' && input) {\n" +
     "                let jsonInput = input.trim();\n" +
-    "                const jsonMatch = jsonInput.match(/\\[[\\s\\S]*\\]/);\n" +
-    "                if (jsonMatch) { jsonInput = jsonMatch[0]; }\n" +
-    "                const contents = JSON.parse(jsonInput);\n" +
+    "                const jsonStart = jsonInput.indexOf('[{\"role\":');\n" +
+    "                const jsonEnd = jsonInput.lastIndexOf(']');\n" +
+    "                if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) { jsonInput = jsonInput.substring(jsonStart, jsonEnd + 1); }\n" +
+    "                const contents = JSON.parse(jsonInput).map(c => ({ ...c, content: c.content === null ? '' : c.content, parts: (c.parts || []).map(p => ('text' in p && p.text === null) ? { ...p, text: '' } : p) }));\n" +
     "                if (!Array.isArray(contents) || contents.length === 0) {\n" +
     "                    throw new FatalInputError('Structured history: stdin must be a non-empty JSON Content[] array.');\n" +
     "                }\n" +
@@ -309,18 +312,24 @@ const clientTarget = path.resolve(
   "client.js",
 );
 if (fs.existsSync(clientTarget)) {
-  console.log(`[Patcher] Patching client.js (Lobotomy & Leak Prevention): ${clientTarget}`);
+  console.log(
+    `[Patcher] Patching client.js (Lobotomy & Leak Prevention): ${clientTarget}`,
+  );
   let clientContent = fs.readFileSync(clientTarget, "utf8");
 
   // 1. Lobotomize Internal Retries (Force 1 turn maximum)
   if (clientContent.includes("const MAX_TURNS = 100;")) {
-      clientContent = clientContent.replace("const MAX_TURNS = 100;", "const MAX_TURNS = 1;");
-      console.log("  - Lobotomized: Internal retries restricted to 1 turn.");
+    clientContent = clientContent.replace(
+      "const MAX_TURNS = 100;",
+      "const MAX_TURNS = 1;",
+    );
+    console.log("  - Lobotomized: Internal retries restricted to 1 turn.");
   }
 
   // 2. Leak Prevention (isToolError suppression)
-  const hasPendingOriginal = "const hasPendingToolCall = !!lastMessage &&\n            lastMessage.role === 'model' &&\n            (lastMessage.parts?.some((p) => 'functionCall' in p) || false);";
-  
+  const hasPendingOriginal =
+    "const hasPendingToolCall = !!lastMessage &&\n            lastMessage.role === 'model' &&\n            (lastMessage.parts?.some((p) => 'functionCall' in p) || false);";
+
   const leakFixReplace = `const hasPendingToolCall = !!lastMessage &&
             lastMessage.role === 'model' &&
             (lastMessage.parts?.some((p) => 'functionCall' in p) || false);
@@ -336,15 +345,18 @@ if (fs.existsSync(clientTarget)) {
             ('text' in p && p.text?.startsWith('[ERROR]'))) ||
             false);`;
 
-  if (clientContent.includes("const hasPendingToolCall") && !clientContent.includes("isToolError")) {
-      clientContent = clientContent.replace(hasPendingOriginal, leakFixReplace);
-      clientContent = clientContent.replace(
-          /if \(this\.config\.getIdeMode\(\) && !hasPendingToolCall\) \{/,
-          "if ((this.config.getIdeMode ? this.config.getIdeMode() : false) && !hasPendingToolCall && !isToolError) {"
-      );
-      console.log("  - Applied State Leakage prevention patch.");
+  if (
+    clientContent.includes("const hasPendingToolCall") &&
+    !clientContent.includes("isToolError")
+  ) {
+    clientContent = clientContent.replace(hasPendingOriginal, leakFixReplace);
+    clientContent = clientContent.replace(
+      /if \(this\.config\.getIdeMode\(\) && !hasPendingToolCall\) \{/,
+      "if ((this.config.getIdeMode ? this.config.getIdeMode() : false) && !hasPendingToolCall && !isToolError) {",
+    );
+    console.log("  - Applied State Leakage prevention patch.");
   } else if (clientContent.includes("isToolError")) {
-      console.log("  - State Leakage prevention patch already applied.");
+    console.log("  - State Leakage prevention patch already applied.");
   }
 
   fs.writeFileSync(clientTarget, clientContent, "utf8");
@@ -352,10 +364,13 @@ if (fs.existsSync(clientTarget)) {
 
 // 4.1 Patch GeminiClient.js startChat (Prevent initial context leakage on stateless restart)
 if (fs.existsSync(clientTarget)) {
-  console.log(`[Patcher] Patching client.js startChat for Leak Prevention: ${clientTarget}`);
+  console.log(
+    `[Patcher] Patching client.js startChat for Leak Prevention: ${clientTarget}`,
+  );
   let clientContent = fs.readFileSync(clientTarget, "utf8");
 
-  const startChatSearch = "const history = await getInitialChatHistory(this.config, extraHistory);";
+  const startChatSearch =
+    "const history = await getInitialChatHistory(this.config, extraHistory);";
   const startChatReplace = `const lastMessage = extraHistory && extraHistory.length > 0
             ? extraHistory[extraHistory.length - 1]
             : undefined;
@@ -373,8 +388,8 @@ if (fs.existsSync(clientTarget)) {
             : await getInitialChatHistory(this.config, extraHistory);`;
 
   if (clientContent.includes(startChatSearch)) {
-      clientContent = clientContent.replace(startChatSearch, startChatReplace);
-      console.log("  - Applied Stateless Restart Leakage prevention patch.");
+    clientContent = clientContent.replace(startChatSearch, startChatReplace);
+    console.log("  - Applied Stateless Restart Leakage prevention patch.");
   }
 
   fs.writeFileSync(clientTarget, clientContent, "utf8");
@@ -393,19 +408,29 @@ const schedulerTarget = path.resolve(
   "scheduler.js",
 );
 if (fs.existsSync(schedulerTarget)) {
-  console.log(`[Patcher] Patching scheduler.js for model-correctable errors: ${schedulerTarget}`);
+  console.log(
+    `[Patcher] Patching scheduler.js for model-correctable errors: ${schedulerTarget}`,
+  );
   let schedulerContent = fs.readFileSync(schedulerTarget, "utf8");
 
-  const validationErrorSearch = "response: createErrorResponse(request, e instanceof Error ? e : new Error(String(e)), ToolErrorType.INVALID_TOOL_PARAMS),";
+  const validationErrorSearch =
+    "response: createErrorResponse(request, e instanceof Error ? e : new Error(String(e)), ToolErrorType.INVALID_TOOL_PARAMS),";
   const validationErrorReplace = `response: createErrorResponse(request, e instanceof Error ? e : new Error(String(e)), (this.config.getDisableToolValidation ? this.config.getDisableToolValidation() : false)
                         ? ToolErrorType.EXECUTION_FAILED
                         : ToolErrorType.INVALID_TOOL_PARAMS),`;
 
   if (schedulerContent.includes(validationErrorSearch)) {
-      schedulerContent = schedulerContent.replace(validationErrorSearch, validationErrorReplace);
-      console.log("  - Applied model-correctable validation error patch.");
-  } else if (schedulerContent.includes("this.config.getDisableToolValidation()")) {
-      console.log("  - Model-correctable validation error patch already applied.");
+    schedulerContent = schedulerContent.replace(
+      validationErrorSearch,
+      validationErrorReplace,
+    );
+    console.log("  - Applied model-correctable validation error patch.");
+  } else if (
+    schedulerContent.includes("this.config.getDisableToolValidation()")
+  ) {
+    console.log(
+      "  - Model-correctable validation error patch already applied.",
+    );
   }
 
   fs.writeFileSync(schedulerTarget, schedulerContent, "utf8");

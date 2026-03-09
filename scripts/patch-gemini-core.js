@@ -248,10 +248,7 @@ if (fs.existsSync(nonInteractiveTarget)) {
     "// [IONOSPHERE] Native History Protocol: dual-path init\n" +
     "            let currentMessages;\n" +
     "            if (process.env.IONOSPHERE_STRUCTURED_HISTORY === 'true' && input) {\n" +
-    "                let jsonInput = input.trim();\n" +
-    "                const jsonMatch = jsonInput.match(/\\[[\\s\\S]*\\]/);\n" +
-    "                if (jsonMatch) { jsonInput = jsonMatch[0]; }\n" +
-    "                const contents = JSON.parse(jsonInput);\n" +
+    "                const contents = JSON.parse(input);\n" +
     "                if (!Array.isArray(contents) || contents.length === 0) {\n" +
     "                    throw new FatalInputError('Structured history: stdin must be a non-empty JSON Content[] array.');\n" +
     "                }\n" +

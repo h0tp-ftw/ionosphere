@@ -36,6 +36,7 @@ services:
       - "3000:3000"
     volumes:
       - gemini-config:/root/.gemini
+      - ${IONOSPHERE_TEMP_MOUNT_SOURCE:-./temp}:/app/temp
 
 volumes:
   gemini-config:

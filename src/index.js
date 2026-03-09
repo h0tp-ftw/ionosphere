@@ -229,6 +229,10 @@ const buildGeminiHistory = (messages) => {
   flushUser();
   flushModel();
 
+  if (process.env.GEMINI_DEBUG_CONTENT === "true") {
+    console.log(`[FORENSICS] Gemini Content[] (Length: ${contents.length}):\n${JSON.stringify(contents, null, 2)}`);
+  }
+
   return contents;
 };
 
@@ -710,6 +714,10 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         }
 
         if (shouldPreempt) {
+          console.log(
+            `[API] One Session Rule: User provided new instruction while turn ${hijackedTurnId} was waiting for a tool. Preempting.`,
+          );
+          logForensics(`PREEMPTION: Killing turn ${hijackedTurnId} for new instruction.`);
           controller.cancelCurrentTurn(hijackedTurnId);
           parkedTurns.delete(hijackedTurnId);
           activeTurnsByHash.delete(fingerprint);
@@ -767,6 +775,16 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
     const transparentTools = ["google_web_search"];
 
     const turnTempDir = path.join(baseTempDir, activeTurnId); // Needed early for parsed logger
+
+    const logForensics = (data) => {
+      const logFile = path.join(turnTempDir, "forensics.log");
+      const timestamp = new Date().toISOString();
+      const prefix = `[${timestamp}] [Turn ${activeTurnId}] `;
+      const toLog = typeof data === "string" ? prefix + data + "\n" : prefix + JSON.stringify(data, null, 2) + "\n";
+      fs.appendFile(logFile, toLog, (err) => {
+        if (err) console.error(`[DEBUG] Failed to log forensics: ${err.message}`);
+      });
+    };
 
     const logParsedOutput = (data) => {
       if (process.env.GEMINI_DEBUG_KEEP_TEMP === "true") {
@@ -1310,10 +1328,12 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         console.log(
           `[HIJACK] Wait-and-Hijack: Turn ${hijackedTurnId} parked! Proceeding to Handoff.`,
         );
+        logForensics(`HIJACK: Wait-and-Hijack successful for turn ${hijackedTurnId}.`);
       } else {
         console.warn(
           `[API] Wait-and-Hijack: Timed out waiting for turn ${hijackedTurnId} to park. Falling back to fresh turn.`,
         );
+        logForensics(`HIJACK: Wait-and-Hijack TIMED OUT for turn ${hijackedTurnId}. Falling back to new turn.`);
         hijackedTurnId = null;
       }
     }
@@ -1337,6 +1357,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         console.log(
           `[API] Handoff failed: Turn ${hijackedTurnId} is no longer active. Falling back to fresh turn.`,
         );
+        logForensics(`HANDOFF: Turn ${hijackedTurnId} is dead/killed. Falling back.`);
         parkedTurns.delete(hijackedTurnId);
         hijackedTurnId = null;
         // Fall through to NEW TURN CASE
@@ -1381,11 +1402,13 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
               console.log(
                 `[API] Warm Handoff: Hijacking turn ${hijackedTurnId} as Proxy (Narration).`,
               );
+              logForensics(`HANDOFF: Hijacking turn ${hijackedTurnId} as Proxy (Narration).`);
             }
           } else {
             console.log(
               `[API] Warm Handoff: Hijacking turn ${hijackedTurnId} as Proxy (Retry).`,
             );
+            logForensics(`HANDOFF: Hijacking turn ${hijackedTurnId} as Proxy (Retry).`);
           }
         }
 
@@ -1523,11 +1546,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
                     console.log(
                       `[API] Deep-scan match: Resolving ${callId} (Tool: ${pending.name}) for turn ${hijackedTurnId}`,
                     );
-                    if (process.env.GEMINI_DEBUG_HANDOFF === "true") {
-                      console.log(
-                        `[FORENSICS] Resolving with content (Full): ${JSON.stringify(resultData)}`,
-                      );
-                    }
+                    logForensics(`HANDOFF: Deep-scan matched callId ${callId} (Tool: ${pending.name}). Resolving.`);
                     resolveToolCall(callKey, resultData);
                     resolvedAny = true;
                     break;
@@ -1573,6 +1592,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
                   arguments: pending.arguments,
                 });
                 reemitted = true;
+                logForensics(`HANDOFF: Proxy Hijack re-emitted call ${callId} for tool '${clientToolName}'.`);
                 break;
               }
             }
@@ -1580,6 +1600,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
               console.warn(
                 `[API] Proxy Hijack: No pending tool call found for Turn ${hijackedTurnId}. Falling back.`,
               );
+              logForensics(`HANDOFF: No pending tool call found for Turn ${hijackedTurnId}. Falling back.`);
               hijackedTurnId = null;
               // Fall through to NEW TURN CASE
             } else {
@@ -1598,6 +1619,14 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
     // (turnTempDir is already defined earlier)
     if (!fs.existsSync(turnTempDir))
       fs.mkdirSync(turnTempDir, { recursive: true });
+
+    logForensics(`START: New Turn Request for fingerprint ${fingerprint} (isStreaming: ${isStreaming})`);
+    
+    const structuredContents = buildGeminiHistory(messages);
+    logForensics(`HISTORY: Built Gemini history with ${structuredContents.length} turns.`);
+    if (process.env.GEMINI_DEBUG_CONTENT === "true") {
+      logForensics({ event: "gemini_history", contents: structuredContents });
+    }
 
     // Serialize history (Strict Stateless Narrator)
     let attachmentCounter = 0;

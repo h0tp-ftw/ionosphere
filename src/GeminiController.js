@@ -238,11 +238,23 @@ export class GeminiController extends EventEmitter {
         const debugDir = path.join(this.cwd, "debug_prompts");
         if (!fs.existsSync(debugDir))
           await fsp.mkdir(debugDir, { recursive: true });
+        
+        // Save the raw text prompt (as it would be if not using structured history)
         await fsp.writeFile(
           path.join(debugDir, `turn-${turnId}-prompt.txt`),
           text,
           "utf-8",
         );
+
+        // Save the structured Content[] if it exists
+        if (structuredContents) {
+          await fsp.writeFile(
+            path.join(debugDir, `turn-${turnId}-content.json`),
+            JSON.stringify(structuredContents, null, 2),
+            "utf-8",
+          );
+        }
+
         if (systemPromptPath) {
           await fsp.copyFile(
             systemPromptPath,
@@ -278,12 +290,17 @@ export class GeminiController extends EventEmitter {
           );
         }
 
+        const spawnStartTime = Date.now();
         const proc = spawn(executable, finalArgs, {
           cwd: workspacePath,
           env: spawnEnv,
           stdio: ["pipe", "pipe", "pipe"],
           shell: process.platform === "win32",
         });
+
+        if (process.env.GEMINI_DEBUG_PROMPTS === "true") {
+          console.log(`[GeminiController] [Turn ${turnId}] Spawned CLI in ${Date.now() - spawnStartTime}ms`);
+        }
 
         // Write prompt content to stdin and signal EOF
         const stdinContent = structuredContents
@@ -295,7 +312,11 @@ export class GeminiController extends EventEmitter {
         });
 
         try {
-          proc.stdin.end(stdinContent, "utf-8");
+          proc.stdin.end(stdinContent, "utf-8", () => {
+             if (process.env.GEMINI_DEBUG_PROMPTS === "true") {
+               console.log(`[GeminiController] [Turn ${turnId}] Stdin finalized (payload length: ${stdinContent.length})`);
+             }
+          });
         } catch (err) {
           console.error(`[GeminiController] [Turn ${turnId}] Failed to end stdin:`, err.message);
         }

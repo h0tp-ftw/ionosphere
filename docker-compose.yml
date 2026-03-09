@@ -1,4 +1,4 @@
-version: '3.8'
+version: "3.8"
 
 services:
   ionosphere:
@@ -26,6 +26,9 @@ services:
       - GEMINI_DEBUG_KEEP_TEMP=${GEMINI_DEBUG_KEEP_TEMP:-false}
       - WARM_HANDOFF_ENABLED=${WARM_HANDOFF_ENABLED:-true}
       - GEMINI_DEBUG_PARALLEL=${GEMINI_DEBUG_PARALLEL:-false}
+      - GEMINI_DEBUG_CONTENT=${GEMINI_DEBUG_CONTENT:-false}
+      - GEMINI_DEBUG_PROMPTS=${GEMINI_DEBUG_PROMPTS:-false}
+      - GEMINI_DEBUG_FORENSICS=${GEMINI_DEBUG_FORENSICS:-false}
       - CI=${CI:-true}
     command: node src/index.js
     ports:

@@ -11,7 +11,8 @@
         "setup": "node scripts/setup.js",
         "update": "node scripts/update.js",
         "postinstall": "node scripts/patch-gemini-core.js",
-        "test": "node --test"
+        "test": "node --test",
+        "latency": "node scripts/latency.js"
     },
     "dependencies": {
         "@google/gemini-cli": "latest",

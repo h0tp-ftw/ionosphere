@@ -1638,6 +1638,15 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
 
     logForensics(`START: New Turn Request for fingerprint ${fingerprint} (isStreaming: ${isStreaming})`);
 
+    // DEBUG: Dump raw OpenAI messages[] summary to forensics for history loss investigation
+    const msgSummary = messages.map((m, i) => {
+      const snippet = typeof m.content === 'string' ? m.content.substring(0, 80) : (Array.isArray(m.content) ? `[${m.content.length} parts]` : '(no content)');
+      const toolCalls = m.tool_calls ? ` [${m.tool_calls.length} tool_calls]` : '';
+      const toolCallId = m.tool_call_id ? ` [tool_call_id: ${m.tool_call_id}]` : '';
+      return `  [${i}] role=${m.role}${toolCalls}${toolCallId}: ${snippet}`;
+    }).join('\n');
+    logForensics(`RAW_MESSAGES (${messages.length} messages):\n${msgSummary}`);
+
     const structuredContents = buildGeminiHistory(messages);
     logForensics(`HISTORY: Built Gemini history with ${structuredContents.length} turns.`);
     if (process.env.GEMINI_DEBUG_CONTENT === "true") {

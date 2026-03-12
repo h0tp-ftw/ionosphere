@@ -67,7 +67,27 @@ export class RepetitionBreaker {
   checkTextRepetition(proc, text, turnId, activeCallbacks) {
     proc.accumulatedText = (proc.accumulatedText || "") + text;
     const accumulated = proc.accumulatedText;
+
+    // Check 1: S+S full-response echo detection (catches 2-occurrence full duplications)
+    const echoResult = this.checkFullEcho(accumulated);
+    if (echoResult) {
+      console.error(
+        `[RepetitionBreaker] FULL ECHO DETECTED: Turn ${turnId} is repeating its own output from the beginning. ` +
+        `Echo starts at char ${echoResult.echoStart} of ${accumulated.length} (${echoResult.overlapPct}% overlap).`,
+      );
+      // Truncate accumulated text to just the unique portion
+      proc.accumulatedText = accumulated.slice(0, echoResult.echoStart);
+      if (activeCallbacks.onError) {
+        activeCallbacks.onError({
+          message: `Response terminated: Model echoed its own full response.`,
+          type: "server_error",
+          code: "repetition_loop",
+        });
+      }
+      return true; // Signal to kill process
+    }
     
+    // Check 2: Original 3+ occurrence small-block repetition
     if (accumulated.length > 600) {
       const checkLen = 200;
       const tail = accumulated.slice(-checkLen);
@@ -96,6 +116,52 @@ export class RepetitionBreaker {
       }
     }
     return false;
+  }
+
+  /**
+   * Detects "S+S" full-response echo: the model generates a complete response,
+   * then starts streaming the same content again from the beginning.
+   * 
+   * Returns { echoStart, overlapPct } if echo is detected, or null otherwise.
+   * 
+   * Algorithm: Starting from the midpoint of the accumulated text, check if
+   * the suffix starting at each candidate position matches the prefix of the
+   * accumulated text. If so, and the match is long enough (≥40% of the original),
+   * we've found an echo.
+   */
+  checkFullEcho(accumulated) {
+    const MIN_LENGTH = 300; // Don't check until we have enough text
+    const MIN_OVERLAP_PCT = 40; // Require ≥40% of the first half to match
+    const PROBE_LENGTH = 80; // Length of the prefix probe to search for
+
+    if (accumulated.length < MIN_LENGTH) return null;
+
+    // Take the first PROBE_LENGTH characters as our "fingerprint" of the response start
+    const probe = accumulated.slice(0, PROBE_LENGTH);
+    
+    // Search for the probe appearing again in the second half of the text
+    // Start searching from 40% of the way through (the echo can't start before that)
+    const searchStart = Math.floor(accumulated.length * 0.4);
+    let echoStart = accumulated.indexOf(probe, searchStart);
+
+    while (echoStart !== -1) {
+      // Found a candidate. Verify: does the text from echoStart match the beginning?
+      const echoLength = accumulated.length - echoStart;
+      const originalPrefix = accumulated.slice(0, echoLength);
+      const echoPortion = accumulated.slice(echoStart);
+
+      if (echoPortion === originalPrefix) {
+        const overlapPct = Math.round((echoLength / echoStart) * 100);
+        if (overlapPct >= MIN_OVERLAP_PCT) {
+          return { echoStart, overlapPct };
+        }
+      }
+
+      // Try next occurrence
+      echoStart = accumulated.indexOf(probe, echoStart + 1);
+    }
+
+    return null;
   }
 
   /**

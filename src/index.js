@@ -100,8 +100,23 @@ const buildGeminiHistory = (messages) => {
     if (msg.role === "assistant") {
       flushUser(); // Switching to model turn
 
-      if (typeof msg.content === "string" && msg.content.trim()) {
-        currentModelParts.push({ text: msg.content });
+      const content = msg.content;
+      if (Array.isArray(content)) {
+        for (const p of content) {
+          if (p.type === "text") {
+            currentModelParts.push({ text: p.text });
+          } else if (p.type === "thought" || p.type === "reasoning") {
+            currentModelParts.push({ thought: p.text || p.thought || p.reasoning });
+          }
+        }
+      } else if (typeof content === "string" && content.trim()) {
+        currentModelParts.push({ text: content });
+      }
+
+      // Handle explicit reasoning_content or thought fields (OpenAI/reasoning models)
+      const thought = msg.reasoning_content || msg.thought;
+      if (thought && typeof thought === "string") {
+        currentModelParts.push({ thought });
       }
 
       if (msg.tool_calls) {
@@ -129,7 +144,8 @@ const buildGeminiHistory = (messages) => {
           });
         }
       }
-    } else if (msg.role === "tool" || msg.role === "function") {
+    }
+    else if (msg.role === "tool" || msg.role === "function") {
       flushModel(); // Tool responses belong to the user turn
 
       const callId = msg.tool_call_id || "unknown";
@@ -154,7 +170,7 @@ const buildGeminiHistory = (messages) => {
 
           const prefixRegex = new RegExp(`\\[${resolvedName.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}.*?\\]\\\\s*Result:\\\\s*\\\\n?`, "i");
           const matchStart = nextContent.match(prefixRegex);
-          
+
           if (matchStart) {
             const startIndex = matchStart.index + matchStart[0].length;
             let endIndex = nextContent.length;
@@ -163,17 +179,17 @@ const buildGeminiHistory = (messages) => {
               nextContent.indexOf("\\n<feedback>", startIndex),
               nextContent.indexOf("\\n[", startIndex)
             ].filter(idx => idx !== -1);
-            
+
             if (nextMarks.length > 0) {
               endIndex = Math.min(...nextMarks);
             }
 
             responseContent = nextContent.substring(startIndex, endIndex).trim();
-            
+
             const beforeBlock = nextContent.substring(0, matchStart.index);
             const afterBlock = nextContent.substring(endIndex);
             const scrubbedContent = (beforeBlock + afterBlock).trim();
-            
+
             if (Array.isArray(nextMsg.content)) {
               nextMsg.content = [{ type: "text", text: scrubbedContent }];
             } else {
@@ -582,17 +598,17 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
       if (typeof req.body.messages === "string") {
         try {
           req.body.messages = JSON.parse(req.body.messages);
-        } catch (e) {}
+        } catch (e) { }
       }
       if (typeof req.body.tools === "string") {
         try {
           req.body.tools = JSON.parse(req.body.tools);
-        } catch (e) {}
+        } catch (e) { }
       }
       if (typeof req.body.mcpServers === "string") {
         try {
           req.body.mcpServers = JSON.parse(req.body.mcpServers);
-        } catch (e) {}
+        } catch (e) { }
       }
     }
 
@@ -855,8 +871,8 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
 
     heartbeatInterval = isStreaming
       ? setInterval(() => {
-          if (!res.writableEnded) res.write(": ping\n\n");
-        }, 15000)
+        if (!res.writableEnded) res.write(": ping\n\n");
+      }, 15000)
       : null;
 
     const responseModel =
@@ -898,7 +914,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
 
       if (!transparentTools.includes(info.name)) {
         receivedToolCallsCount++;
-        
+
         // Match with the first pending ID for this tool name
         const queue = stdoutPendingQueues.get(info.name);
         if (queue && queue.length > 0) {
@@ -1077,12 +1093,12 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
           expectedToolCallsCount++;
           if (!stdoutPendingQueues.has(toolName)) stdoutPendingQueues.set(toolName, []);
           stdoutPendingQueues.get(toolName).push(toolId);
-          
+
           if (process.env.GEMINI_DEBUG_PARALLEL === "true") {
             console.log(`[Turn ${activeTurnId}] Parallel Sync: Expected count incremented to ${expectedToolCallsCount} for ${toolName} (${toolId})`);
           }
         }
-        
+
         const pending = pendingParkExecutes.get(toolName);
         if (pending) {
           if (process.env.GEMINI_DEBUG_RAW === "true" || process.env.GEMINI_DEBUG_PARALLEL === "true") {
@@ -1157,7 +1173,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
       }
       if (disconnectTimeout) clearTimeout(disconnectTimeout);
       if (parkDebounceTimer) clearTimeout(parkDebounceTimer);
-      
+
       if (process.env.GEMINI_DEBUG_PARALLEL === "true") {
         console.log(`[Turn ${activeTurnId}] executePark: Setting responseSent = true for ${msg.name}`);
       }
@@ -1621,7 +1637,16 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
       fs.mkdirSync(turnTempDir, { recursive: true });
 
     logForensics(`START: New Turn Request for fingerprint ${fingerprint} (isStreaming: ${isStreaming})`);
-    
+
+    // DEBUG: Dump raw OpenAI messages[] summary to forensics for history loss investigation
+    const msgSummary = messages.map((m, i) => {
+      const snippet = typeof m.content === 'string' ? m.content.substring(0, 80) : (Array.isArray(m.content) ? `[${m.content.length} parts]` : '(no content)');
+      const toolCalls = m.tool_calls ? ` [${m.tool_calls.length} tool_calls]` : '';
+      const toolCallId = m.tool_call_id ? ` [tool_call_id: ${m.tool_call_id}]` : '';
+      return `  [${i}] role=${m.role}${toolCalls}${toolCallId}: ${snippet}`;
+    }).join('\n');
+    logForensics(`RAW_MESSAGES (${messages.length} messages):\n${msgSummary}`);
+
     const structuredContents = buildGeminiHistory(messages);
     logForensics(`HISTORY: Built Gemini history with ${structuredContents.length} turns.`);
     if (process.env.GEMINI_DEBUG_CONTENT === "true") {
@@ -1760,8 +1785,8 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
                   typeof (tc.function?.arguments || tc.arguments) === "string"
                     ? tc.function?.arguments || tc.arguments
                     : JSON.stringify(
-                        tc.function?.arguments || tc.arguments || {},
-                      );
+                      tc.function?.arguments || tc.arguments || {},
+                    );
 
                 content += `\n[Action (id: ${callId}): Called tool '${toolName}' with args: ${argsStr}]`;
               }
@@ -1895,7 +1920,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         if (process.platform !== "win32") {
           try {
             if (fs.existsSync(ipcPath)) fs.unlinkSync(ipcPath);
-          } catch (_) {}
+          } catch (_) { }
         }
         if (err.code === "EADDRINUSE") {
           console.warn(
@@ -2142,7 +2167,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         if (process.platform !== "win32") {
           try {
             if (fs.existsSync(ipcPath)) fs.unlinkSync(ipcPath);
-          } catch (_) {}
+          } catch (_) { }
         }
         if (process.env.GEMINI_DEBUG_KEEP_TEMP === "true") {
           console.log(

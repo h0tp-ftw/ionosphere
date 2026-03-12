@@ -1,6 +1,6 @@
 # Ionosphere Architecture
 
-Ionosphere is a **strictly stateless** HTTP bridge that translates OpenAI-compatible API requests into Gemini CLI invocations. It implements a "Warm Stateless Handoff" strategy to maintain high-performance ReAct loops without persistent server-side state.
+Ionosphere is a **strictly stateless** HTTP bridge that translates OpenAI-compatible API requests into Gemini CLI invocations. If enabled, it implements a "Warm Stateless Handoff" strategy to maintain high-performance ReAct loops without persistent server-side state.
 
 ---
 

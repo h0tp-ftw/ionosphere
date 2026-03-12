@@ -142,9 +142,8 @@ For detailed API documentation, including how to use MCP servers and file inject
 
 The following models are supported:
 
-- `auto-gemini-3` (Auto-selecting Gemini 3)
-- `auto-gemini-2.5` (Auto-selecting Gemini 2.5)
-- `gemini-3-pro-preview`
+- `auto-gemini-3` (Auto-selecting the BEST model available, starting with gemini-3.1-pro-preview)
+- `auto-gemini-2.5` (Auto-selecting the BEST model available, starting with gemini-2.5-pro)
 - `gemini-3.1-pro-preview`
 - `gemini-3-flash-preview`
 - `gemini-2.5-pro`
@@ -176,7 +175,7 @@ ionosphere/
 
 ## Architecture
 
-Ionosphere uses a unique "Warm Stateless Handoff" strategy to bridge the stateful Gemini CLI to a stateless HTTP API.
+Ionosphere uses a unique architecture to pipe in a normal OpenAI-style API request to the Gemini CLI format, exposing this endpoint as a local HTTP API. Gemini CLI outputs a stream of JSON objects that are parsed and converted into SSE deltas for the client. This is a novel infrastructure for using Gemini CLI as a service, and issues are expected. 
 
 For a deep dive into how it works, including the request lifecycle and security model, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -184,11 +183,10 @@ For a deep dive into how it works, including the request lifecycle and security 
 
 ## Known Limitations
 
-- **OAuth Reliability**: CLI OAuth depends on server availability; API keys are preferred for stable uptime.
-- **Infinite Looping**: Complex tool interactions may occasionally cause loops.
-- **Process Overhead**: Higher latency due to containerized I/O and process spawning compared to direct API usage. Not suitable for high-frequency parallel executions.
-- **Stateless**: Ionosphere does not persist state between requests (by design).
-- **Prompt Flattening & Tool Call Leaks**: Because Ionosphere flattens previous tool calls into plain text history, the model naturally "learns" the syntax and may hallucinate it in normal prose. To prevent this, Ionosphere uses highly obscure sentinels (e.g., `⟬tool_call:...⟭`) combined with an aggressive event scrubber to intercept and hide these leaks from the client stream.
+- **OAuth Reliability**: CLI OAuth depends on server availability; API keys are preferred for stable uptime. Gemini CLI may reject usage during high traffic times.
+- **Infinite Looping**: Complex tool interactions may occasionally cause loops. Loop breaking is explicitly disabled because Gemini CLI can mistake repetitive similar actions for loops.
+- **Process Overhead**: Higher latency due to containerized I/O and process spawning compared to direct API usage. Expect 10s+ baseline latency. Not suitable for low-latency high-frequency parallel executions.
+- **Stateless**: Just like a normal API, Ionosphere does not persist state between requests (by design), unless `WARM_STATELESS_HANDOFF` is set to `true` (see `ARCHITECTURE.md` for details).
 
 ---
 

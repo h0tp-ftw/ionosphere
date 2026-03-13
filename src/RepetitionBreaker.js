@@ -28,8 +28,21 @@ export class RepetitionBreaker {
     const toolArgs = JSON.stringify(argsObj || {});
     const key = `${historyHash}:${toolName}:${toolArgs}`;
 
+    // Read historical tools from file if path is provided in extraEnv
+    let historyToolsStr = historyTools || "";
+    if (proc.extraEnv && proc.extraEnv.IONOSPHERE_HISTORY_TOOLS_PATH) {
+      try {
+        const fs = require("fs");
+        if (fs.existsSync(proc.extraEnv.IONOSPHERE_HISTORY_TOOLS_PATH)) {
+          historyToolsStr = fs.readFileSync(proc.extraEnv.IONOSPHERE_HISTORY_TOOLS_PATH, "utf-8");
+        }
+      } catch (e) {
+        console.error(`[RepetitionBreaker] Failed to read historical tools from path: ${e.message}`);
+      }
+    }
+
     // Check if this is a "historical" tool call being parroted
-    const isHistorical = (historyTools || "").includes(key);
+    const isHistorical = historyToolsStr.includes(key);
 
     if (isHistorical) {
       console.log(

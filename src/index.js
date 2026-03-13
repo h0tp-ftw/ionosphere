@@ -1431,10 +1431,14 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         // Only proceed with handoff resolution if hijackedTurnId is still valid
         // (defense-in-depth guard above may have nullified it for new user instructions)
         if (hijackedTurnId) {
+          // Write historical tools to a file to prevent E2BIG env limit errors
+          const historicalToolsPath = path.join(turnTempDir, "history_tools.txt");
+          await fs.promises.writeFile(historicalToolsPath, historicalTools.join(","), "utf-8");
+
           // 1. Update callbacks and sync historical context to the running process
           const extraEnv = {
             IONOSPHERE_HISTORY_HASH: historyHash,
-            IONOSPHERE_HISTORY_TOOLS: historicalTools.join(","),
+            IONOSPHERE_HISTORY_TOOLS_PATH: historicalToolsPath,
           };
           controller.updateCallbacks(hijackedTurnId, allCallbacks, extraEnv);
 
@@ -2103,6 +2107,9 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
           );
         }
 
+        const historicalToolsPath = path.join(turnTempDir, "history_tools.txt");
+        await fs.promises.writeFile(historicalToolsPath, historicalTools.join(","), "utf-8");
+
         // Build structured Content[] for Native History Protocol
         const structuredContents = buildGeminiHistory(messages);
 
@@ -2116,7 +2123,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
           {
             IONOSPHERE_IPC: ipcPath,
             IONOSPHERE_HISTORY_HASH: historyHash,
-            IONOSPHERE_HISTORY_TOOLS: historicalTools.join(","),
+            IONOSPHERE_HISTORY_TOOLS_PATH: historicalToolsPath,
             IONOSPHERE_STRUCTURED_HISTORY: "true",
           },
           attachments,

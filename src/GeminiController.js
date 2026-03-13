@@ -290,6 +290,19 @@ export class GeminiController extends EventEmitter {
           );
         }
 
+        // Diagnostic: log env size to help diagnose E2BIG (ARG_MAX = 2MB on Linux)
+        const envEntries = Object.entries(spawnEnv);
+        const totalEnvSize = envEntries.reduce((s, [k, v]) => s + k.length + (v || "").length + 2, 0);
+        const top5Env = envEntries
+          .map(([k, v]) => [k.length + (v || "").length + 2, k])
+          .sort((a, b) => b[0] - a[0])
+          .slice(0, 5)
+          .map(([size, key]) => `${key}=${size}b`)
+          .join(", ");
+        console.log(
+          `[GeminiController] Spawn env size: ${totalEnvSize} bytes (ARG_MAX: 2097152). Top vars: ${top5Env}`,
+        );
+
         const spawnStartTime = Date.now();
         const proc = spawn(executable, finalArgs, {
           cwd: workspacePath,

@@ -1,4 +1,5 @@
 import { createError, ErrorType, ErrorCode } from "./errorHandler.js";
+import fs from "node:fs";
 
 const MAX_REPEAT_TRACKER_SIZE = 100;
 
@@ -32,7 +33,6 @@ export class RepetitionBreaker {
     let historyToolsStr = historyTools || "";
     if (proc.extraEnv && proc.extraEnv.IONOSPHERE_HISTORY_TOOLS_PATH) {
       try {
-        const fs = require("fs");
         if (fs.existsSync(proc.extraEnv.IONOSPHERE_HISTORY_TOOLS_PATH)) {
           historyToolsStr = fs.readFileSync(proc.extraEnv.IONOSPHERE_HISTORY_TOOLS_PATH, "utf-8");
         }

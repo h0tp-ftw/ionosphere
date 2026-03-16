@@ -208,7 +208,7 @@ const buildGeminiHistory = (messages) => {
       }
 
       const response =
-        typeof responseContent === "object" && responseContent !== null
+        (typeof responseContent === "object" && responseContent !== null && !Array.isArray(responseContent))
           ? responseContent
           : { output: responseContent };
 

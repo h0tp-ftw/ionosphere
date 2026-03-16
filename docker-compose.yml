@@ -30,6 +30,7 @@ services:
       - GEMINI_DEBUG_PROMPTS=${GEMINI_DEBUG_PROMPTS:-false}
       - GEMINI_DEBUG_FORENSICS=${GEMINI_DEBUG_FORENSICS:-false}
       - GEMINI_NUMERICAL_ROUTING_ENABLED=${GEMINI_NUMERICAL_ROUTING_ENABLED:-false}
+      - PORT=${PORT:-3000}
       - CI=${CI:-true}
     command: node src/index.js
     ports:

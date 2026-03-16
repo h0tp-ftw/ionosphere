@@ -436,4 +436,60 @@ if (fs.existsSync(schedulerTarget)) {
   fs.writeFileSync(schedulerTarget, schedulerContent, "utf8");
 }
 
+// 6. Patch googleQuotaErrors.js (Immediate Fallback for Capacity)
+const quotaErrorsTarget = path.resolve(
+  __dirname,
+  "..",
+  "node_modules",
+  "@google",
+  "gemini-cli-core",
+  "dist",
+  "src",
+  "utils",
+  "googleQuotaErrors.js",
+);
+if (fs.existsSync(quotaErrorsTarget)) {
+  console.log(
+    `[Patcher] Patching googleQuotaErrors.js for immediate fallback: ${quotaErrorsTarget}`,
+  );
+  let content = fs.readFileSync(quotaErrorsTarget, "utf8");
+
+  const capacitySearch = "if (errorInfo.reason === 'QUOTA_EXHAUSTED') {";
+  const capacityReplace = `if (errorInfo.reason === 'QUOTA_EXHAUSTED' || errorInfo.reason === 'MODEL_CAPACITY_EXHAUSTED') {`;
+
+  if (content.includes(capacitySearch) && !content.includes("MODEL_CAPACITY_EXHAUSTED")) {
+    content = content.replace(capacitySearch, capacityReplace);
+    console.log("  - Applied immediate fallback for MODEL_CAPACITY_EXHAUSTED.");
+  }
+
+  fs.writeFileSync(quotaErrorsTarget, content, "utf8");
+}
+
+// 7. Patch handler.js (Universal Fallback)
+const handlerTarget = path.resolve(
+  __dirname,
+  "..",
+  "node_modules",
+  "@google",
+  "gemini-cli-core",
+  "dist",
+  "src",
+  "fallback",
+  "handler.js",
+);
+if (fs.existsSync(handlerTarget)) {
+  console.log(`[Patcher] Patching handler.js for universal fallback: ${handlerTarget}`);
+  let content = fs.readFileSync(handlerTarget, "utf8");
+
+  const authCheckSearch = "if (authType !== AuthType.LOGIN_WITH_GOOGLE) {\n        return null;\n    }";
+  const authCheckReplace = "// [IONOSPHERE] Universal fallback enabled\n    // if (authType !== AuthType.LOGIN_WITH_GOOGLE) {\n    //     return null;\n    // }";
+
+  if (content.includes(authCheckSearch)) {
+    content = content.replace(authCheckSearch, authCheckReplace);
+    console.log("  - Enabled universal fallback for all auth types.");
+  }
+
+  fs.writeFileSync(handlerTarget, content, "utf8");
+}
+
 console.log("[Patcher] Patching complete.");

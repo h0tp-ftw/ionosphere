@@ -33,7 +33,7 @@ services:
       - CI=${CI:-true}
     command: node src/index.js
     ports:
-      - "3000:3000"
+      - "${PORT:-3000}:${PORT:-3000}"
     volumes:
       - gemini-config:/root/.gemini
       - ${IONOSPHERE_TEMP_MOUNT_SOURCE:-./temp}:/app/temp

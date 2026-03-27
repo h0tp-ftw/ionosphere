@@ -9,6 +9,7 @@
         "start": "node src/index.js",
         "generate-settings": "node scripts/generate_settings.js",
         "setup": "node scripts/setup.js",
+        "setup:multi": "node scripts/setup-multi.js",
         "update": "node scripts/update.js",
         "postinstall": "node scripts/patch-gemini-core.js",
         "test": "node --test",

@@ -496,8 +496,16 @@ async function main() {
         }
     }
 }
+export { main };
 
-main().catch(err => {
-    console.error('Setup failed:', err);
-    process.exit(1);
-});
+// Auto-run when executed directly (not imported)
+const isDirectRun = process.argv[1] &&
+    (process.argv[1].endsWith('setup-multi.js') ||
+     process.argv[1].endsWith('setup-multi'));
+
+if (isDirectRun) {
+    main().catch(err => {
+        console.error('Setup failed:', err);
+        process.exit(1);
+    });
+}

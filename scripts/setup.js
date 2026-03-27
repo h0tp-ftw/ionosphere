@@ -344,6 +344,28 @@ async function main() {
             composeCmd = hasPodmanCompose ? 'podman-compose' : 'podman compose';
         }
 
+        // ── Multi-Instance Option (Docker/Podman only) ──
+        if (!isNative) {
+            const { instanceMode } = await inquirer.prompt([{
+                type: 'select',
+                name: 'instanceMode',
+                message: 'Instance mode:',
+                choices: [
+                    { name: 'Single Instance — one container, one port, one auth', value: 'single' },
+                    { name: 'Multi-Instance — N parallel containers, each with its own auth & port', value: 'multi' }
+                ],
+                default: 0
+            }]);
+
+            if (instanceMode === 'multi') {
+                console.log("\n🔀 Handing off to Multi-Instance Setup...\n");
+                // Dynamically import and run the multi-instance setup script
+                const { main: runMultiSetup } = await import('./setup-multi.js');
+                await runMultiSetup();
+                return;
+            }
+        }
+
         // Collect preferences BEFORE build/auth to ensure the container image is consistent
         await setupPreferences();
 

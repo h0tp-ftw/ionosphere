@@ -164,9 +164,79 @@ export class GeminiController extends EventEmitter {
     this.cliRunner = new CliRunner(this.cwd);
     this.errorParser = new CliErrorParser();
 
+    this.warmPool = new Map(); // hash -> Array of warm processes
+    this.warmPoolSize = parseInt(process.env.GEMINI_WARM_POOL_SIZE) || 1;
+
     if (!fs.existsSync(this.tempDir)) {
       fs.mkdirSync(this.tempDir, { recursive: true });
     }
+  }
+
+  /**
+   * Generates a stable hash string for a given CLI configuration.
+   */
+  hashConfig(workspacePath, settingsPath, systemPrompt, attachments = []) {
+    return JSON.stringify({ 
+      workspacePath, 
+      settingsPath, 
+      systemPrompt, 
+      attachments: attachments.map(a => a.path || a) 
+    });
+  }
+
+  /**
+   * Spawns a background process and waits for it to become warm.
+   */
+  replenishPool(hashKey, workspacePath, spawnEnv, executable, finalArgs) {
+    const currentPool = this.warmPool.get(hashKey) || [];
+    if (currentPool.length >= this.warmPoolSize) return;
+
+    if (process.env.GEMINI_DEBUG_PROMPTS === "true") {
+      console.log(`[GeminiController] Background spawning WARM process for pool. Size: ${currentPool.length}`);
+    }
+    
+    const proc = spawn(executable, finalArgs, {
+      cwd: workspacePath,
+      env: spawnEnv,
+      stdio: ["pipe", "pipe", "pipe"],
+      shell: process.platform === "win32",
+    });
+
+    proc.isWarm = false;
+    
+    // Attach a temporary accumulator to listen for the INIT event
+    const accumulator = new JsonlAccumulator();
+    proc.warmAccumulator = accumulator;
+    
+    proc.stdout.on("data", (chunk) => {
+       if (proc.isWarmLogStream) proc.isWarmLogStream.write(chunk);
+       accumulator.push(chunk);
+    });
+
+    const initListener = (json) => {
+      if (json.type === "init") {
+        proc.isWarm = true;
+        if (process.env.GEMINI_DEBUG_PROMPTS === "true") {
+           console.log(`[GeminiController] WARM process ready (INIT received)`);
+        }
+        accumulator.removeListener("line", initListener);
+      }
+    };
+    accumulator.on("line", initListener);
+
+    proc.on("error", (err) => {
+      console.error(`[GeminiController] Warm process error: ${err.message}`);
+      const pool = this.warmPool.get(hashKey) || [];
+      this.warmPool.set(hashKey, pool.filter(p => p !== proc));
+    });
+    
+    proc.on("close", () => {
+      const pool = this.warmPool.get(hashKey) || [];
+      this.warmPool.set(hashKey, pool.filter(p => p !== proc));
+    });
+
+    currentPool.push(proc);
+    this.warmPool.set(hashKey, currentPool);
   }
 
   /**
@@ -263,19 +333,56 @@ export class GeminiController extends EventEmitter {
         }
       }
 
-      console.log(
-        `[GeminiController] Spawning stateless CLI: ${executable} ${finalArgs.join(" ")}`,
+      const spawnEnv = this.cliRunner.prepareEnv(
+        settingsPath,
+        extraEnv,
+        systemPromptPath,
       );
 
-      const result = await new Promise((resolve, reject) => {
-        const accumulator = new JsonlAccumulator();
-        let lastResultJson = null;
+      const hashKey = this.hashConfig(workspacePath, settingsPath, systemPrompt, attachments);
 
-        const spawnEnv = this.cliRunner.prepareEnv(
-          settingsPath,
-          extraEnv,
-          systemPromptPath,
-        );
+      const result = await new Promise((resolve, reject) => {
+        let lastResultJson = null;
+        let proc = null;
+        let accumulator = null;
+
+        const currentPool = this.warmPool.get(hashKey) || [];
+        if (currentPool.length > 0) {
+          const readyIdx = currentPool.findIndex(p => p.isWarm);
+          if (readyIdx !== -1) {
+            proc = currentPool.splice(readyIdx, 1)[0];
+            accumulator = proc.warmAccumulator;
+            console.log(`[GeminiController] Acquired WARM process from pool!`);
+          } else {
+            proc = currentPool.shift();
+            accumulator = proc.warmAccumulator;
+            console.log(`[GeminiController] Acquired WARMING process from pool.`);
+          }
+        }
+
+        if (!proc) {
+          console.log(`[GeminiController] Pool miss. Spawning cold stateless CLI: ${executable} ${finalArgs.join(" ")}`);
+          const spawnStartTime = Date.now();
+          proc = spawn(executable, finalArgs, {
+            cwd: workspacePath,
+            env: spawnEnv,
+            stdio: ["pipe", "pipe", "pipe"],
+            shell: process.platform === "win32",
+          });
+          if (process.env.GEMINI_DEBUG_PROMPTS === "true") {
+            console.log(`[GeminiController] [Turn ${turnId}] Spawned CLI in ${Date.now() - spawnStartTime}ms`);
+          }
+          accumulator = new JsonlAccumulator();
+          proc.stdout.on("data", (chunk) => {
+            if (proc.isWarmLogStream) proc.isWarmLogStream.write(chunk);
+            accumulator.push(chunk);
+          });
+        }
+
+        // Background replenish
+        setTimeout(() => {
+          this.replenishPool(hashKey, workspacePath, spawnEnv, executable, finalArgs);
+        }, 0);
 
         if (process.env.GEMINI_DEBUG_PROMPTS === "true") {
           const hijackedFrom = this.callbacksByTurn.get(turnId)?.hijackedFrom;
@@ -290,30 +397,8 @@ export class GeminiController extends EventEmitter {
           );
         }
 
-        // Diagnostic: log env size to help diagnose E2BIG (ARG_MAX = 2MB on Linux)
+        // Diagnostic: log env size to help diagnose E2BIG
         const envEntries = Object.entries(spawnEnv);
-        const totalEnvSize = envEntries.reduce((s, [k, v]) => s + k.length + (v || "").length + 2, 0);
-        const top5Env = envEntries
-          .map(([k, v]) => [k.length + (v || "").length + 2, k])
-          .sort((a, b) => b[0] - a[0])
-          .slice(0, 5)
-          .map(([size, key]) => `${key}=${size}b`)
-          .join(", ");
-        console.log(
-          `[GeminiController] Spawn env size: ${totalEnvSize} bytes (ARG_MAX: 2097152). Top vars: ${top5Env}`,
-        );
-
-        const spawnStartTime = Date.now();
-        const proc = spawn(executable, finalArgs, {
-          cwd: workspacePath,
-          env: spawnEnv,
-          stdio: ["pipe", "pipe", "pipe"],
-          shell: process.platform === "win32",
-        });
-
-        if (process.env.GEMINI_DEBUG_PROMPTS === "true") {
-          console.log(`[GeminiController] [Turn ${turnId}] Spawned CLI in ${Date.now() - spawnStartTime}ms`);
-        }
 
         // Write prompt content to stdin and signal EOF
         const stdinContent = structuredContents

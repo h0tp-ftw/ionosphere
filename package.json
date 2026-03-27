@@ -15,8 +15,8 @@
         "latency": "node scripts/latency.js"
     },
     "dependencies": {
-        "@google/gemini-cli": "latest",
-        "@google/gemini-cli-core": "^0.29.5",
+        "@google/gemini-cli": "^0.35.2",
+        "@google/gemini-cli-core": "^0.35.2",
         "@modelcontextprotocol/sdk": "^1.26.0",
         "cors": "^2.8.6",
         "express": "^5.2.1",

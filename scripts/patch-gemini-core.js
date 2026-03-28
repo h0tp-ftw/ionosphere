@@ -226,6 +226,7 @@ if (fs.existsSync(nonInteractiveTarget)) {
     "                    onDebugMessage: () => { },\n" +
     "                    messageId: Date.now(),\n" +
     "                    signal: abortController.signal,\n" +
+    "                    escapePastedAtSymbols: false,\n" +
     "                });\n" +
     "                if (error || !processedQuery) {\n" +
     "                    // An error occurred during @include processing (e.g., file not found).\n" +
@@ -277,7 +278,7 @@ if (fs.existsSync(nonInteractiveTarget)) {
     "                    if (slashCommandResult) { query = slashCommandResult; }\n" +
     "                }\n" +
     "                if (!query) {\n" +
-    "                    const { processedQuery, error } = await handleAtCommand({ query: input, config, addItem: (_item, _timestamp) => 0, onDebugMessage: () => { }, messageId: Date.now(), signal: abortController.signal });\n" +
+    "                    const { processedQuery, error } = await handleAtCommand({ query: input, config, addItem: (_item, _timestamp) => 0, onDebugMessage: () => { }, messageId: Date.now(), signal: abortController.signal, escapePastedAtSymbols: false });\n" +
     "                    if (error || !processedQuery) { throw new FatalInputError(error || 'Exiting due to an error processing the @ command.'); }\n" +
     "                    query = processedQuery;\n" +
     "                }\n" +

@@ -117,7 +117,7 @@ function dispatchToolCall(name, args) {
 
 // --- MAIN SERVER ---
 const server = new Server({
-    name: "ionosphere-tool-bridge",
+    name: "io",
     version: "1.0.0"
 }, {
     capabilities: {

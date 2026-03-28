@@ -112,7 +112,17 @@ async function collectInstances() {
             apiKey = key;
         }
 
-        const port = BASE_PORT + (i - 1);
+        const { port } = await inquirer.prompt([{
+            type: 'number',
+            name: 'port',
+            message: `[${name}] Host port bound for this instance:`,
+            default: BASE_PORT + (i - 1),
+            validate: (v) => {
+                if (v < 1024 || v > 65535) return 'Port must be between 1024 and 65535';
+                if (instances.some(inst => inst.port === v)) return 'Port already assigned to another instance in this setup';
+                return true;
+            }
+        }]);
 
         const { maxCli } = await inquirer.prompt([{
             type: 'number',

@@ -7,6 +7,7 @@ services:
       args:
         - GEMINI_DISABLE_TOOLS=${GEMINI_DISABLE_TOOLS:-false}
         - GEMINI_DISABLE_WEB_SEARCH=${GEMINI_DISABLE_WEB_SEARCH:-false}
+    container_name: ionosphere
     restart: unless-stopped
     tty: true
     stdin_open: true

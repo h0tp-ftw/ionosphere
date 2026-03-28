@@ -25,7 +25,7 @@ ENV GEMINI_DISABLE_WEB_SEARCH=${GEMINI_DISABLE_WEB_SEARCH}
 RUN node scripts/patch-gemini-core.js
 
 # 4. Prepare environment and executable
-RUN ./node_modules/.bin/gemini --version && \
+RUN mkdir -p /root/.gemini && \
     mkdir -p temp && \
     chmod +x scripts/entrypoint.sh
 

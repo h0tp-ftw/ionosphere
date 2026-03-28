@@ -568,6 +568,9 @@ app.delete("/v1/files/:file_id", async (req, res) => {
 });
 
 app.post("/v1/chat/completions", handleUpload, async (req, res) => {
+  let heartbeatInterval = null;
+  let parkDebounceTimer = null;
+
   try {
     // 1. Authorization
     const expectedApiKey = process.env.API_KEY;
@@ -828,9 +831,6 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
     }
     req.setTimeout(0);
     res.setTimeout(0);
-
-    let heartbeatInterval = null;
-    let parkDebounceTimer = null;
 
     // Handle client disconnect mid-turn
     let disconnectTimeout = null;
@@ -2189,6 +2189,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
     await enqueueControllerPrompt(executeTask);
   } catch (err) {
     if (heartbeatInterval) clearInterval(heartbeatInterval);
+    if (parkDebounceTimer) clearTimeout(parkDebounceTimer);
     console.error(
       `[API Error] Critical failure in /v1/chat/completions: ${err.stack || err.message}`,
     );

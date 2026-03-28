@@ -248,53 +248,17 @@ async function runOAuthFlows(instances, composeCmd) {
     console.log(`The Gemini CLI will provide a URL — open it in your browser,`);
     console.log(`sign in, and paste the authorization code back here.\n`);
 
+    console.log(`\n⚠️ IMPORTANT: Manual OAuth Authentication Required ⚠️`);
+    console.log(`For each of the following instances, open a NEW terminal window and run its command.`);
+    console.log(`This will present you with the login URL. Sign in and the credentials will be saved.\n`);
+
     for (const inst of oauthInstances) {
         const serviceName = `ionosphere-${inst.name}`;
-        const volumeName = `gemini-config-${inst.name}`;
-
-        console.log(`\n${'─'.repeat(50)}`);
-        console.log(`  🔑 Authenticating: ${inst.name} (port ${inst.port})`);
-        console.log(`${'─'.repeat(50)}\n`);
-
-        const { proceed } = await inquirer.prompt([{
-            type: 'confirm',
-            name: 'proceed',
-            message: `Ready to authenticate instance "${inst.name}"?`,
-            default: true
-        }]);
-
-        if (!proceed) {
-            console.log(`⚠️  Skipping OAuth for "${inst.name}". You'll need to authenticate it manually later.`);
-            continue;
-        }
-
-        try {
-            // We need to run the gemini CLI inside a temporary container that mounts the correct volume.
-            // This creates the OAuth token in the per-instance volume.
-            const cmdParts = composeCmd.split(' ');
-            const baseCmd = cmdParts[0];
-            const baseArgs = cmdParts.slice(1);
-
-            await runInteractive(baseCmd, [
-                ...baseArgs,
-                '-f', COMPOSE_OUTPUT,
-                'run', '--rm',
-                serviceName,
-                'gemini', '-p', '"ping"', '--output-format', 'json'
-            ], {
-                env: {
-                    GEMINI_AUTH_TYPE: 'oauth-personal',
-                    GOOGLE_GENAI_USE_GCA: 'true',
-                }
-            });
-
-            console.log(`✅ OAuth completed for "${inst.name}".`);
-        } catch (err) {
-            console.error(`❌ OAuth failed for "${inst.name}": ${err.message}`);
-            console.log(`   You can retry later with:`);
-            console.log(`   ${composeCmd} -f ${COMPOSE_OUTPUT} run --rm ${serviceName} gemini auth login\n`);
-        }
+        console.log(`To authenticate ${inst.name}:`);
+        const engine = composeCmd.includes('docker') ? 'docker' : 'podman';
+        console.log(`  ${engine} exec -it -e CI=false ${serviceName} bash -c "trap 'stty sane' EXIT; gemini auth login"`);
     }
+    console.log(`\nOnce you have authenticated all required instances, you can start the application.`);
 }
 
 // ─── Main ────────────────────────────────────────────────────────────────────
@@ -436,9 +400,6 @@ async function main() {
             process.exit(1);
         }
         console.log(`✅ Image built successfully.\n`);
-
-        // ── Run OAuth flows ──
-        await runOAuthFlows(instances, composeCmd);
     }
 
     // ── Summary ──
@@ -491,8 +452,20 @@ async function main() {
         if (upResult.status === 0) {
             console.log(`\n✅ All instances are running!`);
             console.log(`📝 View logs: ${composeCmd} -f ${COMPOSE_OUTPUT} logs -f\n`);
+            
+            if (buildNow) {
+                // ── Run OAuth flows now that containers exist ──
+                await runOAuthFlows(instances, composeCmd);
+            }
         } else {
             console.error(`\n❌ Failed to launch. Check the errors above.`);
+        }
+    } else {
+        if (buildNow) {
+            console.log(`\n✅ Setup complete! You can start the instances later by running:`);
+            console.log(`   ${composeCmd} -f ${COMPOSE_OUTPUT} up -d`);
+            // Instruct user they still need to auth when they start them
+            await runOAuthFlows(instances, composeCmd);
         }
     }
 }

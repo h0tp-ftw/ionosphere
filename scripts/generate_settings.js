@@ -17,6 +17,9 @@ export function generateConfig(options = {}) {
         general: {
             previewFeatures: process.env.GEMINI_ENABLE_PREVIEW !== 'false'
         },
+        trust: {
+            trustedFolders: ["/app"]
+        },
         privacy: {
             usageStatisticsEnabled: process.env.GEMINI_DISABLE_TELEMETRY !== 'true'
         },
@@ -52,8 +55,10 @@ export function generateConfig(options = {}) {
     };
 
     if (process.env.GEMINI_AUTH_TYPE) {
-        config.auth = {
-            enforcedAuthType: process.env.GEMINI_AUTH_TYPE
+        config.security = {
+            auth: {
+                selectedType: process.env.GEMINI_AUTH_TYPE
+            }
         };
     }
 

@@ -166,19 +166,14 @@ async function setupEnvAndAuth(isNative, composeCmd) {
         const buildArgs = `--build-arg GEMINI_DISABLE_TOOLS=${process.env.GEMINI_DISABLE_TOOLS || 'false'} --build-arg GEMINI_DISABLE_WEB_SEARCH=${process.env.GEMINI_DISABLE_WEB_SEARCH || 'false'}`;
         spawnSync(`${composeCmd} build ${buildArgs}`, { stdio: 'inherit', shell: true });
 
-        console.log("\nTriggering Isolated Container validation flow...");
         if (authMethod === 'oauth') {
-            console.log("The Gemini CLI will launch inside the container and provide a manual authentication link.");
-            console.log("Please copy the URL provided into your browser, then PASTE the code back into this terminal.");
-            console.log("Once authenticated, the installer will continue automatically.\n");
+            console.log("\n✅ Image successfully built.\n");
+        } else {
+            console.log("\n✅ API Key injected into the container environment.\n");
         }
-
-        // Use a simple prompt inside container to trigger auth and exit immediately
-        const runArgs = ['run', '--rm', 'ionosphere', 'gemini', '-p', '"ping"', '--output-format', 'json'];
-        await runInteractive(`${composeCmd}`, runArgs);
     }
 
-    return ionoKey;
+    return { ionoKey, needsManualAuth: !isNative && authMethod === 'oauth' };
 }
 
 async function setupPreferences() {
@@ -369,7 +364,7 @@ async function main() {
         // Collect preferences BEFORE build/auth to ensure the container image is consistent
         await setupPreferences();
 
-        const ionoKey = await setupEnvAndAuth(isNative, composeCmd);
+        const { ionoKey, needsManualAuth } = await setupEnvAndAuth(isNative, composeCmd);
         await generateSettings();
 
         // Persist all captured preferences to the .env file
@@ -405,6 +400,16 @@ async function main() {
             console.log("\nCopy this key into your AI applications (any OpenAI-compatible SDK or client)\n");
         }
 
+        const printAuthNote = (context = 'running') => {
+            if (needsManualAuth) {
+                console.log("\n⚠️ IMPORTANT: Container Authentication Required ⚠️");
+                console.log(`Because you selected OAuth, you MUST authenticate the ${context} container manually before using it.`);
+                console.log("Open a NEW terminal window and run the following command:");
+                console.log(`\n    ${isDocker ? 'docker' : 'podman'} exec -it -e CI=false ionosphere bash -c "trap 'stty sane' EXIT; gemini auth login"\n`);
+                console.log("This will provide an authorization link for you to sign in. Once done, you can use Ionosphere!\n");
+            }
+        };
+
         const { startNow } = await inquirer.prompt([{
             type: 'confirm',
             name: 'startNow',
@@ -437,7 +442,8 @@ async function main() {
                         upProcess.on('exit', (upCode) => {
                             if (upCode === 0) {
                                 console.log(`\n✅ Server is running in the background.`);
-                                console.log(`📝 To view logs, run: ${composeCmd} logs -f\n`);
+                                console.log(`📝 To view logs, run: ${composeCmd} logs -f`);
+                                printAuthNote();
                                 process.exit(0);
                             } else {
                                 console.error(`\n❌ Failed to launch containers (Exit code: ${upCode}).`);
@@ -450,6 +456,10 @@ async function main() {
                     }
                 });
             }
+        } else {
+            console.log(`\n✅ Setup complete! You can start the server later by running:`);
+            console.log(`   ${isNative ? 'npm start' : `${composeCmd} up -d`}`);
+            if (needsManualAuth) printAuthNote('fully started');
         }
 
     } catch (err) {

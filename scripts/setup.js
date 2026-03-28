@@ -382,7 +382,8 @@ async function main() {
             `GEMINI_DISABLE_TOOLS=${process.env.GEMINI_DISABLE_TOOLS}`,
             `GEMINI_DISABLE_WEB_SEARCH=${process.env.GEMINI_DISABLE_WEB_SEARCH}`,
             `GEMINI_SILENT_FALLBACK=${process.env.GEMINI_SILENT_FALLBACK}`,
-            `GEMINI_HARDENED=true`
+            `GEMINI_HARDENED=true`,
+            `IONOSPHERE_RAW_TOOL_NAMES=true`
         ].join('\n') + '\n';
 
         fs.writeFileSync(envPath, envContent, 'utf-8');

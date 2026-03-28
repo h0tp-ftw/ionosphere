@@ -179,6 +179,7 @@ function generateEnvFile(instance, globalPrefs) {
         `GEMINI_DISABLE_TOOLS=${globalPrefs.disableTools ? 'true' : 'false'}`,
         `GEMINI_DISABLE_WEB_SEARCH=${globalPrefs.disableWebSearch ? 'true' : 'false'}`,
         `GEMINI_SILENT_FALLBACK=${globalPrefs.silentFallback ? 'true' : 'false'}`,
+        `IONOSPHERE_RAW_TOOL_NAMES=true`,
         ``,
         `# --- Runtime ---`,
         `GEMINI_MAX_TURNS=50`,

@@ -493,4 +493,63 @@ if (fs.existsSync(handlerTarget)) {
   fs.writeFileSync(handlerTarget, content, "utf8");
 }
 
+// 8. Patch mcp-tool.js (Raw Tool Names)
+const mcpToolTarget = path.resolve(
+  __dirname,
+  "..",
+  "node_modules",
+  "@google",
+  "gemini-cli-core",
+  "dist",
+  "src",
+  "tools",
+  "mcp-tool.js",
+);
+if (fs.existsSync(mcpToolTarget)) {
+  console.log(`[Patcher] Patching mcp-tool.js for raw tool names: ${mcpToolTarget}`);
+  let content = fs.readFileSync(mcpToolTarget, "utf8");
+
+  const generateValidNameSearch = /export function generateValidName\(name\) \{[\s\S]*?\n\}/;
+  const generateValidNameReplace = `export function generateValidName(name) {
+    // [IONOSPHERE] Raw Tool Names: When enabled, skip the mcp_ server prefix
+    // so tools are exposed to the model by their raw names only.
+    // This eliminates the dual-identity namespace collision.
+    let validToolname;
+    if (process.env.IONOSPHERE_RAW_TOOL_NAMES === 'true') {
+        // Strip mcp_ prefix if it exists
+        let rawName = name.startsWith('mcp_') ? name.slice(4) : name;
+        // Input format is 'serverName_toolName' — extract just the tool part
+        // by stripping everything up to and including the first underscore.
+        const sepIdx = rawName.indexOf('_');
+        validToolname = sepIdx !== -1 ? rawName.substring(sepIdx + 1) : rawName;
+    } else {
+        // Original behavior: enforce mcp_ prefix
+        validToolname = name.startsWith('mcp_') ? name : \`mcp_\${name}\`;
+    }
+    // Replace invalid characters with underscores to conform to Gemini API:
+    // ^[a-zA-Z_][a-zA-Z0-9_\\-.:]{0,63}$
+    validToolname = validToolname.replace(/[^a-zA-Z0-9_\\-.:]/g, '_');
+    // Ensure it starts with a letter or underscore
+    if (/^[^a-zA-Z_]/.test(validToolname)) {
+        validToolname = \`_\${validToolname}\`;
+    }
+    // If longer than the API limit, replace middle with '...'
+    const safeLimit = MAX_FUNCTION_NAME_LENGTH - 1;
+    if (validToolname.length > safeLimit) {
+        debugLogger.warn(\`Truncating MCP tool name "\${validToolname}" to fit within the 64 character limit.\`);
+        validToolname =
+            validToolname.slice(0, 30) + '...' + validToolname.slice(-30);
+    }
+    return validToolname;
+}`;
+
+  if (content.includes("export function generateValidName(name) {")) {
+    content = content.replace(generateValidNameSearch, generateValidNameReplace);
+    console.log("  - Applied Raw Tool Names patch to generateValidName.");
+  }
+
+  fs.writeFileSync(mcpToolTarget, content, "utf8");
+}
+
 console.log("[Patcher] Patching complete.");
+

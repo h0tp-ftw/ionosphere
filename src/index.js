@@ -654,8 +654,38 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
     }
 
     // --- TURN IDENTITY ---
-    // We define activeTurnId early so it's available for all closures and hijacking logic.
     const activeTurnId = req.turnId || randomUUID();
+
+    const turnTempDir = path.join(baseTempDir, activeTurnId); // Needed early for parsed logger
+
+    const logForensics = (data) => {
+      const logFile = path.join(turnTempDir, "forensics.log");
+      const timestamp = new Date().toISOString();
+      const prefix = `[${timestamp}] [Turn ${activeTurnId}] `;
+      const toLog = typeof data === "string" ? prefix + data + "\n" : prefix + JSON.stringify(data, null, 2) + "\n";
+      fs.appendFile(logFile, toLog, (err) => {
+        if (err) console.error(`[DEBUG] Failed to log forensics: ${err.message}`);
+      });
+    };
+
+    const logParsedOutput = (data) => {
+      if (process.env.GEMINI_DEBUG_KEEP_TEMP === "true") {
+        try {
+          const parsedFile = path.join(turnTempDir, "cli_parsed_output.txt");
+          const toLog =
+            typeof data === "string"
+              ? data
+              : JSON.stringify(data, null, 2) + "\n";
+          // GOOD: Non-blocking, fire-and-forget write. 
+          // Test-runner safe because we handle errors strictly via callback.
+          fs.appendFile(parsedFile, toLog, (err) => {
+            if (err) console.error(`[DEBUG] Failed to log parsed output: ${err.message}`);
+          });
+        } catch (e) {
+          console.error(`[DEBUG] logParsedOutput failed:`, e.message);
+        }
+      }
+    };
 
     const conversationPrompt = messages
       .map((m) => {
@@ -792,37 +822,6 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
     const stdoutPendingQueues = new Map(); // toolName -> [toolId1, toolId2, ...]
     const ipcHandledIds = new Set();
     const transparentTools = ["google_web_search"];
-
-    const turnTempDir = path.join(baseTempDir, activeTurnId); // Needed early for parsed logger
-
-    const logForensics = (data) => {
-      const logFile = path.join(turnTempDir, "forensics.log");
-      const timestamp = new Date().toISOString();
-      const prefix = `[${timestamp}] [Turn ${activeTurnId}] `;
-      const toLog = typeof data === "string" ? prefix + data + "\n" : prefix + JSON.stringify(data, null, 2) + "\n";
-      fs.appendFile(logFile, toLog, (err) => {
-        if (err) console.error(`[DEBUG] Failed to log forensics: ${err.message}`);
-      });
-    };
-
-    const logParsedOutput = (data) => {
-      if (process.env.GEMINI_DEBUG_KEEP_TEMP === "true") {
-        try {
-          const parsedFile = path.join(turnTempDir, "cli_parsed_output.txt");
-          const toLog =
-            typeof data === "string"
-              ? data
-              : JSON.stringify(data, null, 2) + "\n";
-          // GOOD: Non-blocking, fire-and-forget write. 
-          // Test-runner safe because we handle errors strictly via callback.
-          fs.appendFile(parsedFile, toLog, (err) => {
-            if (err) console.error(`[DEBUG] Failed to log parsed output: ${err.message}`);
-          });
-        } catch (e) {
-          console.error(`[DEBUG] logParsedOutput failed:`, e.message);
-        }
-      }
-    };
 
     if (isStreaming) {
       res.setHeader("Content-Type", "text/event-stream");

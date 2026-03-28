@@ -443,7 +443,7 @@ export class GeminiController extends EventEmitter {
             console.log(
               `[Turn ${turnId}] CLI Raw Line: ${JSON.stringify(json)}`,
             );
-          } else {
+          } else if (json.type !== "message") {
             console.log(
               `[Turn ${turnId}] CLI Raw Line: ${json.type}${json.role ? " [" + json.role + "]" : ""}`,
             );
@@ -594,12 +594,16 @@ export class GeminiController extends EventEmitter {
           }
         }
 
-        proc.stdout.on("data", (chunk) => {
-          if (rawLogStream) {
+        // NOTE: stdout -> accumulator.push is ALREADY wired in the cold-spawn
+        // block (line ~376) or in replenishPool() for warm processes.
+        // Adding another listener here caused every chunk to be pushed TWICE,
+        // which duplicated all response text.  We only add the rawLogStream
+        // writer here (the unique concern of this block).
+        if (rawLogStream) {
+          proc.stdout.on("data", (chunk) => {
             rawLogStream.write(chunk);
-          }
-          accumulator.push(chunk);
-        });
+          });
+        }
 
         let lastStderr = "";
         let lastStderrLines = [];

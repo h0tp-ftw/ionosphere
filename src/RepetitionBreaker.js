@@ -51,13 +51,26 @@ export class RepetitionBreaker {
       return "IGNORE";
     }
 
-    const count = (proc.repeatTracker.get(key) || 0) + 1;
-    proc.repeatTracker.set(key, count);
-    
+    const entry = proc.repeatTracker.get(key) || { count: 0, graceUsed: 0 };
+    entry.count++;
+    proc.repeatTracker.set(key, entry);
+
+    const graceCount = parseInt(process.env.REPEAT_GRACE_COUNT) || 2;
     const maxRepeats = parseInt(process.env.MAX_REPEAT_TOOL_CALLS) || 0;
 
-    if (maxRepeats > 0 && count >= maxRepeats) {
-      const errorMsg = `Loop detected: Model repeated tool '${toolName}' with same arguments ${count} times.`;
+    // Grace window: allow the first N retries without escalation
+    if (entry.count <= graceCount) {
+      console.log(
+        `[RepetitionBreaker] [RETRY] Tool '${toolName}' retry ${entry.count}/${graceCount} (grace period). Allowing.`,
+      );
+      return false;
+    }
+
+    // After grace is exhausted, count toward the kill threshold
+    const effectiveCount = entry.count - graceCount;
+
+    if (maxRepeats > 0 && effectiveCount >= maxRepeats) {
+      const errorMsg = `Loop detected: Model repeated tool '${toolName}' with same arguments ${entry.count} times (${graceCount} grace + ${effectiveCount} violations).`;
       console.error(`[RepetitionBreaker] ${errorMsg} Terminating process.`);
       
       if (activeCallbacks.onError) {

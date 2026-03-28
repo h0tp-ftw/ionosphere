@@ -32,6 +32,7 @@ export class JsonlAccumulator extends EventEmitter {
           this.emit("line", parsed);
         } catch (e) {
           console.error(`[JsonlAccumulator] Failed to parse line: ${line}`, e);
+          this.emit("parse_error", { raw: line, error: e.message });
         }
       }
     }
@@ -57,86 +58,95 @@ export class StreamingCleaner {
   }
 
   process(isFinal = false) {
-    // Regexes used for cleaning.
-    // IMPORTANT: 'resultRegex' lookahead must NOT include '$' unless it's the final flush,
-    // otherwise it will consume trailing text as if it were part of a result tag.
-    const actionRegex =
-      /\[Action \(id: ([^)]*)\): Called tool '([^']+)' with args: (.*?)\]/gs;
-    const lookahead = isFinal
-      ? "(?=\\n\\n|\\[Action|\\[Tool Result|USER:|$)"
-      : "(?=\\n\\n|\\[Action|\\[Tool Result|USER:)";
-    const resultRegex = new RegExp(
-      `\\[Tool Result \\(id: ([^)]*)\\)\\]:[^]*?${lookahead}`,
-      "gs",
-    );
+    try {
+      // Regexes used for cleaning.
+      // IMPORTANT: 'resultRegex' lookahead must NOT include '$' unless it's the final flush,
+      // otherwise it will consume trailing text as if it were part of a result tag.
+      // Anchored to require newline or start-of-string before '[Action' to prevent false matches on JSON content.
+      const actionRegex =
+        /(?:^|\n)\[Action \(id: ([^)]*)\): Called tool '([^']+)' with args: (.*?)\]/gs;
+      const lookahead = isFinal
+        ? "(?=\\n\\n|\\[Action|\\[Tool Result|USER:|$)"
+        : "(?=\\n\\n|\\[Action|\\[Tool Result|USER:)";
+      const resultRegex = new RegExp(
+        `(?:^|\\n)\\[Tool Result \\(id: ([^)]*)\\)\\]:[^]*?${lookahead}`,
+        "gs",
+      );
 
-    // Before stripping, intercept "leaked" tool calls for Turn forensics/hijacking.
-    // We only do this if we find a complete tag.
-    let match;
-    const proc = this.processes.get(this.turnId);
-    if (proc && proc.activeCallbacks) {
-      const tempActionRegex = new RegExp(actionRegex);
-      while ((match = tempActionRegex.exec(this.buffer)) !== null) {
-        const [fullMatch, callId, toolName, argsStr] = match;
-        const alreadySeen = Array.from(proc.toolUsage || []).includes(toolName);
-        const isLikelyHallucination =
-          !argsStr || argsStr.trim() === "{}" || argsStr.trim().length < 2;
+      // Before stripping, intercept "leaked" tool calls for Turn forensics/hijacking.
+      // We only do this if we find a complete tag.
+      let match;
+      const proc = this.processes.get(this.turnId);
+      if (proc && proc.activeCallbacks) {
+        const tempActionRegex = new RegExp(actionRegex);
+        while ((match = tempActionRegex.exec(this.buffer)) !== null) {
+          const [fullMatch, callId, toolName, argsStr] = match;
+          const alreadySeen = Array.from(proc.toolUsage || []).includes(toolName);
+          const isLikelyHallucination =
+            !argsStr || argsStr.trim() === "{}" || argsStr.trim().length < 2;
 
-        if (!alreadySeen && !isLikelyHallucination) {
-          if (process.env.GEMINI_DEBUG_RESPONSES === "true") {
-            console.log(
-              `[GeminiController] Intercepted leaked tool call in streaming buffer for Turn ${this.turnId}: ${toolName} (${callId})`,
-            );
+          if (!alreadySeen && !isLikelyHallucination) {
+            if (process.env.GEMINI_DEBUG_RESPONSES === "true") {
+              console.log(
+                `[GeminiController] Intercepted leaked tool call in streaming buffer for Turn ${this.turnId}: ${toolName} (${callId})`,
+              );
+            }
+            if (proc.activeCallbacks.onToolCall) {
+              proc.activeCallbacks.onToolCall({
+                id: callId.startsWith("leak_") ? callId : `leak_${callId}`,
+                name: toolName,
+                arguments: argsStr.trim(),
+              });
+            }
+            proc.toolUsage.add(toolName);
           }
-          if (proc.activeCallbacks.onToolCall) {
-            proc.activeCallbacks.onToolCall({
-              id: callId.startsWith("leak_") ? callId : `leak_${callId}`,
-              name: toolName,
-              arguments: argsStr.trim(),
-            });
-          }
-          proc.toolUsage.add(toolName);
         }
       }
-    }
 
-    // Perform cleaning on the buffer
-    let cleaned = this.buffer.replace(actionRegex, "").replace(resultRegex, "");
+      // Perform cleaning on the buffer
+      let cleaned = this.buffer.replace(actionRegex, "").replace(resultRegex, "");
 
-    // Safely emit text that is NOT likely part of a pending tag or lookahead.
-    // We buffer aggressively if not final.
-    if (isFinal) {
-      if (cleaned && !this.flushed) {
-        this.on_text(cleaned);
+      // Safely emit text that is NOT likely part of a pending tag or lookahead.
+      // We buffer aggressively if not final.
+      if (isFinal) {
+        if (cleaned && !this.flushed) {
+          this.on_text(cleaned);
+        }
+        this.buffer = "";
+        this.flushed = true;
+      } else {
+        const bufferMargin = 200; // Increased to handle long tool arguments
+        const safeLength = cleaned.length - bufferMargin;
+        if (safeLength > 0) {
+          // Find the latest point that is definitely NOT part of a tag prefix.
+          // We look for the LAST occurrence of '[', '<', or even '\n' (as it might be part of \n\n)
+          const lastTagStart = Math.max(
+            cleaned.lastIndexOf("["),
+            cleaned.lastIndexOf("<"),
+          );
+          const lastBoundary = Math.max(lastTagStart, cleaned.lastIndexOf("\n"));
+
+          let emitEnd = cleaned.length;
+          if (lastBoundary !== -1 && lastBoundary > safeLength) {
+            emitEnd = lastBoundary;
+          } else if (lastBoundary === -1) {
+            // No potential tags in the last 200 chars, safe to emit
+            emitEnd = cleaned.length;
+          }
+
+          const toEmit = cleaned.slice(0, emitEnd);
+          if (toEmit) {
+            this.on_text(toEmit);
+            this.buffer = cleaned.slice(emitEnd);
+          }
+        }
+      }
+    } catch (e) {
+      console.error(`[StreamingCleaner] Regex processing error: ${e.message}. Flushing buffer as-is.`);
+      if (this.buffer && this.on_text) {
+        this.on_text(this.buffer);
       }
       this.buffer = "";
-      this.flushed = true;
-    } else {
-      const bufferMargin = 200; // Increased to handle long tool arguments
-      const safeLength = cleaned.length - bufferMargin;
-      if (safeLength > 0) {
-        // Find the latest point that is definitely NOT part of a tag prefix.
-        // We look for the LAST occurrence of '[', '<', or even '\n' (as it might be part of \n\n)
-        const lastTagStart = Math.max(
-          cleaned.lastIndexOf("["),
-          cleaned.lastIndexOf("<"),
-        );
-        const lastBoundary = Math.max(lastTagStart, cleaned.lastIndexOf("\n"));
-
-        let emitEnd = cleaned.length;
-        if (lastBoundary !== -1 && lastBoundary > safeLength) {
-          emitEnd = lastBoundary;
-        } else if (lastBoundary === -1) {
-          // No potential tags in the last 200 chars, safe to emit
-          emitEnd = cleaned.length;
-        }
-
-        const toEmit = cleaned.slice(0, emitEnd);
-        if (toEmit) {
-          this.on_text(toEmit);
-          this.buffer = cleaned.slice(emitEnd);
-        }
-      }
     }
   }
 
@@ -434,6 +444,14 @@ export class GeminiController extends EventEmitter {
           proc.kill("SIGKILL");
           reject(new Error(`Turn timed out after ${TURN_TIMEOUT_MS / 60000}m`));
         }, TURN_TIMEOUT_MS);
+
+        accumulator.on("parse_error", ({ raw, error }) => {
+          console.error(`[GeminiController] [Turn ${turnId}] JSONL Parse Error: ${error}. Raw: ${raw.substring(0, 200)}`);
+          const activeCallbacks = this.callbacksByTurn.get(turnId) || {};
+          if (activeCallbacks.onEvent) {
+            activeCallbacks.onEvent({ type: "parse_error", message: error, raw: raw.substring(0, 500) });
+          }
+        });
 
         accumulator.on("line", (json) => {
           const activeCallbacks = this.callbacksByTurn.get(turnId) || {};

@@ -1430,6 +1430,10 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         // Only proceed with handoff resolution if hijackedTurnId is still valid
         // (defense-in-depth guard above may have nullified it for new user instructions)
         if (hijackedTurnId) {
+          // Ensure the temp directory exists for this turn (handoff creates a new activeTurnId)
+          if (!fs.existsSync(turnTempDir))
+            fs.mkdirSync(turnTempDir, { recursive: true });
+
           // Write historical tools to a file to prevent E2BIG env limit errors
           const historicalToolsPath = path.join(turnTempDir, "history_tools.txt");
           await fs.promises.writeFile(historicalToolsPath, historicalTools.join(","), "utf-8");

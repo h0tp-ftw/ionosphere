@@ -298,7 +298,8 @@ async function main() {
                     let cCmd = dockerStatus.error ? 'podman compose' : 'docker-compose';
                     if (!podmanStatus.error && spawnSync('podman-compose', ['--version']).status === 0) cCmd = 'podman-compose';
 
-                    const nukeResult = spawnSync(cCmd, ['down', '--volumes', '--rmi', 'all'], { stdio: 'inherit', shell: true });
+                    const nukeArgs = cCmd === 'podman-compose' ? ['down', '--volumes'] : ['down', '--volumes', '--rmi', 'all'];
+                    const nukeResult = spawnSync(cCmd, nukeArgs, { stdio: 'inherit', shell: true });
                     if (nukeResult.status === 0) {
                         console.log("✅ State purged. Proceeding with fresh setup...\n");
                     } else {

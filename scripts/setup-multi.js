@@ -201,6 +201,7 @@ function generateComposeFile(instances) {
         `#`,
         `# Usage:`,
         `#   docker compose -f docker-compose.multi.yml up -d --build`,
+        `#   (If using podman-compose and containers exist, add: --podman-run-args="--replace")`,
         `#   docker compose -f docker-compose.multi.yml logs -f`,
         `#   docker compose -f docker-compose.multi.yml down`,
         ``,
@@ -430,8 +431,10 @@ async function main() {
         console.log(`  ${inst.name.padEnd(maxNameLen)}  ${String(inst.port).padEnd(5)}  ${auth.padEnd(9)}  ${inst.bridgeKey}`);
     }
 
+    const upArgs = composeCmd === 'podman-compose' ? '--podman-run-args="--replace" up -d' : 'up -d';
+
     console.log(`\n📋 Quick Reference:\n`);
-    console.log(`  Start all:   ${composeCmd} -f ${COMPOSE_OUTPUT} up -d`);
+    console.log(`  Start all:   ${composeCmd} -f ${COMPOSE_OUTPUT} ${upArgs}`);
     console.log(`  View logs:   ${composeCmd} -f ${COMPOSE_OUTPUT} logs -f`);
     console.log(`  Stop all:    ${composeCmd} -f ${COMPOSE_OUTPUT} down`);
     console.log(`  Restart one: ${composeCmd} -f ${COMPOSE_OUTPUT} restart ionosphere-<name>`);
@@ -454,7 +457,7 @@ async function main() {
 
     if (startNow) {
         console.log(`\n🚀 Launching ${instances.length} instance(s)...\n`);
-        const upResult = spawnSync(`${composeCmd} -f ${COMPOSE_OUTPUT} up -d`, {
+        const upResult = spawnSync(`${composeCmd} -f ${COMPOSE_OUTPUT} ${upArgs}`, {
             stdio: 'inherit',
             shell: true
         });
@@ -473,7 +476,7 @@ async function main() {
     } else {
         if (buildNow) {
             console.log(`\n✅ Setup complete! You can start the instances later by running:`);
-            console.log(`   ${composeCmd} -f ${COMPOSE_OUTPUT} up -d`);
+            console.log(`   ${composeCmd} -f ${COMPOSE_OUTPUT} ${upArgs}`);
             // Instruct user they still need to auth when they start them
             await runOAuthFlows(instances, composeCmd);
         }

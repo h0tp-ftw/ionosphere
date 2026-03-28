@@ -35,3 +35,6 @@ Thumbs.db
 *.swp
 .gemini/settings.json
 debug_prompts/
+# Multi-instance generated files
+.env.instance-*
+docker-compose.multi.yml

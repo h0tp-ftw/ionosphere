@@ -33,6 +33,32 @@ const TOOL_BRIDGE_PATH = path.resolve(
   "index.js",
 );
 
+// MCP Server Alias — kept short to minimize the tool name prefix.
+// The Gemini CLI prefixes all MCP tools as: mcp_{alias}_{toolName}
+// Using 'io' produces: mcp_io_read_file (instead of mcp_ionosphere-tool-bridge_read_file)
+const MCP_SERVER_ALIAS = "io";
+
+/**
+ * Strips any known MCP/legacy prefix from a tool name to recover the original name.
+ * Handles: mcp_io_, mcp_ionosphere-tool-bridge_, ionosphere__
+ */
+const stripMcpPrefix = (name) => {
+  if (!name || typeof name !== 'string') return name;
+  // Current short alias prefix
+  if (name.startsWith(`mcp_${MCP_SERVER_ALIAS}_`)) {
+    return name.substring(`mcp_${MCP_SERVER_ALIAS}_`.length);
+  }
+  // Legacy long alias prefix
+  if (name.startsWith('mcp_ionosphere-tool-bridge_')) {
+    return name.substring('mcp_ionosphere-tool-bridge_'.length);
+  }
+  // Legacy ionosphere__ prefix
+  if (name.startsWith('ionosphere__')) {
+    return name.substring('ionosphere__'.length);
+  }
+  return name;
+};
+
 const app = express();
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
@@ -447,20 +473,21 @@ async function enqueueControllerPrompt(executeTask) {
   }
 }
 
-// Garbage Collector: Force-delete temp/ directories older than 15 minutes
+// Garbage Collector: Force-delete temp/ directories older than GC_WORKSPACE_TTL_MS (default: 60 minutes)
 setInterval(
   () => {
     try {
       if (fs.existsSync(baseTempDir)) {
         const now = Date.now();
+        const gcTtlMs = parseInt(process.env.GC_WORKSPACE_TTL_MS) || 60 * 60 * 1000;
         const entries = fs.readdirSync(baseTempDir, { withFileTypes: true });
         for (const entry of entries) {
           if (entry.isDirectory()) {
             const dirPath = path.join(baseTempDir, entry.name);
             const stats = fs.statSync(dirPath);
-            if (now - stats.mtimeMs > 15 * 60 * 1000) {
-              // Check if turn is still parked
-              if (!parkedTurns.has(entry.name)) {
+            if (now - stats.mtimeMs > gcTtlMs) {
+              // Check if turn is still parked OR actively running
+              if (!parkedTurns.has(entry.name) && !controller.processes.has(entry.name)) {
                 if (process.env.GEMINI_DEBUG_KEEP_TEMP === "true") {
                   if (process.env.GEMINI_DEBUG_RAW === "true") {
                     console.log(
@@ -469,7 +496,7 @@ setInterval(
                   }
                 } else {
                   console.log(
-                    `[GC] Sweeping abandoned workspace: ${entry.name}`,
+                    `[GC] Sweeping abandoned workspace (TTL: ${Math.round(gcTtlMs / 60000)}m): ${entry.name}`,
                   );
                   fs.rmSync(dirPath, { recursive: true, force: true });
                 }
@@ -1249,9 +1276,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
     };
 
     const onPark = (msg) => {
-      const toolName = msg.name.startsWith("ionosphere__")
-        ? msg.name.substring(12)
-        : msg.name;
+      const toolName = stripMcpPrefix(msg.name);
 
       if (process.env.GEMINI_DEBUG_PARALLEL === "true") {
         console.log(`[Turn ${activeTurnId}] onPark for ${toolName}. stdoutSeen=${stdoutToolCalls.has(toolName)}`);
@@ -1537,11 +1562,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
 
                         if (nextContent) {
                           // Pattern match for narrated result: [tool_name ...] Result: \n ...
-                          const toolNameClean = pending.name.startsWith(
-                            "ionosphere__",
-                          )
-                            ? pending.name.substring(12)
-                            : pending.name;
+                          const toolNameClean = stripMcpPrefix(pending.name);
                           const narrationPattern = new RegExp(
                             `\\[${toolNameClean.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}.*?\\]\\s*Result:\\s*\\n?([\\s\\S]*)`,
                             "i",
@@ -1588,10 +1609,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
               if (pending.turnId === hijackedTurnId) {
                 const callId = `call_${callKey.substring(0, 8)}`;
                 const clientToolName =
-                  pending.clientName ||
-                  (pending.name.startsWith("ionosphere__")
-                    ? pending.name.substring(12)
-                    : pending.name);
+                  pending.clientName || stripMcpPrefix(pending.name);
 
                 // Forensics: Log the arguments we are re-emitting
                 const argsLog =
@@ -1855,9 +1873,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
               const callId = `call_${callKey.substring(0, 8)}`;
 
               // Prefix stripping: send ORIGINAL names back to the client
-              const clientToolName = msg.name.startsWith("ionosphere__")
-                ? msg.name.substring(12)
-                : msg.name;
+              const clientToolName = stripMcpPrefix(msg.name);
 
               const argsStr =
                 typeof msg.arguments === "string"
@@ -1999,7 +2015,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         toolBridgeEnv.TOOL_BRIDGE_MCP_SERVERS = mcpPath;
       }
       mcpServers = {
-        "ionosphere-tool-bridge": {
+        [MCP_SERVER_ALIAS]: {
           command: "node",
           args: [TOOL_BRIDGE_PATH],
           env: toolBridgeEnv,

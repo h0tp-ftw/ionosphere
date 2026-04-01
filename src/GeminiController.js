@@ -696,7 +696,8 @@ export class GeminiController extends EventEmitter {
           }
           clearTimeout(timeout);
           this.processes.delete(turnId);
-          this.callbacksByTurn.delete(turnId);
+          // NOTE: Do NOT delete callbacksByTurn here — the catch block needs
+          // to read them to call onError. The finally block handles cleanup.
           reject(new Error(`Failed to spawn CLI: ${err.message}`));
         });
       });
@@ -704,11 +705,16 @@ export class GeminiController extends EventEmitter {
       return result;
     } catch (err) {
       console.error(`[GeminiController] Turn error: ${err.message}`);
+      // Grab callbacks BEFORE finally runs and deletes them
       const activeCallbacks = this.callbacksByTurn.get(turnId) || {};
       if (activeCallbacks.onError)
         activeCallbacks.onError(
           createError(err.message, ErrorType.SERVER, ErrorCode.INTERNAL_ERROR),
         );
+      // Re-throw so the caller (index.js) knows this turn failed.
+      // Without this, sendPrompt() resolves to undefined and index.js
+      // silently sends an empty success response to the OpenAI client.
+      throw err;
     } finally {
       this.callbacksByTurn.delete(turnId);
     }

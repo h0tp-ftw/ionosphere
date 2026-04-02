@@ -44,6 +44,7 @@ export class CliErrorParser {
 
     if (isResourceError) {
       const errorMsg = `Gemini API Quota/Capacity Exhausted (429). Raw: ${stderrText}`;
+      console.log(`[DEBUG] CliErrorParser: Matched isResourceError! Error message: ${errorMsg}`);
       if (process.env.GEMINI_SILENT_FALLBACK === "true") {
         console.log(`[CliErrorParser] Seamless Fallback: Ignoring 429 error.`);
         return { type: "IGNORE", message: errorMsg };

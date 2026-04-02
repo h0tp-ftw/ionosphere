@@ -1005,6 +1005,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
     };
 
     const onError = async (err) => {
+      console.log(`[DEBUG] index.js: onError called with error: ${err.message || err}`);
       if (responseSent || res.writableEnded) {
         if (process.env.GEMINI_DEBUG_HANDOFF === "true")
           console.log(
@@ -1019,13 +1020,24 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
       const errorObj = formatErrorResponse(err);
       const status = getStatusCode(errorObj);
 
-      if (isStreaming) {
-        sendChunk({ error: errorObj });
-        if (!res.writableEnded) res.end();
+      console.log(`[DEBUG] index.js: onError mappings -> status: ${status}, obj.message: ${errorObj.message}`);
+
+      // OpenAI Stream Error Fix: If headers have not been sent yet, do NOT send
+      // text/event-stream chunks. Send standard JSON HTTP 4xx/5xx response.
+      // This is exactly why the client gets a "blank response" - they drop unexpected stream payloads.
+      if (!res.headersSent) {
+        console.log(`[DEBUG] index.js: Headers not yet sent! Safely responding with HTTP ${status} and application/json.`);
+        res.setHeader("Content-Type", "application/json");
+        logParsedOutput({ error: errorObj });
+        res.status(status).json({ error: errorObj });
       } else {
-        if (!res.headersSent) {
+        console.log(`[DEBUG] index.js: Headers ALREADY sent. Must fall back to streaming error chunks.`);
+        if (isStreaming) {
           logParsedOutput({ error: errorObj });
-          res.status(status).json({ error: errorObj });
+          res.write(`data: ${JSON.stringify({ error: errorObj })}\n\n`);
+          if (!res.writableEnded) res.end();
+        } else {
+          if (!res.writableEnded) res.end();
         }
       }
       if (heartbeatInterval) clearInterval(heartbeatInterval);

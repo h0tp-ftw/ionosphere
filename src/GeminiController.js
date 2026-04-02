@@ -655,6 +655,7 @@ export class GeminiController extends EventEmitter {
               activeCallbacks,
             );
             if (errorResult?.type === "FATAL") {
+              console.log(`[DEBUG] GeminiController: Received FATAL from parseStderr. Killing process ${proc.pid}`);
               proc.kill("SIGKILL");
             } else if (errorResult?.type === "IGNORE") {
               // The CLI will still emit a 0-token 'result' and exit with code 1.

@@ -895,11 +895,9 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
       }
     };
 
-    heartbeatInterval = isStreaming
-      ? setInterval(() => {
-        if (!res.writableEnded) res.write(": ping\n\n");
-      }, 15000)
-      : null;
+    // Removed 15s heartbeat: Not needed since no aggressive cloud proxy timeouts are expected.
+    // This perfectly ensures headers are never prematurely locked, solving all rate limit masking!
+    heartbeatInterval = null;
 
     const responseModel =
       req.body.model || process.env.GEMINI_MODEL || "gemini-2.5-flash-lite";
@@ -1031,11 +1029,18 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         logParsedOutput({ error: errorObj });
         res.status(status).json({ error: errorObj });
       } else {
-        console.log(`[DEBUG] index.js: Headers ALREADY sent. Must fall back to streaming error chunks.`);
+        console.log(`[DEBUG] index.js: Headers ALREADY sent. Must fall back to streaming error chunks and socket teardown.`);
         if (isStreaming) {
           logParsedOutput({ error: errorObj });
           res.write(`data: ${JSON.stringify({ error: errorObj })}\n\n`);
-          if (!res.writableEnded) res.end();
+          // Forcefully terminate the connection if we are failing mid-stream.
+          // A clean res.end() will trick the client into assuming the stream successfully 
+          // finished with 0 tokens. By destroying the socket, we force the client 
+          // (like OpenClaw or Python SDK) to throw a network exception and accurately failover.
+          if (!res.writableEnded) {
+            console.log(`[DEBUG] index.js: Force-destroying socket to trigger client failover.`);
+            res.destroy();
+          }
         } else {
           if (!res.writableEnded) res.end();
         }

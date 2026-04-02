@@ -588,7 +588,22 @@ export class GeminiController extends EventEmitter {
                 );
               }
             }
-            if (activeCallbacks.onResult) activeCallbacks.onResult(json);
+            // If a quota error was silently swallowed earlier (GEMINI_SILENT_FALLBACK),
+            // the CLI emits a 0-token 'result' before exiting with code 1. Treat it
+            // as a RATE_LIMIT error so the client gets a proper 429 response instead
+            // of an empty success that then has its error silently dropped.
+            if (proc.pendingQuotaError) {
+              console.warn(
+                `[GeminiController] Turn ${turnId}: Intercepting empty result — surfacing pending RATE_LIMIT error to client.`,
+              );
+              if (activeCallbacks.onError) {
+                activeCallbacks.onError(
+                  createError(proc.pendingQuotaError, ErrorType.RATE_LIMIT, ErrorCode.RATE_LIMIT_EXCEEDED),
+                );
+              }
+            } else {
+              if (activeCallbacks.onResult) activeCallbacks.onResult(json);
+            }
           } else if (
             json.type === "tool_result" ||
             json.type === "init" ||
@@ -641,6 +656,11 @@ export class GeminiController extends EventEmitter {
             );
             if (errorResult?.type === "FATAL") {
               proc.kill("SIGKILL");
+            } else if (errorResult?.type === "IGNORE") {
+              // The CLI will still emit a 0-token 'result' and exit with code 1.
+              // Store the real error so the result handler can surface it properly
+              // instead of treating the empty result as a success.
+              proc.pendingQuotaError = errorResult.message;
             }
           }
         });

@@ -36,8 +36,16 @@ export function generateConfig(options = {}) {
         model: {
             name: modelName || process.env.GEMINI_MODEL || "gemini-2.5-flash-lite",
             maxSessionTurns: parseInt(process.env.GEMINI_MAX_TURNS) || 50,
-            compressionThreshold: 0.7,
-            disableLoopDetection: true
+            compressionThreshold: parseFloat(process.env.GEMINI_COMPRESSION_THRESHOLD) || 0.7,
+            disableLoopDetection: process.env.GEMINI_DISABLE_LOOP_DETECTION !== 'false'
+        },
+        generationConfig: {
+            temperature: process.env.GEMINI_TEMPERATURE !== undefined ? parseFloat(process.env.GEMINI_TEMPERATURE) : undefined,
+            topP: process.env.GEMINI_TOP_P !== undefined ? parseFloat(process.env.GEMINI_TOP_P) : undefined,
+            topK: process.env.GEMINI_TOP_K !== undefined ? parseInt(process.env.GEMINI_TOP_K) : undefined,
+            presencePenalty: process.env.GEMINI_PRESENCE_PENALTY !== undefined ? parseFloat(process.env.GEMINI_PRESENCE_PENALTY) : undefined,
+            frequencyPenalty: process.env.GEMINI_FREQUENCY_PENALTY !== undefined ? parseFloat(process.env.GEMINI_FREQUENCY_PENALTY) : undefined,
+            maxOutputTokens: process.env.GEMINI_MAX_TOKENS !== undefined ? parseInt(process.env.GEMINI_MAX_TOKENS) : undefined,
         },
         tools: {
             core: (() => {
@@ -77,7 +85,21 @@ export function generateConfig(options = {}) {
                 }
             ]
         };
+    } else if (Object.values(config.generationConfig).some(v => v !== undefined)) {
+        // If no explicit generationConfig was passed, but env-based defaults exist
+        config.modelConfigs = {
+            customOverrides: [
+                {
+                    match: { model: config.model.name },
+                    modelConfig: {
+                        generateContentConfig: { ...config.generationConfig }
+                    }
+                }
+            ]
+        };
     }
+    // Clean up the internal generationConfig helper before writing to disk
+    delete config.generationConfig;
 
     // Helper for deep merging custom settings onto the base config
     const isObject = (item) => item && typeof item === 'object' && !Array.isArray(item);

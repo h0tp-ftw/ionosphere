@@ -2049,6 +2049,20 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
     if (req.body.temperature !== undefined)
       generationConfig.temperature = req.body.temperature;
     if (req.body.top_p !== undefined) generationConfig.topP = req.body.top_p;
+    if (req.body.top_k !== undefined) generationConfig.topK = req.body.top_k;
+    if (req.body.presence_penalty !== undefined)
+      generationConfig.presencePenalty = req.body.presence_penalty;
+    if (req.body.frequency_penalty !== undefined)
+      generationConfig.frequencyPenalty = req.body.frequency_penalty;
+    if (req.body.seed !== undefined) generationConfig.seed = req.body.seed;
+    if (req.body.n !== undefined) generationConfig.candidateCount = req.body.n;
+
+    if (req.body.logprobs) {
+      generationConfig.responseLogprobs = true;
+      if (req.body.top_logprobs !== undefined)
+        generationConfig.logprobs = req.body.top_logprobs;
+    }
+
     if (req.body.stop) {
       generationConfig.stopSequences = Array.isArray(req.body.stop)
         ? req.body.stop
@@ -2068,6 +2082,15 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
       } else if (reasoningEffort === "high") {
         generationConfig.thinkingConfig.thinkingBudget = 32768;
       }
+    }
+
+    // Explicit reasoning controls (Preview)
+    if (req.body.include_thoughts !== undefined || req.body.thinking_budget !== undefined) {
+      generationConfig.thinkingConfig = generationConfig.thinkingConfig || {};
+      if (req.body.include_thoughts !== undefined)
+        generationConfig.thinkingConfig.includeThoughts = !!req.body.include_thoughts;
+      if (req.body.thinking_budget !== undefined)
+        generationConfig.thinkingConfig.thinkingBudget = req.body.thinking_budget;
     }
 
     generateConfig({

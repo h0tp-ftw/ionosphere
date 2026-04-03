@@ -76,7 +76,7 @@ export function generateConfig(options = {}) {
 
     if (generationConfig) {
         config.modelConfigs = {
-            customOverrides: [
+            overrides: [
                 {
                     match: { model: config.model.name },
                     modelConfig: {
@@ -88,7 +88,7 @@ export function generateConfig(options = {}) {
     } else if (Object.values(config.generationConfig).some(v => v !== undefined)) {
         // If no explicit generationConfig was passed, but env-based defaults exist
         config.modelConfigs = {
-            customOverrides: [
+            overrides: [
                 {
                     match: { model: config.model.name },
                     modelConfig: {

@@ -499,10 +499,17 @@ export class GeminiController extends EventEmitter {
             console.log(
               `[Turn ${turnId}] CLI Raw Line: ${JSON.stringify(json)}`,
             );
-          } else if (json.type !== "message") {
+          } else if (json.type !== "message" || process.env.GEMINI_DEBUG_RAW === "true") {
             console.log(
               `[Turn ${turnId}] CLI Raw Line: ${json.type}${json.role ? " [" + json.role + "]" : ""}`,
             );
+          }
+          
+          if (json.type === "message") {
+             const keys = Object.keys(json.content || {});
+             if (json.content?.thought || json.content?.thinking || json.thinking) {
+                console.log(`[GeminiController] [Turn ${turnId}] 🧠 DETECTED REASONING/THOUGHT tokens in message (Keys: ${keys.join(", ")}).`);
+             }
           }
 
           // Reset stall detector on any output

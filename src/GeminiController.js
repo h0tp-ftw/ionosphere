@@ -379,20 +379,29 @@ export class GeminiController extends EventEmitter {
         }
 
         if (!proc) {
-          console.log(`[GeminiController] Pool miss. Spawning cold stateless CLI: ${executable} ${finalArgs.join(" ")}`);
-          const spawnStartTime = Date.now();
+          console.log(`[GeminiController] [Turn ${turnId}] Pool miss. Spawning cold stateless CLI: ${executable} ${finalArgs.join(" ")}`);
           proc = spawn(executable, finalArgs, {
             cwd: workspacePath,
             env: spawnEnv,
             stdio: ["pipe", "pipe", "pipe"],
             shell: process.platform === "win32",
           });
+          
+          proc.currentPhase = "spawning";
+          proc.spawnStartTime = Date.now();
           if (process.env.GEMINI_DEBUG_PROMPTS === "true") {
-            console.log(`[GeminiController] [Turn ${turnId}] Spawned CLI in ${Date.now() - spawnStartTime}ms`);
+            console.log(`[GeminiController] [Turn ${turnId}] Spawned CLI process ${proc.pid}`);
           }
+          
           accumulator = new JsonlAccumulator();
           proc.rawOutputBuffer = []; // Reactive Debugging
           proc.stdout.on("data", (chunk) => {
+            if (!proc.firstByteTime) {
+              proc.firstByteTime = Date.now();
+              proc.currentPhase = "responding";
+              const startupDuration = proc.firstByteTime - (proc.spawnStartTime || Date.now());
+              console.log(`[GeminiController] [Turn ${turnId}] First byte received (TTFB) after ${startupDuration}ms`);
+            }
             const lines = chunk.toString().split("\n");
             for (const line of lines) {
               if (line.trim()) {
@@ -431,14 +440,27 @@ export class GeminiController extends EventEmitter {
           ? JSON.stringify(structuredContents)
           : text;
         
+        proc.stdinStartTime = Date.now();
+        proc.currentPhase = "uploading_prompt";
+        if (stdinContent.length > 200000) {
+           console.log(`[GeminiController] [Turn ${turnId}] Starting large prompt upload to stdin (${Math.round(stdinContent.length / 1024)} KB)...`);
+        }
+
         proc.stdin.on("error", (err) => {
+          if (err.code === "EPIPE" && proc.isCancelled) {
+             console.warn(`[GeminiController] [Turn ${turnId}] Stdin Pipe closed during cancellation (expected EPIPE).`);
+             return;
+          }
           console.error(`[GeminiController] [Turn ${turnId}] Stdin Error:`, err.message);
         });
 
         try {
           proc.stdin.end(stdinContent, "utf-8", () => {
-             if (process.env.GEMINI_DEBUG_PROMPTS === "true") {
-               console.log(`[GeminiController] [Turn ${turnId}] Stdin finalized (payload length: ${stdinContent.length})`);
+             proc.stdinEndTime = Date.now();
+             proc.currentPhase = "model_thinking";
+             const uploadDuration = proc.stdinEndTime - proc.stdinStartTime;
+             if (stdinContent.length > 200000 || process.env.GEMINI_DEBUG_PROMPTS === "true") {
+                console.log(`[GeminiController] [Turn ${turnId}] Stdin finalized (payload: ${Math.round(stdinContent.length / 1024)} KB) in ${uploadDuration}ms`);
              }
           });
         } catch (err) {
@@ -495,7 +517,7 @@ export class GeminiController extends EventEmitter {
             const STALL_TIMEOUT_MS = parseInt(process.env.CLI_STALL_TIMEOUT_MS) || 30000;
             proc.stallTimer = setTimeout(() => {
               console.warn(
-                `[GeminiController] [STALL DETECTED] [Turn ${turnId}] No CLI output for ${STALL_TIMEOUT_MS / 1000}s. Last event: ${json.type}.`,
+                `[GeminiController] [STALL DETECTED] [Turn ${turnId}] No CLI output for ${STALL_TIMEOUT_MS / 1000}s. Current Phase: ${proc.currentPhase}. Last event: ${json.type}.`,
               );
               // For now, we only log. In the future, we might auto-restart.
             }, STALL_TIMEOUT_MS);
@@ -764,6 +786,7 @@ export class GeminiController extends EventEmitter {
     const proc = this.processes.get(turnId);
     if (proc) {
       console.log(`[GeminiController] Cancelling turn ${turnId}`);
+      proc.isCancelled = true;
       proc.kill("SIGINT");
       // Fallback for unresponsive CLI
       setTimeout(() => {

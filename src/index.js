@@ -890,9 +890,20 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
       }
     };
 
-    // Removed 15s heartbeat: Not needed since no aggressive cloud proxy timeouts are expected.
-    // This perfectly ensures headers are never prematurely locked, solving all rate limit masking!
-    heartbeatInterval = null;
+    // Diagnostic Heartbeat: Prevents idle timeouts during long thinking phases
+    // and provide feedback to the server console.
+    if (isStreaming) {
+      const startTime = Date.now();
+      heartbeatInterval = setInterval(() => {
+        if (!responseSent && !res.writableEnded) {
+          const elapsed = Math.round((Date.now() - startTime) / 1000);
+          console.log(`[Turn ${activeTurnId}] Still waiting for model response (elapsed: ${elapsed}s)...`);
+          res.write(`: heartbeat\n\n`);
+        } else {
+          clearInterval(heartbeatInterval);
+        }
+      }, 20000);
+    }
 
     const responseModel =
       req.body.model || process.env.GEMINI_MODEL || "gemini-2.5-flash-lite";
@@ -913,6 +924,11 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
           `[Turn ${activeTurnId}] ${contextMsg}SSE Text Chunk: ${text.substring(0, 50)}...`,
         );
       }
+      // Stop diagnostic heartbeat once data starts flowing
+      if (heartbeatInterval) {
+        clearInterval(heartbeatInterval);
+        heartbeatInterval = null;
+      }
       if (isStreaming) {
         sendChunk({
           id: `chatcmpl-stream`,
@@ -927,6 +943,12 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
     };
 
     const onToolCall = async (info) => {
+      // Stop diagnostic heartbeat once data starts flowing (even if it's a tool call)
+      if (heartbeatInterval) {
+        clearInterval(heartbeatInterval);
+        heartbeatInterval = null;
+      }
+
       if (process.env.GEMINI_DEBUG_PARALLEL === "true") {
         console.log(`[Turn ${activeTurnId}] onToolCall entry: ${info.name} (ID: ${info.id}). responseSent=${responseSent}`);
       }
@@ -1040,7 +1062,10 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
           if (!res.writableEnded) res.end();
         }
       }
-      if (heartbeatInterval) clearInterval(heartbeatInterval);
+      if (heartbeatInterval) {
+        clearInterval(heartbeatInterval);
+        heartbeatInterval = null;
+      }
       if (parkDebounceTimer) clearTimeout(parkDebounceTimer);
     };
 
@@ -1124,7 +1149,10 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
           res.json(payload);
         }
       }
-      if (heartbeatInterval) clearInterval(heartbeatInterval);
+      if (heartbeatInterval) {
+        clearInterval(heartbeatInterval);
+        heartbeatInterval = null;
+      }
       if (parkDebounceTimer) clearTimeout(parkDebounceTimer);
     };
 

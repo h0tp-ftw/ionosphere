@@ -213,12 +213,20 @@ export class GeminiController extends EventEmitter {
     });
 
     proc.isWarm = false;
+    proc.rawOutputBuffer = []; // Reactive Debugging
     
     // Attach a temporary accumulator to listen for the INIT event
     const accumulator = new JsonlAccumulator();
     proc.warmAccumulator = accumulator;
     
     proc.stdout.on("data", (chunk) => {
+       const lines = chunk.toString().split("\n");
+       for (const line of lines) {
+         if (line.trim()) {
+           proc.rawOutputBuffer.push(line.trim());
+           if (proc.rawOutputBuffer.length > 60) proc.rawOutputBuffer.shift();
+         }
+       }
        if (proc.isWarmLogStream) proc.isWarmLogStream.write(chunk);
        accumulator.push(chunk);
     });
@@ -383,7 +391,15 @@ export class GeminiController extends EventEmitter {
             console.log(`[GeminiController] [Turn ${turnId}] Spawned CLI in ${Date.now() - spawnStartTime}ms`);
           }
           accumulator = new JsonlAccumulator();
+          proc.rawOutputBuffer = []; // Reactive Debugging
           proc.stdout.on("data", (chunk) => {
+            const lines = chunk.toString().split("\n");
+            for (const line of lines) {
+              if (line.trim()) {
+                proc.rawOutputBuffer.push(line.trim());
+                if (proc.rawOutputBuffer.length > 60) proc.rawOutputBuffer.shift();
+              }
+            }
             if (proc.isWarmLogStream) proc.isWarmLogStream.write(chunk);
             accumulator.push(chunk);
           });

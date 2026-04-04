@@ -687,12 +687,17 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
 
     const logForensics = (data) => {
       const logFile = path.join(turnTempDir, "forensics.log");
-      const timestamp = new Date().toISOString();
-      const prefix = `[${timestamp}] [Turn ${activeTurnId}] `;
-      const toLog = typeof data === "string" ? prefix + data + "\n" : prefix + JSON.stringify(data, null, 2) + "\n";
-      fs.appendFile(logFile, toLog, (err) => {
-        if (err) console.error(`[DEBUG] Failed to log forensics: ${err.message}`);
-      });
+      try {
+        if (!fs.existsSync(turnTempDir)) {
+          fs.mkdirSync(turnTempDir, { recursive: true });
+        }
+        const timestamp = new Date().toISOString();
+        const prefix = `[${timestamp}] [Turn ${activeTurnId}] `;
+        const toLog = typeof data === "string" ? prefix + data + "\n" : prefix + JSON.stringify(data, null, 2) + "\n";
+        fs.appendFileSync(logFile, toLog);
+      } catch (err) {
+        console.error(`[DEBUG] Failed to log forensics: ${err.message}`);
+      }
     };
 
     const logParsedOutput = (data) => {
@@ -791,19 +796,8 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
 
         if (shouldPreempt) {
           console.log(
-            `[API] One Session Rule: User provided new instruction while turn ${hijackedTurnId} was waiting for a tool. Preempting.`,
+            `[API] Parallel Mode: Allowing parallel completion for turn ${hijackedTurnId} instead of preemption.`,
           );
-          logForensics(`PREEMPTION: Killing turn ${hijackedTurnId} for new instruction.`);
-          controller.cancelCurrentTurn(hijackedTurnId);
-          parkedTurns.delete(hijackedTurnId);
-          activeTurnsByHash.delete(fingerprint);
-          activeTurnsByHash.delete(historyHash);
-          // Clean up any pending tool calls for the preempted turn
-          for (const [callKey, pending] of pendingToolCalls.entries()) {
-            if (pending.turnId === hijackedTurnId) {
-              pendingToolCalls.delete(callKey);
-            }
-          }
           await new Promise((r) => setTimeout(r, 200));
           hijackedTurnId = null; // Proceed to NEW TURN
         }
@@ -817,10 +811,10 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         activeTurnsByHash.get(historyHash);
       if (existingTurnId) {
         console.log(
-          `[API] One Session Rule: Killing orphaned/stale active turn ${existingTurnId} before starting new turn.`,
+          `[API] Parallel Mode: Existing active turn ${existingTurnId} detected. Allowing parallel run.`,
         );
-        controller.cancelCurrentTurn(existingTurnId);
-        await new Promise((r) => setTimeout(r, 500));
+        // controller.cancelCurrentTurn(existingTurnId); // DISABLED for Parallelism
+        // await new Promise((r) => setTimeout(r, 500));
       }
     }
 
@@ -828,16 +822,17 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
     for (const [pTurnId, parked] of parkedTurns.entries()) {
       if (parked.historyHash === historyHash && pTurnId !== hijackedTurnId) {
         console.log(
-          `[API] Preemption: Killing old parked turn ${pTurnId} for same conversation thread.`,
+          `[API] Parallel Mode: Keeping parked turn ${pTurnId} alive for same conversation thread.`,
         );
-        parked.controller.cancelCurrentTurn(pTurnId);
+        // parked.controller.cancelCurrentTurn(pTurnId); // DISABLED for Parallelism
         // Force immediate cleanup if cancellation doesn't trigger finally block fast enough
-        parkedTurns.delete(pTurnId);
+        // parkedTurns.delete(pTurnId);
       }
     }
 
     const isStreaming = req.body.stream === true;
     let accumulatedText = "";
+    const rawCliBuffer = []; // Case 2: Reactive Debugging buffer
     let accumulatedToolCalls = [];
     let finalStats = null;
     let responseSent = false;
@@ -1061,6 +1056,21 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
       if (process.env.GEMINI_DEBUG_PARALLEL === "true") console.log(`[Turn ${activeTurnId}] onResult: Setting responseSent = true`);
       responseSent = true;
       finalStats = json.stats || {};
+
+      // Case 2: Reactive Debugging Dump
+      const outTokens = finalStats.output_tokens || 0;
+      if (outTokens === 0 && accumulatedText.length === 0 && accumulatedToolCalls.length === 0) {
+        console.warn(`[API] [Turn ${activeTurnId}] WARNING: Zero Output Turn. Dumping last 60 lines of raw CLI output:`);
+        const proc = controller.processes.get(activeTurnId);
+        if (proc && proc.rawOutputBuffer) {
+           console.log("----------------- [CLI RAW DUMP START] -----------------");
+           proc.rawOutputBuffer.forEach(line => console.log(`[Turn ${activeTurnId}] [CLI RAW] ${line}`));
+           console.log("----------------- [CLI RAW DUMP END] -------------------");
+        } else {
+           console.warn(`[API] [Turn ${activeTurnId}] CLI process or buffer not found in controller.`);
+        }
+      }
+
       if (isStreaming) {
         sendChunk({
           id: `chatcmpl-stream`,

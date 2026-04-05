@@ -98,7 +98,7 @@ export class PerfTimer {
       if (subs) {
         entry.sub = {};
         for (const [k, v] of Object.entries(subs)) {
-          entry.sub[k] = Math.round(v * 100) / 100;
+          entry.sub[k] = typeof v === 'number' ? Math.round(v * 100) / 100 : v;
         }
       }
       phases[phase] = entry;
@@ -144,7 +144,7 @@ export class PerfTimer {
       let line = `  ${label.padEnd(25)} ${String(data.ms).padStart(8)}ms`;
       if (data.sub) {
         const subParts = Object.entries(data.sub)
-          .map(([k, v]) => `${k}: ${v}ms`)
+          .map(([k, v]) => `${k}: ${v}${typeof v === 'number' ? 'ms' : ''}`)
           .join(", ");
         line += `  (${subParts})`;
       }

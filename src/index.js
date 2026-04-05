@@ -20,6 +20,7 @@ import {
   getConversationFingerprint,
   findHijackedTurnId,
 } from "./session_manager.js";
+import { PerfTimer } from "./PerfTimer.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -597,8 +598,10 @@ app.delete("/v1/files/:file_id", async (req, res) => {
 app.post("/v1/chat/completions", handleUpload, async (req, res) => {
   let heartbeatInterval = null;
   let parkDebounceTimer = null;
+  const timer = new PerfTimer("pending", {});
 
   try {
+    timer.mark('ingress');
     // 1. Authorization
     const expectedApiKey = process.env.API_KEY;
     if (expectedApiKey) {
@@ -661,6 +664,11 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
       );
     }
 
+    timer.measure('ingress');
+    timer.addMeta('messages', messages.length);
+    timer.addMeta('toolDefs', (req.body.tools || []).length);
+
+    timer.mark('session_resolve');
     const historyHash = getHistoryHash(messages);
     const fingerprint = getConversationFingerprint(messages);
 
@@ -682,6 +690,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
 
     // --- TURN IDENTITY ---
     const activeTurnId = req.turnId || randomUUID();
+    timer.turnId = activeTurnId;
 
     const turnTempDir = path.join(baseTempDir, activeTurnId); // Needed early for parsed logger
 
@@ -742,6 +751,14 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         pendingToolCalls,
         process.env.GEMINI_DEBUG_HANDOFF === "true",
       ) || {};
+
+    timer.measure('session_resolve', {
+      hash_ms: getHistoryHash._lastDurationMs || 0,
+      hash_input_bytes: getHistoryHash._lastInputSize || 0,
+      fingerprint_ms: getConversationFingerprint._lastDurationMs || 0,
+      hijack_scan_ms: findHijackedTurnId._lastDurationMs || 0,
+      pending_tool_calls: findHijackedTurnId._pendingToolCallsSize || 0,
+    });
 
     if (hijackedTurnId === activeTurnId) {
       console.log(
@@ -1445,6 +1462,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
 
     // --- HANDOFF CASE ---
     if (hijackedTurnId && parkedTurns.has(hijackedTurnId)) {
+      timer.mark('handoff');
       const parked = parkedTurns.get(hijackedTurnId);
       const proc = controller.processes.get(hijackedTurnId);
 
@@ -1700,10 +1718,16 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
               hijackedTurnId = null;
               // Fall through to NEW TURN CASE
             } else {
+              timer.measure('handoff');
+              timer.addMeta('path', 're-emit');
+              timer.finish();
               return; // Request handled by re-emit
             }
           } else {
             // 3. Await the conclusion of the TASK from the new request side
+            timer.measure('handoff');
+            timer.addMeta('path', 'tool-resolution');
+            timer.finish();
             await parked.executePromise;
             return;
           }
@@ -1717,6 +1741,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
       fs.mkdirSync(turnTempDir, { recursive: true });
 
     logForensics(`START: New Turn Request for fingerprint ${fingerprint} (isStreaming: ${isStreaming})`);
+    timer.mark('new_turn_setup');
 
     // DEBUG: Dump raw OpenAI messages[] summary to forensics for history loss investigation
     const msgSummary = messages.map((m, i) => {
@@ -1901,6 +1926,10 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         await fs.promises.mkdir(debugDir, { recursive: true });
     }
 
+    timer.measure('new_turn_setup');
+    timer.addMeta('promptChars', (conversationPromptSection || conversationPrompt).length);
+
+    timer.mark('ipc_setup');
     // Per-turn IPC: Use /tmp for Unix sockets to avoid host-mount incompatibilities (ENOTSUP)
     const ipcPath =
       process.platform === "win32"
@@ -2023,6 +2052,9 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
       );
     }
 
+    timer.measure('ipc_setup');
+    timer.mark('config_gen');
+
     // Config
     const settingsPath = path.join(turnTempDir, ".gemini", "settings.json");
     const openAiTools = req.body.tools || null;
@@ -2137,6 +2169,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
       modelName: req.body.model,
       generationConfig,
     });
+    timer.measure('config_gen');
 
     const executeTask = async () => {
       let taskResolve;
@@ -2210,6 +2243,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         // Build structured Content[] for Native History Protocol
         const structuredContents = buildGeminiHistory(messages);
 
+        timer.mark('cli_execution');
         await controller.sendPrompt(
           activeTurnId,
           promptText,
@@ -2226,6 +2260,16 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
           attachments,
           structuredContents,
         );
+
+        // Harvest CLI-level perf data from the process
+        const cliProc = controller.processes.get(activeTurnId);
+        timer.measure('cli_execution', {
+          spawn_method: cliProc?._perfSpawnMethod || 'unknown',
+          spawn_ms: cliProc?._perfSpawnMs || 0,
+          first_text_ms: cliProc?._perfFirstTextMs || 0,
+          total_cli_ms: cliProc?._perfTotalCliMs || 0,
+          stdin_payload_bytes: cliProc?._perfStdinPayloadBytes || 0,
+        });
 
         // Final safety for non-streaming multi-tool or parked turns
         if (!responseSent) {
@@ -2258,6 +2302,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
           `[Turn ${activeTurnId}] Concluded. Active: ${currentlyRunning}/${MAX_CONCURRENT_CLI}, Parked: ${parkedCount}`,
         );
 
+        timer.mark('cleanup');
         if (activeTurnsByHash.get(fingerprint) === activeTurnId) {
           activeTurnsByHash.delete(fingerprint);
         }
@@ -2280,6 +2325,9 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         } else {
           fs.rmSync(turnTempDir, { recursive: true, force: true });
         }
+        timer.measure('cleanup');
+        timer.outputDir = (process.env.GEMINI_DEBUG_KEEP_TEMP === 'true') ? turnTempDir : null;
+        timer.finish();
       }
     };
 
@@ -2294,6 +2342,8 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
     if (!res.headersSent) {
       res.status(getStatusCode(errorObj)).json({ error: errorObj });
     } else res.end();
+    timer.addMeta('error', err.message || 'unknown');
+    timer.finish();
   }
 });
 

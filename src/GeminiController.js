@@ -3,11 +3,14 @@ import EventEmitter from "events";
 import path from "path";
 import fs from "fs";
 import { promises as fsp } from "fs";
+import { performance } from "perf_hooks";
 
 import { createError, ErrorType, ErrorCode } from "./errorHandler.js";
 import { RepetitionBreaker } from "./RepetitionBreaker.js";
 import { CliRunner } from "./CliRunner.js";
 import { CliErrorParser } from "./CliErrorParser.js";
+
+const PERF_ENABLED = process.env.GEMINI_PERF_TIMING === "true";
 
 /**
  * Accumulates chunked stdout into distinct JSON lines.
@@ -360,6 +363,7 @@ export class GeminiController extends EventEmitter {
       const hashKey = this.hashConfig(workspacePath, settingsPath, systemPrompt, attachments);
 
       const result = await new Promise((resolve, reject) => {
+        const promiseStartTime = PERF_ENABLED ? performance.now() : 0;
         let lastResultJson = null;
         let proc = null;
         let accumulator = null;
@@ -370,16 +374,19 @@ export class GeminiController extends EventEmitter {
           if (readyIdx !== -1) {
             proc = currentPool.splice(readyIdx, 1)[0];
             accumulator = proc.warmAccumulator;
+            proc._perfSpawnMethod = "warm";
             console.log(`[GeminiController] Acquired WARM process from pool!`);
           } else {
             proc = currentPool.shift();
             accumulator = proc.warmAccumulator;
+            proc._perfSpawnMethod = "warming";
             console.log(`[GeminiController] Acquired WARMING process from pool.`);
           }
         }
 
         if (!proc) {
           console.log(`[GeminiController] [Turn ${turnId}] Pool miss. Spawning cold stateless CLI: ${executable} ${finalArgs.join(" ")}`);
+          const spawnT0 = PERF_ENABLED ? performance.now() : 0;
           proc = spawn(executable, finalArgs, {
             cwd: workspacePath,
             env: spawnEnv,
@@ -387,6 +394,10 @@ export class GeminiController extends EventEmitter {
             shell: process.platform === "win32",
           });
           
+          proc._perfSpawnMethod = "cold";
+          if (PERF_ENABLED) {
+            proc._perfSpawnMs = performance.now() - spawnT0;
+          }
           proc.currentPhase = "spawning";
           proc.spawnStartTime = Date.now();
           if (process.env.GEMINI_DEBUG_PROMPTS === "true") {
@@ -470,6 +481,10 @@ export class GeminiController extends EventEmitter {
         proc.extraEnv = extraEnv; // Initialize with spawn env
         proc.toolUsage = new Set(); // Track real tool calls in this turn
         proc.accumulatedText = ""; // Track full text for repeat detection
+        proc._perfStdinPayloadBytes = stdinContent.length;
+        if (PERF_ENABLED) {
+          proc._perfPromiseStart = promiseStartTime;
+        }
         this.processes.set(turnId, proc);
 
         // 2-hour timeout for ReAct loops (human-in-the-loop scale)
@@ -531,6 +546,10 @@ export class GeminiController extends EventEmitter {
           }
 
           if (json.type === "message" && json.role === "assistant") {
+            // Track first model text for perf timing
+            if (PERF_ENABLED && !proc._perfFirstTextTime) {
+              proc._perfFirstTextTime = performance.now();
+            }
             const content =
               typeof json.content === "object"
                 ? json.content.text
@@ -727,6 +746,15 @@ export class GeminiController extends EventEmitter {
           console.log(
             `[GeminiController] Process closed for turn ${turnId} with code ${code}. Tool Usage: [${usageSummary}]`,
           );
+
+          // Capture perf timing for the CLI execution phase
+          if (PERF_ENABLED) {
+            proc._perfCloseTime = performance.now();
+            proc._perfTotalCliMs = proc._perfCloseTime - (proc._perfPromiseStart || proc._perfCloseTime);
+            if (proc._perfFirstTextTime) {
+              proc._perfFirstTextMs = proc._perfFirstTextTime - (proc._perfPromiseStart || proc._perfFirstTextTime);
+            }
+          }
 
           // CRITICAL: Flush cleaner BEFORE deleting process/callbacks
           // so that any remaining buffered text reaches the response.

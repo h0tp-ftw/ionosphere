@@ -1,12 +1,21 @@
 import { createHash } from 'crypto';
+import { performance } from 'perf_hooks';
+
+const PERF_ENABLED = process.env.GEMINI_PERF_TIMING === 'true';
 
 /**
  * Computes a hash of the conversation messages to identify a thread.
  * Traditional hash is very sensitive.
  */
 export const getHistoryHash = (messages) => {
+    const start = PERF_ENABLED ? performance.now() : 0;
     const serialized = JSON.stringify(messages.map(m => ({ role: m.role, content: m.content, name: m.name, tool_call_id: m.tool_call_id })));
-    return createHash('sha256').update(serialized).digest('hex');
+    const result = createHash('sha256').update(serialized).digest('hex');
+    if (PERF_ENABLED) {
+        getHistoryHash._lastDurationMs = performance.now() - start;
+        getHistoryHash._lastInputSize = serialized.length;
+    }
+    return result;
 };
 
 /**
@@ -14,6 +23,7 @@ export const getHistoryHash = (messages) => {
  * Useful for catching retries that might have slightly different history.
  */
 export const getConversationFingerprint = (messages) => {
+    const start = PERF_ENABLED ? performance.now() : 0;
     // Stable Turn Anchor: based on the FIRST user message and system prompt
     // This is more resilient to history truncation/sliding windows.
     const systemMsg = messages.find(m => m.role === 'system');
@@ -40,7 +50,11 @@ export const getConversationFingerprint = (messages) => {
     const firstUser = extractText(firstUserMsg?.content);
 
     // Hash the purified content (first 500 chars)
-    return createHash('sha256').update(`${system.substring(0, 50)}:${firstUser.substring(0, 200)}`).digest('hex').substring(0, 12);
+    const result = createHash('sha256').update(`${system.substring(0, 50)}:${firstUser.substring(0, 200)}`).digest('hex').substring(0, 12);
+    if (PERF_ENABLED) {
+        getConversationFingerprint._lastDurationMs = performance.now() - start;
+    }
+    return result;
 };
 
 /**
@@ -57,6 +71,7 @@ export const getConversationFingerprint = (messages) => {
  * @returns {object|null} - An object { turnId, matchType } or null if none.
  */
 export const findHijackedTurnId = (messages, historyHash, fingerprint, activeTurnsByHash, parkedTurns, pendingToolCalls, debug = false) => {
+    const start = PERF_ENABLED ? performance.now() : 0;
     let hijackedTurnId = null;
     let matchType = null;
 
@@ -81,6 +96,10 @@ export const findHijackedTurnId = (messages, historyHash, fingerprint, activeTur
                         hijackedTurnId = pending.turnId;
                         matchType = 'tool_call';
                         console.log(`[API] Hijack discovery: Match found for ${callId} -> Turn ${hijackedTurnId}`);
+                        if (PERF_ENABLED) {
+                            findHijackedTurnId._lastDurationMs = performance.now() - start;
+                            findHijackedTurnId._pendingToolCallsSize = pendingToolCalls.size;
+                        }
                         return { turnId: hijackedTurnId, matchType }; // Immediate return on strong match
                     }
                 }
@@ -123,6 +142,11 @@ export const findHijackedTurnId = (messages, historyHash, fingerprint, activeTur
             matchType = 'fingerprint_active';
             if (debug) console.log(`[HIJACK] Fingerprint Match (Active/Unknown state): Turn ${hijackedTurnId}`);
         }
+    }
+
+    if (PERF_ENABLED) {
+        findHijackedTurnId._lastDurationMs = performance.now() - start;
+        findHijackedTurnId._pendingToolCallsSize = pendingToolCalls.size;
     }
 
     if (hijackedTurnId) {

@@ -58,10 +58,11 @@ if (process.env.TOOL_BRIDGE_TOOLS) {
 
 // --- IPC DISPATCH ---
 function dispatchToolCall(name, args) {
+    const ipcStartTime = Date.now();
     return new Promise((resolve, reject) => {
         const client = net.createConnection(ipcPath, () => {
             if (process.env.GEMINI_DEBUG_IPC === 'true') {
-                process.stderr.write(`[ToolBridge] → IPC Connected: ${ipcPath}. Calling ${name}...\n`);
+                process.stderr.write(`[ToolBridge] \u2192 IPC Connected: ${ipcPath}. Calling ${name}...\n`);
             }
             const payload = JSON.stringify({
                 event: 'tool_call',
@@ -78,12 +79,16 @@ function dispatchToolCall(name, args) {
             if (nl !== -1) {
                 const line = buffer.slice(0, nl).trim();
                 if (process.env.GEMINI_DEBUG_IPC === 'true') {
-                    process.stderr.write(`[ToolBridge] ← IPC Data received for ${name}: ${line.substring(0, 200)}...\n`);
+                    process.stderr.write(`[ToolBridge] \u2190 IPC Data received for ${name}: ${line.substring(0, 200)}...\n`);
                 }
                 client.destroy();
                 try {
                     const parsed = JSON.parse(line);
                     if (parsed.event === 'tool_result') {
+                        const ipcDuration = Date.now() - ipcStartTime;
+                        if (process.env.GEMINI_PERF_TIMING === 'true') {
+                            process.stderr.write(`[PERF:IPC] Tool ${name}: ${ipcDuration}ms roundtrip\n`);
+                        }
                         resolve(parsed.result ?? '');
                     } else {
                         reject(new Error(`Unexpected IPC event: ${parsed.event}`));

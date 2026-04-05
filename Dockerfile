@@ -1,6 +1,11 @@
 # Start with a slim node image
 FROM node:22-slim
 
+# Install system dependencies for Gemini CLI (Keychain support)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libsecret-1-0 \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 # 1. Copy dependency manifests and scripts for postinstall

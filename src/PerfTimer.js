@@ -144,7 +144,10 @@ export class PerfTimer {
       let line = `  ${label.padEnd(25)} ${String(data.ms).padStart(8)}ms`;
       if (data.sub) {
         const subParts = Object.entries(data.sub)
-          .map(([k, v]) => `${k}: ${v}${typeof v === 'number' ? 'ms' : ''}`)
+          .map(([k, v]) => {
+            const unit = typeof v === 'number' ? (k.includes('bytes') ? ' bytes' : 'ms') : '';
+            return `${k}: ${v}${unit}`;
+          })
           .join(", ");
         line += `  (${subParts})`;
       }

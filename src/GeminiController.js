@@ -261,6 +261,28 @@ export class GeminiController extends EventEmitter {
   }
 
   /**
+   * Seeds the warm pool at server startup so the first request gets a warm process.
+   * Spawns a plain stateless CLI with no prompt — the process blocks at stdin-read
+   * after emitting 'init', consuming ~0 CPU until a turn arrives.
+   * Call once after the HTTP server starts listening.
+   */
+  prewarmDefault() {
+    const settingsPath =
+      process.env.GEMINI_SETTINGS_JSON ||
+      path.join(this.cwd, ".gemini", "settings.json");
+    const { executable, initialArgs } = this.cliRunner.getExecutableAndArgs();
+    const finalArgs = this.cliRunner.buildFinalArgs(initialArgs, { attachments: [] });
+    const spawnEnv = this.cliRunner.prepareEnv(settingsPath, {}, null);
+    // systemPrompt=null so the pool key matches turns regardless of system prompt content
+    const hashKey = this.hashConfig(this.cwd, settingsPath, null, []);
+    const count = parseInt(process.env.GEMINI_WARM_POOL_SIZE) || 1;
+    console.log(`[GeminiController] Server startup: seeding ${count} warm process(es) into pool...`);
+    for (let i = 0; i < count; i++) {
+      this.replenishPool(hashKey, this.cwd, spawnEnv, executable, finalArgs);
+    }
+  }
+
+  /**
    * Updates the callbacks for a running turn.
    * Essential for "Warm Stateless Handoff" where a second HTTP request
    * takes over the output of a process parked from a first request.
@@ -369,7 +391,11 @@ export class GeminiController extends EventEmitter {
         systemPromptPath,
       );
 
-      const hashKey = this.hashConfig(workspacePath, settingsPath, systemPrompt, attachments);
+      // Exclude systemPrompt from the pool key — it is written to system.md
+      // before stdin is sent, and the CLI reads it lazily at request time.
+      // This ensures warm processes seeded at startup (with no system prompt)
+      // match every incoming turn regardless of repetition-breaker drift.
+      const hashKey = this.hashConfig(workspacePath, settingsPath, null, attachments);
 
       const result = await new Promise((resolve, reject) => {
         const promiseStartTime = PERF_ENABLED ? performance.now() : 0;

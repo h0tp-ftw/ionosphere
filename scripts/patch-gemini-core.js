@@ -597,5 +597,44 @@ if (fs.existsSync(mcpToolTarget)) {
   fs.writeFileSync(mcpToolTarget, content, "utf8");
 }
 
-console.log("[Patcher] Patching complete.");
+// 9. Patch keychainService.js (Instant FileKeychain Fallback on Linux)
+// libsecret-1.so.0 is never available in the container. The native keychain
+// probe (await import('keytar') + dlopen) costs 3-15s per cold spawn. Forcing
+// GEMINI_FORCE_FILE_STORAGE at module-load time skips the probe entirely,
+// cutting warm-up time dramatically and making the warm pool viable.
+const keychainServiceTarget = path.resolve(
+  __dirname,
+  "..",
+  "node_modules",
+  "@google",
+  "gemini-cli-core",
+  "dist",
+  "src",
+  "services",
+  "keychainService.js",
+);
+if (fs.existsSync(keychainServiceTarget)) {
+  console.log(`[Patcher] Patching keychainService.js for instant Linux fallback: ${keychainServiceTarget}`);
+  let content = fs.readFileSync(keychainServiceTarget, "utf8");
 
+  const keychainSearch = `export const FORCE_FILE_STORAGE_ENV_VAR = 'GEMINI_FORCE_FILE_STORAGE';`;
+  const keychainReplace = `export const FORCE_FILE_STORAGE_ENV_VAR = 'GEMINI_FORCE_FILE_STORAGE';
+// [IONOSPHERE] On Linux containers libsecret is never available — skip the
+// native keytar probe entirely so each cold spawn doesn't waste 3-15 seconds.
+if (process.platform === 'linux') {
+    process.env[FORCE_FILE_STORAGE_ENV_VAR] = 'true';
+}`;
+
+  if (content.includes(keychainSearch) && !content.includes("[IONOSPHERE] On Linux containers")) {
+    content = content.replace(keychainSearch, keychainReplace);
+    console.log("  - Applied instant FileKeychain fallback for Linux.");
+  } else if (content.includes("[IONOSPHERE] On Linux containers")) {
+    console.log("  - Instant FileKeychain fallback patch already applied.");
+  } else {
+    console.warn("  - WARNING: Could not find FORCE_FILE_STORAGE_ENV_VAR in keychainService.js — skipping.");
+  }
+
+  fs.writeFileSync(keychainServiceTarget, content, "utf8");
+}
+
+console.log("[Patcher] Patching complete.");

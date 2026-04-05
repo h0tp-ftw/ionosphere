@@ -2477,4 +2477,8 @@ app.get("/health", (req, res) => res.json({ status: "ok" }));
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Ionosphere Orchestrator listening on port ${PORT}`);
+  // Seed the warm pool immediately so the first request hits a pre-warmed process
+  // instead of spawning cold. Each process is a fresh stateless spawn that blocks
+  // at stdin-read after emitting 'init', consuming ~0 CPU until a turn arrives.
+  setImmediate(() => controller.prewarmDefault());
 });

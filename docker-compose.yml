@@ -35,6 +35,8 @@ services:
       - PORT=${PORT:-3000}
       - IONOSPHERE_RAW_TOOL_NAMES=${IONOSPHERE_RAW_TOOL_NAMES:-true}
       - CI=${CI:-true}
+      - GEMINI_FORCE_FILE_STORAGE=true
+      - GEMINI_WARM_POOL_SIZE=${GEMINI_WARM_POOL_SIZE:-2}
     command: node src/index.js
     ports:
       - "${PORT:-3000}:${PORT:-3000}"

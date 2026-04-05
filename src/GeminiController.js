@@ -308,9 +308,18 @@ export class GeminiController extends EventEmitter {
     try {
       this.callbacksByTurn.set(turnId, callbacks);
 
-      // Structured History Mode: pipe Content[] JSON instead of flat text
+      // Structured History Mode: write Content[] JSON to temp file
+      // to bypass stdin pipe backpressure (eliminates ~12s delay for large prompts).
+      let historyFilePath = null;
+      let actualPayloadBytes = 0;
       if (structuredContents) {
         extraEnv.IONOSPHERE_STRUCTURED_HISTORY = "true";
+        historyFilePath = path.join(this.tempDir, `turn-${turnId}-history.json`);
+        const jsonPayload = JSON.stringify(structuredContents);
+        actualPayloadBytes = jsonPayload.length;
+        fs.writeFileSync(historyFilePath, jsonPayload, "utf-8");
+        extraEnv.IONOSPHERE_HISTORY_FILE = historyFilePath;
+        console.log(`[GeminiController] [Turn ${turnId}] Wrote structured history to file (${Math.round(actualPayloadBytes / 1024)} KB): ${historyFilePath}`);
       }
 
       let systemPromptPath = null;
@@ -447,13 +456,16 @@ export class GeminiController extends EventEmitter {
         const envEntries = Object.entries(spawnEnv);
 
         // Write prompt content to stdin and signal EOF
-        const stdinContent = structuredContents
-          ? JSON.stringify(structuredContents)
+        // When historyFilePath is set, the structured history is read from file
+        // by the CLI — we only send a minimal stub through stdin to pass the
+        // CLI's non-empty input check.
+        const stdinContent = historyFilePath
+          ? "__ionosphere_file_mode__"
           : text;
         
         proc.stdinStartTime = Date.now();
-        proc.currentPhase = "uploading_prompt";
-        if (stdinContent.length > 200000) {
+        proc.currentPhase = historyFilePath ? "file_mode" : "uploading_prompt";
+        if (!historyFilePath && stdinContent.length > 200000) {
            console.log(`[GeminiController] [Turn ${turnId}] Starting large prompt upload to stdin (${Math.round(stdinContent.length / 1024)} KB)...`);
         }
 
@@ -470,7 +482,9 @@ export class GeminiController extends EventEmitter {
              proc.stdinEndTime = Date.now();
              proc.currentPhase = "model_thinking";
              const uploadDuration = proc.stdinEndTime - proc.stdinStartTime;
-             if (stdinContent.length > 200000 || process.env.GEMINI_DEBUG_PROMPTS === "true") {
+             if (historyFilePath) {
+                console.log(`[GeminiController] [Turn ${turnId}] Stdin stub sent in ${uploadDuration}ms (payload via file: ${Math.round(actualPayloadBytes / 1024)} KB)`);
+             } else if (stdinContent.length > 200000 || process.env.GEMINI_DEBUG_PROMPTS === "true") {
                 console.log(`[GeminiController] [Turn ${turnId}] Stdin finalized (payload: ${Math.round(stdinContent.length / 1024)} KB) in ${uploadDuration}ms`);
              }
           });
@@ -481,7 +495,8 @@ export class GeminiController extends EventEmitter {
         proc.extraEnv = extraEnv; // Initialize with spawn env
         proc.toolUsage = new Set(); // Track real tool calls in this turn
         proc.accumulatedText = ""; // Track full text for repeat detection
-        proc._perfStdinPayloadBytes = stdinContent.length;
+        proc._historyFilePath = historyFilePath; // For cleanup on close
+        proc._perfStdinPayloadBytes = actualPayloadBytes || stdinContent.length;
         if (PERF_ENABLED) {
           proc._perfPromiseStart = promiseStartTime;
         }
@@ -764,6 +779,11 @@ export class GeminiController extends EventEmitter {
             accumulator.push("\n");
           }
 
+          // Clean up history file before deleting process reference
+          if (proc._historyFilePath) {
+            try { fs.unlinkSync(proc._historyFilePath); } catch (_) {}
+          }
+
           this.processes.delete(turnId);
 
           if (code === 0 || code === null) {
@@ -773,7 +793,18 @@ export class GeminiController extends EventEmitter {
             const fullText = proc.accumulatedText || "";
             this.repetitionBreaker.trackTurnResult(fingerprint, fullText);
 
-            resolve(lastResultJson);
+            // Attach perf data to the result before resolving, since the
+            // process reference is deleted by this point and index.js can't
+            // read it from controller.processes.get() anymore.
+            const resultWithPerf = lastResultJson || {};
+            resultWithPerf._perf = {
+              spawnMethod: proc._perfSpawnMethod || 'unknown',
+              spawnMs: proc._perfSpawnMs || 0,
+              firstTextMs: proc._perfFirstTextMs || 0,
+              totalCliMs: proc._perfTotalCliMs || 0,
+              stdinPayloadBytes: proc._perfStdinPayloadBytes || 0,
+            };
+            resolve(resultWithPerf);
           } else {
             const diagnostics = lastStderrLines.join("\n").trim();
             const errorMsg = diagnostics

@@ -2244,7 +2244,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         const structuredContents = buildGeminiHistory(messages);
 
         timer.mark('cli_execution');
-        await controller.sendPrompt(
+        const sendResult = await controller.sendPrompt(
           activeTurnId,
           promptText,
           turnTempDir,
@@ -2255,20 +2255,21 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
             IONOSPHERE_IPC: ipcPath,
             IONOSPHERE_HISTORY_HASH: historyHash,
             IONOSPHERE_HISTORY_TOOLS_PATH: historicalToolsPath,
-            IONOSPHERE_STRUCTURED_HISTORY: "true",
           },
           attachments,
           structuredContents,
         );
 
-        // Harvest CLI-level perf data from the process
-        const cliProc = controller.processes.get(activeTurnId);
+        // Harvest CLI-level perf data from the sendPrompt result
+        // (previously read from controller.processes which was always undefined
+        //  because the process is deleted in the close handler before resolve)
+        const cliPerf = sendResult?._perf || {};
         timer.measure('cli_execution', {
-          spawn_method: cliProc?._perfSpawnMethod || 'unknown',
-          spawn_ms: cliProc?._perfSpawnMs || 0,
-          first_text_ms: cliProc?._perfFirstTextMs || 0,
-          total_cli_ms: cliProc?._perfTotalCliMs || 0,
-          stdin_payload_bytes: cliProc?._perfStdinPayloadBytes || 0,
+          spawn_method: cliPerf.spawnMethod || 'unknown',
+          spawn_ms: cliPerf.spawnMs || 0,
+          first_text_ms: cliPerf.firstTextMs || 0,
+          total_cli_ms: cliPerf.totalCliMs || 0,
+          stdin_payload_bytes: cliPerf.stdinPayloadBytes || 0,
         });
 
         // Final safety for non-streaming multi-tool or parked turns

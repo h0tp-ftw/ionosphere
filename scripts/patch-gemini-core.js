@@ -248,16 +248,24 @@ if (fs.existsSync(nonInteractiveTarget)) {
     "            let currentMessages = [{ role: 'user', parts: query }];";
 
   const replaceBlock =
-    "// [IONOSPHERE] Native History Protocol: dual-path init\n" +
+    "// [IONOSPHERE] Native History Protocol: dual-path init (v2 — file-based ingestion)\n" +
     "            let currentMessages;\n" +
-    "            if (process.env.IONOSPHERE_STRUCTURED_HISTORY === 'true' && input) {\n" +
-    "                let jsonInput = input.trim();\n" +
-    "                const jsonStart = jsonInput.indexOf('[{\"role\":');\n" +
-    "                const jsonEnd = jsonInput.lastIndexOf(']');\n" +
-    "                if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) { jsonInput = jsonInput.substring(jsonStart, jsonEnd + 1); }\n" +
+    "            if (process.env.IONOSPHERE_STRUCTURED_HISTORY === 'true') {\n" +
+    "                let jsonInput;\n" +
+    "                if (process.env.IONOSPHERE_HISTORY_FILE) {\n" +
+    "                    const { readFileSync } = await import('node:fs');\n" +
+    "                    jsonInput = readFileSync(process.env.IONOSPHERE_HISTORY_FILE, 'utf-8');\n" +
+    "                } else if (input) {\n" +
+    "                    jsonInput = input.trim();\n" +
+    "                    const jsonStart = jsonInput.indexOf('[{\"role\":');\n" +
+    "                    const jsonEnd = jsonInput.lastIndexOf(']');\n" +
+    "                    if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) { jsonInput = jsonInput.substring(jsonStart, jsonEnd + 1); }\n" +
+    "                } else {\n" +
+    "                    throw new FatalInputError('Structured history: no input provided via stdin or IONOSPHERE_HISTORY_FILE.');\n" +
+    "                }\n" +
     "                const contents = JSON.parse(jsonInput).map(c => ({ ...c, content: c.content === null ? '' : c.content, parts: (c.parts || []).map(p => ('text' in p && p.text === null) ? { ...p, text: '' } : p) }));\n" +
     "                if (!Array.isArray(contents) || contents.length === 0) {\n" +
-    "                    throw new FatalInputError('Structured history: stdin must be a non-empty JSON Content[] array.');\n" +
+    "                    throw new FatalInputError('Structured history: parsed Content[] must be a non-empty array.');\n" +
     "                }\n" +
     "                const history = contents.slice(0, -1);\n" +
     "                const current = contents[contents.length - 1];\n" +
@@ -288,13 +296,51 @@ if (fs.existsSync(nonInteractiveTarget)) {
 
   if (niContent.includes(searchBlock)) {
     niContent = niContent.replace(searchBlock, replaceBlock);
-    console.log("  - Applied Native History Protocol dual-path patch.");
-  } else if (!niContent.includes("IONOSPHERE_STRUCTURED_HISTORY")) {
+    console.log("  - Applied Native History Protocol dual-path patch (v2 — file-based).");
+  } else if (niContent.includes("IONOSPHERE_STRUCTURED_HISTORY") && !niContent.includes("IONOSPHERE_HISTORY_FILE")) {
+    // Upgrade path: old v1 patch applied but missing file-based ingestion.
+    // Replace the entire structured history block with the v2 version.
+    console.log("  - Upgrading Native History Protocol patch to v2 (file-based ingestion)...");
+    const v1Block =
+      "if (process.env.IONOSPHERE_STRUCTURED_HISTORY === 'true' && input) {\n" +
+      "                let jsonInput = input.trim();\n" +
+      "                const jsonStart = jsonInput.indexOf('[{\"role\":');\n" +
+      "                const jsonEnd = jsonInput.lastIndexOf(']');\n" +
+      "                if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) { jsonInput = jsonInput.substring(jsonStart, jsonEnd + 1); }\n" +
+      "                const contents = JSON.parse(jsonInput).map(c => ({ ...c, content: c.content === null ? '' : c.content, parts: (c.parts || []).map(p => ('text' in p && p.text === null) ? { ...p, text: '' } : p) }));\n" +
+      "                if (!Array.isArray(contents) || contents.length === 0) {\n" +
+      "                    throw new FatalInputError('Structured history: stdin must be a non-empty JSON Content[] array.');\n" +
+      "                }";
+    const v2Block =
+      "if (process.env.IONOSPHERE_STRUCTURED_HISTORY === 'true') {\n" +
+      "                let jsonInput;\n" +
+      "                if (process.env.IONOSPHERE_HISTORY_FILE) {\n" +
+      "                    const { readFileSync } = await import('node:fs');\n" +
+      "                    jsonInput = readFileSync(process.env.IONOSPHERE_HISTORY_FILE, 'utf-8');\n" +
+      "                } else if (input) {\n" +
+      "                    jsonInput = input.trim();\n" +
+      "                    const jsonStart = jsonInput.indexOf('[{\"role\":');\n" +
+      "                    const jsonEnd = jsonInput.lastIndexOf(']');\n" +
+      "                    if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) { jsonInput = jsonInput.substring(jsonStart, jsonEnd + 1); }\n" +
+      "                } else {\n" +
+      "                    throw new FatalInputError('Structured history: no input provided via stdin or IONOSPHERE_HISTORY_FILE.');\n" +
+      "                }\n" +
+      "                const contents = JSON.parse(jsonInput).map(c => ({ ...c, content: c.content === null ? '' : c.content, parts: (c.parts || []).map(p => ('text' in p && p.text === null) ? { ...p, text: '' } : p) }));\n" +
+      "                if (!Array.isArray(contents) || contents.length === 0) {\n" +
+      "                    throw new FatalInputError('Structured history: parsed Content[] must be a non-empty array.');\n" +
+      "                }";
+    if (niContent.includes(v1Block)) {
+      niContent = niContent.replace(v1Block, v2Block);
+      console.log("  - Upgrade applied successfully.");
+    } else {
+      console.warn("  - WARNING: Could not find v1 upgrade anchor. Manual check required.");
+    }
+  } else if (niContent.includes("IONOSPHERE_HISTORY_FILE")) {
+    console.log("  - Native History Protocol v2 patch (file-based) already applied.");
+  } else {
     console.warn(
       "  - WARNING: Could not find expected code block. nonInteractiveCli.js may have changed.",
     );
-  } else {
-    console.log("  - Native History Protocol patch already applied.");
   }
 
   fs.writeFileSync(nonInteractiveTarget, niContent, "utf8");

@@ -74,30 +74,30 @@ export function generateConfig(options = {}) {
         config.mcpServers = mcpServers;
     }
 
+    // Start with environment-based defaults
+    const finalGenerationConfig = { ...config.generationConfig };
+
+    // Merge in explicit overrides if provided
     if (generationConfig) {
+        Object.assign(finalGenerationConfig, generationConfig);
+    }
+
+    // Clean up undefined values and check if we have any active settings
+    Object.keys(finalGenerationConfig).forEach(key => finalGenerationConfig[key] === undefined && delete finalGenerationConfig[key]);
+
+    if (Object.keys(finalGenerationConfig).length > 0) {
         config.modelConfigs = {
             overrides: [
                 {
                     match: { model: config.model.name },
                     modelConfig: {
-                        generateContentConfig: generationConfig
-                    }
-                }
-            ]
-        };
-    } else if (Object.values(config.generationConfig).some(v => v !== undefined)) {
-        // If no explicit generationConfig was passed, but env-based defaults exist
-        config.modelConfigs = {
-            overrides: [
-                {
-                    match: { model: config.model.name },
-                    modelConfig: {
-                        generateContentConfig: { ...config.generationConfig }
+                        generateContentConfig: finalGenerationConfig
                     }
                 }
             ]
         };
     }
+
     // Clean up the internal generationConfig helper before writing to disk
     delete config.generationConfig;
 

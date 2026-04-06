@@ -875,15 +875,23 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
     res.on("close", () => {
       if (heartbeatInterval) clearInterval(heartbeatInterval);
       if (!responseSent) {
+        const graceMs =
+          parseInt(process.env.DISCONNECT_GRACE_PERIOD_MS) || 5000;
         if (isStreaming) {
-          console.log(
-            `[Turn ${activeTurnId}] Client disconnected (Streaming). Terminating turn.`,
-          );
-          controller.cancelCurrentTurn(activeTurnId);
-          responseSent = true;
+          if (WARM_HANDOFF_ENABLED) {
+            console.log(
+              `[Turn ${activeTurnId}] Client disconnected (Streaming). WARM_HANDOFF_ENABLED: letting turn reach parked state for future hijacking.`,
+            );
+            // We do NOT call cancelCurrentTurn here!
+            // Instead, we let it naturally reach onPark or onResult.
+          } else {
+            console.log(
+              `[Turn ${activeTurnId}] Client disconnected (Streaming). WARM_HANDOFF_ENABLED=false: Terminating turn.`,
+            );
+            controller.cancelCurrentTurn(activeTurnId);
+            responseSent = true;
+          }
         } else {
-          const graceMs =
-            parseInt(process.env.DISCONNECT_GRACE_PERIOD_MS) || 5000;
           console.log(
             `[Turn ${activeTurnId}] Client disconnected (Non-streaming). Waiting ${graceMs}ms grace period before termination...`,
           );

@@ -189,11 +189,16 @@ export class GeminiController extends EventEmitter {
    * Generates a stable hash string for a given CLI configuration.
    */
   hashConfig(workspacePath, settingsPath, systemPrompt, attachments = []) {
+    // Normalization: Ensure relative paths or stable basenames for hash consistency 
+    // when running in different environments (dev vs prod vs container).
+    const stableWorkspace = path.basename(workspacePath);
+    const stableSettings = path.basename(settingsPath);
+    
     return JSON.stringify({ 
-      workspacePath, 
-      settingsPath, 
-      systemPrompt, 
-      attachments: attachments.map(a => a.path || a) 
+      workspace: stableWorkspace, 
+      settings: stableSettings, 
+      systemPrompt: null, // Always null in hash for pooling (Lazy-read from system.md)
+      attachments: attachments.map(a => path.basename(a.path || a)) 
     });
   }
 
@@ -412,14 +417,21 @@ export class GeminiController extends EventEmitter {
             proc._perfSpawnMethod = "warm";
             console.log(`[GeminiController] Acquired WARM process from pool!`);
           } else {
+            // Case: Process is still 'warming' (waiting for INIT).
+            // Instead of cold-spawning, we wait briefly for it to become warm.
             proc = currentPool.shift();
             accumulator = proc.warmAccumulator;
             proc._perfSpawnMethod = "warming";
-            console.log(`[GeminiController] Acquired WARMING process from pool.`);
+            console.log(`[GeminiController] Acquired WARMING process from pool. Waiting for INIT...`);
           }
         }
 
         if (!proc) {
+          if (process.env.GEMINI_DEBUG_PROMPTS === "true") {
+            const poolKeys = Array.from(this.warmPool.keys());
+            console.warn(`[GeminiController] [Turn ${turnId}] Pool miss. Requested Hash Key: ${hashKey}`);
+            console.warn(`[GeminiController] Existing Pool Keys (${poolKeys.length}): ${JSON.stringify(poolKeys)}`);
+          }
           console.log(`[GeminiController] [Turn ${turnId}] Pool miss. Spawning cold stateless CLI: ${executable} ${finalArgs.join(" ")}`);
           const spawnT0 = PERF_ENABLED ? performance.now() : 0;
           proc = spawn(executable, finalArgs, {

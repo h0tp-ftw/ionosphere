@@ -1110,14 +1110,20 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
       // Case 2: Reactive Debugging Dump
       const outTokens = finalStats.output_tokens || 0;
       if (outTokens === 0 && accumulatedText.length === 0 && accumulatedToolCalls.length === 0) {
-        console.warn(`[API] [Turn ${activeTurnId}] WARNING: Zero Output Turn. Dumping last 60 lines of raw CLI output:`);
-        const proc = controller.processes.get(activeTurnId);
-        if (proc && proc.rawOutputBuffer) {
-           console.log("----------------- [CLI RAW DUMP START] -----------------");
-           proc.rawOutputBuffer.forEach(line => console.log(`[Turn ${activeTurnId}] [CLI RAW] ${line}`));
-           console.log("----------------- [CLI RAW DUMP END] -------------------");
+        if (zeroOutputRetries < MAX_ZERO_OUTPUT_RETRIES) {
+          console.warn(`[API] [Turn ${activeTurnId}] WARNING: Zero Output Turn. Triggering seamless retry (${zeroOutputRetries + 1}/${MAX_ZERO_OUTPUT_RETRIES}). Dumping last 60 lines of raw CLI output for context:`);
+          const proc = controller.processes.get(activeTurnId);
+          if (proc && proc.rawOutputBuffer) {
+             console.log("----------------- [CLI RAW DUMP START] -----------------");
+             proc.rawOutputBuffer.forEach(line => console.log(`[Turn ${activeTurnId}] [CLI RAW] ${line}`));
+             console.log("----------------- [CLI RAW DUMP END] -------------------");
+          } else {
+             console.warn(`[API] [Turn ${activeTurnId}] CLI process or buffer not found in controller.`);
+          }
+          retryZeroOutput = true;
+          return; // Skip sending to client and allow retry loop to catch it
         } else {
-           console.warn(`[API] [Turn ${activeTurnId}] CLI process or buffer not found in controller.`);
+          console.error(`[API] [Turn ${activeTurnId}] Repeated Zero Output Turns exhausted retries. Failing.`);
         }
       }
 
@@ -2179,6 +2185,10 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
     });
     timer.measure('config_gen');
 
+    let retryZeroOutput = false;
+    let zeroOutputRetries = 0;
+    const MAX_ZERO_OUTPUT_RETRIES = 2;
+
     const executeTask = async () => {
       let taskResolve;
       const executePromise = new Promise((r) => (taskResolve = r));
@@ -2312,35 +2322,60 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         );
 
         timer.mark('cleanup');
-        if (activeTurnsByHash.get(fingerprint) === activeTurnId) {
-          activeTurnsByHash.delete(fingerprint);
+        if (!retryZeroOutput) {
+          if (activeTurnsByHash.get(fingerprint) === activeTurnId) {
+            activeTurnsByHash.delete(fingerprint);
+          }
+          if (activeTurnsByHash.get(historyHash) === activeTurnId) {
+            activeTurnsByHash.delete(historyHash);
+          }
+          parkedTurns.delete(activeTurnId);
         }
-        if (activeTurnsByHash.get(historyHash) === activeTurnId) {
-          activeTurnsByHash.delete(historyHash);
-        }
-        parkedTurns.delete(activeTurnId);
         globalPromiseMap.delete(activeTurnId);
         if (taskResolve) taskResolve();
-        ipcServer.close();
-        if (process.platform !== "win32") {
-          try {
-            if (fs.existsSync(ipcPath)) fs.unlinkSync(ipcPath);
-          } catch (_) { }
+        
+        if (!retryZeroOutput) {
+          ipcServer.close();
+          if (process.platform !== "win32") {
+            try {
+              if (fs.existsSync(ipcPath)) fs.unlinkSync(ipcPath);
+            } catch (_) { }
+          }
         }
+        
         if (process.env.GEMINI_DEBUG_KEEP_TEMP === "true") {
           console.log(
             `[Turn ${activeTurnId}] Retaining workspace due to GEMINI_DEBUG_KEEP_TEMP: ${turnTempDir}`,
           );
         } else {
-          fs.rmSync(turnTempDir, { recursive: true, force: true });
+          if (!retryZeroOutput) {
+            fs.rmSync(turnTempDir, { recursive: true, force: true });
+          }
         }
+        
         timer.measure('cleanup');
-        timer.outputDir = (process.env.GEMINI_DEBUG_KEEP_TEMP === 'true') ? turnTempDir : null;
-        timer.finish();
+        if (!retryZeroOutput) {
+          timer.outputDir = (process.env.GEMINI_DEBUG_KEEP_TEMP === 'true') ? turnTempDir : null;
+          timer.finish();
+        }
       }
     };
 
-    await enqueueControllerPrompt(executeTask);
+    do {
+      retryZeroOutput = false;
+      await enqueueControllerPrompt(executeTask);
+      if (retryZeroOutput) {
+        zeroOutputRetries++;
+        console.log(`[API] Restarting executeTask for Turn ${activeTurnId} due to zero-output. Attempt ${zeroOutputRetries}`);
+        accumulatedText = "";
+        accumulatedToolCalls = [];
+        expectedToolCallsCount = 0;
+        receivedToolCallsCount = 0;
+        stdoutToolCalls.clear();
+        stdoutPendingQueues.clear();
+        ipcHandledIds.clear();
+      }
+    } while (retryZeroOutput && zeroOutputRetries <= MAX_ZERO_OUTPUT_RETRIES);
   } catch (err) {
     if (heartbeatInterval) clearInterval(heartbeatInterval);
     if (parkDebounceTimer) clearTimeout(parkDebounceTimer);

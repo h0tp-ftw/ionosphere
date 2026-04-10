@@ -14,7 +14,9 @@ export const ErrorCode = {
     CONTEXT_LENGTH_EXCEEDED: 'context_length_exceeded',
     INTERNAL_ERROR: 'internal_error',
     POLICY_DENIED: 'policy_denied',
-    CLI_FAILURE: 'cli_failure'
+    CLI_FAILURE: 'cli_failure',
+    CONTENT_FILTER: 'content_filter',
+    UPSTREAM_TIMEOUT: 'upstream_timeout'
 };
 
 /**
@@ -49,6 +51,8 @@ export function getStatusCode(error) {
         case ErrorCode.MODEL_NOT_FOUND: return 404;
         case ErrorCode.POLICY_DENIED: return 403;
         case ErrorCode.CONTEXT_LENGTH_EXCEEDED: return 400;
+        case ErrorCode.CONTENT_FILTER: return 400;
+        case ErrorCode.UPSTREAM_TIMEOUT: return 504;
     }
 
     // Fallback to type
@@ -63,6 +67,65 @@ export function getStatusCode(error) {
 }
 
 /**
+ * Detects the specific error type and code from various Gemini/CLI error shapes.
+ * This helper centralizes heuristic detection logic.
+ */
+function detectErrorContext(err) {
+    let message = err.message || (typeof err === 'string' ? err : "Unknown error");
+    let type = err.type || ErrorType.SERVER;
+    let code = err.code || ErrorCode.INTERNAL_ERROR;
+
+    // Direct Status Mapping from common library patterns
+    const status = err.status || (err.cause && err.cause.code);
+
+    // 1. Quota / Rate Limit (429)
+    if (
+        status === 429 ||
+        err.reason === 'QUOTA_EXHAUSTED' || 
+        err.reason === 'MODEL_CAPACITY_EXHAUSTED' ||
+        /quota|exhausted|capacity|429/i.test(message)
+    ) {
+        return { type: ErrorType.RATE_LIMIT, code: ErrorCode.RATE_LIMIT_EXCEEDED };
+    }
+
+    // 2. Auth / Permissions (401/403)
+    if (status === 401 || /unauthenticated|invalid api key|invalid_api_key/i.test(message)) {
+        return { type: ErrorType.AUTHENTICATION, code: ErrorCode.INVALID_API_KEY };
+    }
+    if (status === 403 || /permission_denied|permission denied/i.test(message)) {
+        return { type: ErrorType.PERMISSION, code: ErrorCode.POLICY_DENIED };
+    }
+
+    // 3. Not Found (404)
+    if (status === 404 || /not_found|not found/i.test(message)) {
+        return { type: ErrorType.INVALID_REQUEST, code: ErrorCode.MODEL_NOT_FOUND };
+    }
+
+    // 4. Context Window / Request Size (400/504/500)
+    // Heuristic: Gemini often returns 500 or 504 for large context before it hits the model.
+    if (
+        /too large|too long|context window|token limit|maximum|context_length_exceeded/i.test(message) ||
+        (status === 504 && /deadline|timeout/i.test(message))
+    ) {
+        return { type: ErrorType.INVALID_REQUEST, code: ErrorCode.CONTEXT_LENGTH_EXCEEDED };
+    }
+
+    // 5. Safety Filters
+    if (/safety|blocked|moderate|filter/i.test(message)) {
+        return { type: ErrorType.INVALID_REQUEST, code: ErrorCode.CONTENT_FILTER };
+    }
+
+    // 6. Failed Precondition (Often maps to quota, billing or region issues in Gemini)
+    if (/failed_precondition/i.test(message)) {
+        if (/billing|tier|region|quota/i.test(message)) {
+            return { type: ErrorType.RATE_LIMIT, code: ErrorCode.RATE_LIMIT_EXCEEDED };
+        }
+    }
+
+    return { type, code };
+}
+
+/**
  * Formats an error response for the API.
  * Ensures strict OpenAI compatibility: { error: { message, type, param, code } }
  * @param {object|string} err - The error object or message.
@@ -72,31 +135,17 @@ export function getStatusCode(error) {
  */
 export function formatErrorResponse(err, defaultType = ErrorType.SERVER, defaultCode = ErrorCode.INTERNAL_ERROR) {
     if (typeof err === 'string') {
-        return createError(err, defaultType, defaultCode);
+        const detected = detectErrorContext(err);
+        return createError(err, detected.type, detected.code);
     }
 
-    let message = err.message || "Unknown error";
-    let type = err.type || defaultType;
-    let code = err.code || defaultCode;
-    let param = err.param || null;
-
-    // --- HEURISTIC DETECTION FOR QUOTA/CAPACITY ERRORS ---
-    // Specifically targets TerminalQuotaError from @google/gemini-cli-core
-    // and other common rate-limiting shapes.
-    if (
-        err.reason === 'QUOTA_EXHAUSTED' || 
-        err.reason === 'MODEL_CAPACITY_EXHAUSTED' ||
-        (err.cause && (err.cause.code === 429 || err.cause.reason === 'QUOTA_EXHAUSTED')) ||
-        /quota|exhausted|capacity|429/i.test(message)
-    ) {
-        type = ErrorType.RATE_LIMIT;
-        code = ErrorCode.RATE_LIMIT_EXCEEDED;
-    }
-
+    // Detect specialized context
+    const detected = detectErrorContext(err);
+    
     return createError(
-        message,
-        type,
-        code,
-        param
+        err.message || "Unknown error",
+        err.type || detected.type || defaultType,
+        err.code || detected.code || defaultCode,
+        err.param || null
     );
 }

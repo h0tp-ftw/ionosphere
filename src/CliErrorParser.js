@@ -28,6 +28,16 @@ export class CliErrorParser {
         stderrText,
       );
 
+    const isContextError =
+      /too large|too long|context window|token limit|maximum tokens|request is too large/i.test(
+        stderrText,
+      );
+
+    const isSafetyError =
+      /safety settings|blocked|moderate|content filter|candidate was blocked/i.test(
+        stderrText,
+      );
+
     const isNotFound = /Tool "([^"]+)" not found/i.test(stderrText);
 
     const isModelError =
@@ -52,6 +62,24 @@ export class CliErrorParser {
       if (activeCallbacks.onError)
         activeCallbacks.onError(
           createError(errorMsg, ErrorType.RATE_LIMIT, ErrorCode.RATE_LIMIT_EXCEEDED),
+        );
+      return { type: "FATAL", message: errorMsg };
+    }
+
+    if (isContextError) {
+      const errorMsg = `Gemini API Context Window Exceeded. Raw: ${stderrText}`;
+      if (activeCallbacks.onError)
+        activeCallbacks.onError(
+          createError(errorMsg, ErrorType.INVALID_REQUEST, ErrorCode.CONTEXT_LENGTH_EXCEEDED),
+        );
+      return { type: "FATAL", message: errorMsg };
+    }
+
+    if (isSafetyError) {
+      const errorMsg = `Gemini API Content Filter / Safety Block. Raw: ${stderrText}`;
+      if (activeCallbacks.onError)
+        activeCallbacks.onError(
+          createError(errorMsg, ErrorType.INVALID_REQUEST, ErrorCode.CONTENT_FILTER),
         );
       return { type: "FATAL", message: errorMsg };
     }

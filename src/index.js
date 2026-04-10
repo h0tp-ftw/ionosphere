@@ -2385,7 +2385,14 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
     const errorObj = formatErrorResponse(err);
     if (!res.headersSent) {
       res.status(getStatusCode(errorObj)).json({ error: errorObj });
-    } else res.end();
+    } else {
+      // Mid-stream error: Send as SSE event if in streaming mode
+      if (isStreaming && !res.writableEnded) {
+        console.log(`[API Error] Mid-stream failure. Emitting error chunk to client.`);
+        res.write(`data: ${JSON.stringify({ error: errorObj })}\n\n`);
+      }
+      if (!res.writableEnded) res.end();
+    }
     timer.addMeta('error', err.message || 'unknown');
     timer.finish();
   }

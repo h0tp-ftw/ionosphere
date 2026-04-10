@@ -75,10 +75,28 @@ export function formatErrorResponse(err, defaultType = ErrorType.SERVER, default
         return createError(err, defaultType, defaultCode);
     }
 
+    let message = err.message || "Unknown error";
+    let type = err.type || defaultType;
+    let code = err.code || defaultCode;
+    let param = err.param || null;
+
+    // --- HEURISTIC DETECTION FOR QUOTA/CAPACITY ERRORS ---
+    // Specifically targets TerminalQuotaError from @google/gemini-cli-core
+    // and other common rate-limiting shapes.
+    if (
+        err.reason === 'QUOTA_EXHAUSTED' || 
+        err.reason === 'MODEL_CAPACITY_EXHAUSTED' ||
+        (err.cause && (err.cause.code === 429 || err.cause.reason === 'QUOTA_EXHAUSTED')) ||
+        /quota|exhausted|capacity|429/i.test(message)
+    ) {
+        type = ErrorType.RATE_LIMIT;
+        code = ErrorCode.RATE_LIMIT_EXCEEDED;
+    }
+
     return createError(
-        err.message || "Unknown error",
-        err.type || defaultType,
-        err.code || defaultCode,
-        err.param || null
+        message,
+        type,
+        code,
+        param
     );
 }

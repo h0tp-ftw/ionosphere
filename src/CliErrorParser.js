@@ -19,7 +19,7 @@ export class CliErrorParser {
         !/loaded cached credentials/i.test(stderrText));
 
     const isResourceError =
-      /RESOURCE_EXHAUSTED|rateLimitExceeded|429|No capacity available|exhausted your capacity/i.test(
+      /RESOURCE_EXHAUSTED|rateLimitExceeded|429|No capacity available|exhausted your capacity|TerminalQuotaError|quota will reset/i.test(
         stderrText,
       );
 

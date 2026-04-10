@@ -720,6 +720,16 @@ export class GeminiController extends EventEmitter {
               }
             } else {
               if (activeCallbacks.onResult) activeCallbacks.onResult(json);
+
+              // OPTIMIZATION: Early exit for zero-output success.
+              // If the model generated 0 tokens but reports success, we kill the process
+              // immediately to trigger the retry loop in index.js without waiting for
+              // a potentially slow process termination (which the user reports can take 60s).
+              if (json.status === "success" && (json.stats?.output_tokens || 0) === 0) {
+                console.log(`[GeminiController] [Turn ${turnId}] Early exit for zero-output success to trigger immediate retry.`);
+                proc.isZeroOutputSuccess = true;
+                proc.kill("SIGKILL");
+              }
             }
           } else if (
             json.type === "tool_result" ||
@@ -824,7 +834,7 @@ export class GeminiController extends EventEmitter {
 
           this.processes.delete(turnId);
 
-          if (code === 0 || code === null) {
+          if (code === 0 || code === null || proc.isZeroOutputSuccess) {
             // After successful completion, check for across-turn repetition
             const fingerprint =
               proc.extraEnv?.IONOSPHERE_HISTORY_HASH || turnId;

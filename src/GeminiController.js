@@ -589,12 +589,14 @@ export class GeminiController extends EventEmitter {
           // Re-arm stall detector if the turn isn't finished
           // We only arm it after 'init' to allow for startup time
           if (json.type !== "result" && json.type !== "error") {
-            const STALL_TIMEOUT_MS = parseInt(process.env.CLI_STALL_TIMEOUT_MS) || 30000;
+            const STALL_TIMEOUT_MS = parseInt(process.env.CLI_STALL_TIMEOUT_MS) || 60000;
             proc.stallTimer = setTimeout(() => {
-              console.warn(
-                `[GeminiController] [STALL DETECTED] [Turn ${turnId}] No CLI output for ${STALL_TIMEOUT_MS / 1000}s. Current Phase: ${proc.currentPhase}. Last event: ${json.type}.`,
+              console.error(
+                `[GeminiController] [STALL FATAL] [Turn ${turnId}] No CLI output for ${STALL_TIMEOUT_MS / 1000}s. Killing stalled process.`,
               );
-              // For now, we only log. In the future, we might auto-restart.
+              proc.isStalled = true;
+              proc.kill("SIGKILL");
+              // The close handler will reject the promise due to isStalled
             }, STALL_TIMEOUT_MS);
           }
 
@@ -855,9 +857,14 @@ export class GeminiController extends EventEmitter {
             resolve(resultWithPerf);
           } else {
             const diagnostics = lastStderrLines.join("\n").trim();
-            const errorMsg = diagnostics
+            let errorMsg = diagnostics
               ? `CLI failed (code ${code}): ${diagnostics}`
               : `CLI process exited with code ${code}`;
+
+            if (proc.isStalled) {
+              errorMsg = `CLI stalled during turn ${turnId} (No output for 60s)`;
+            }
+
             reject(new Error(errorMsg));
           }
         });

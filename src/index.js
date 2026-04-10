@@ -2187,7 +2187,11 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
 
     let retryZeroOutput = false;
     let zeroOutputRetries = 0;
-    const MAX_ZERO_OUTPUT_RETRIES = 2;
+    const MAX_ZERO_OUTPUT_RETRIES = 2; // (Initial + 2 retries = 3 attempts total)
+
+    let stallRetries = 0;
+    const MAX_STALL_RETRIES = 1; // (Initial + 1 retry = 2 attempts total)
+    let shouldRetry = false;
 
     const executeTask = async () => {
       let taskResolve;
@@ -2362,11 +2366,31 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
     };
 
     do {
+      shouldRetry = false;
       retryZeroOutput = false;
-      await enqueueControllerPrompt(executeTask);
-      if (retryZeroOutput) {
-        zeroOutputRetries++;
-        console.log(`[API] Restarting executeTask for Turn ${activeTurnId} due to zero-output. Attempt ${zeroOutputRetries}`);
+
+      try {
+        await enqueueControllerPrompt(executeTask);
+        if (retryZeroOutput) {
+          zeroOutputRetries++;
+          if (zeroOutputRetries <= MAX_ZERO_OUTPUT_RETRIES) {
+            shouldRetry = true;
+            console.log(`[API] Restarting executeTask for Turn ${activeTurnId} due to zero-output. Attempt ${zeroOutputRetries}/${MAX_ZERO_OUTPUT_RETRIES}`);
+          } else {
+            console.error(`[API] [Turn ${activeTurnId}] Zero-output retries exhausted.`);
+          }
+        }
+      } catch (err) {
+        if (err.message.includes("stalled") && stallRetries < MAX_STALL_RETRIES) {
+          stallRetries++;
+          shouldRetry = true;
+          console.log(`[API] Restarting executeTask for Turn ${activeTurnId} due to CLI stall. Attempt ${stallRetries}/${MAX_STALL_RETRIES}`);
+        } else {
+          throw err;
+        }
+      }
+
+      if (shouldRetry) {
         accumulatedText = "";
         accumulatedToolCalls = [];
         expectedToolCallsCount = 0;
@@ -2375,7 +2399,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         stdoutPendingQueues.clear();
         ipcHandledIds.clear();
       }
-    } while (retryZeroOutput && zeroOutputRetries <= MAX_ZERO_OUTPUT_RETRIES);
+    } while (shouldRetry);
   } catch (err) {
     if (heartbeatInterval) clearInterval(heartbeatInterval);
     if (parkDebounceTimer) clearTimeout(parkDebounceTimer);

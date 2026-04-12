@@ -145,6 +145,71 @@ export class RepetitionBreaker {
   }
 
   /**
+   * Checks for reasoning repetition or "thought hallucination" during the thinking phase.
+   * Returns true if a loop/collapse is detected and the process should be killed.
+   */
+  checkReasoningRepetition(proc, json, turnId, activeCallbacks) {
+    const content = typeof json.content === "string" ? json.content : (json.thought || "");
+    if (!content || content.length < 10) return false; // Ignore empty or trivial thoughts
+
+    // 1. Exact Content Repetition Detection (Content-Agnostic)
+    // Most reasoning loops repeat the exact same content block.
+    if (!proc.thoughtMap) proc.thoughtMap = new Map();
+    
+    const count = (proc.thoughtMap.get(content) || 0) + 1;
+    proc.thoughtMap.set(content, count);
+
+    if (count >= 3) {
+      console.error(
+        `[RepetitionBreaker] IDENTICAL THOUGHT DETECTED: Turn ${turnId} repeated the exact same reasoning block ${count} times.`,
+      );
+      if (activeCallbacks.onError) {
+        activeCallbacks.onError({
+          message: `Response terminated: Model entered an identical reasoning loop.`,
+          type: "server_error",
+          code: "reasoning_loop",
+        });
+      }
+      return true; // Kill immediately
+    }
+
+    // 2. Substring repetition in thoughts (Secondary Defense)
+    // Catches loops with slight variations (e.g. timestamps or random nonces).
+    proc.accumulatedThoughts = (proc.accumulatedThoughts || "") + content;
+    const accumulated = proc.accumulatedThoughts;
+
+    if (accumulated.length > 500) {
+      const checkLen = 150;
+      const tail = accumulated.slice(-checkLen);
+      
+      let subCount = 0;
+      let searchFrom = 0;
+      while (true) {
+        const idx = accumulated.indexOf(tail, searchFrom);
+        if (idx === -1) break;
+        subCount++;
+        searchFrom = idx + 1;
+      }
+
+      if (subCount >= 3) {
+        console.error(
+          `[RepetitionBreaker] REASONING SUBSTRING LOOP: Turn ${turnId} repeated ${checkLen}-char block ${subCount} times in thoughts.`,
+        );
+        if (activeCallbacks.onError) {
+          activeCallbacks.onError({
+            message: `Response terminated: Model entered a reasoning repetition loop.`,
+            type: "server_error",
+            code: "reasoning_loop",
+          });
+        }
+        return true; // Kill immediately
+      }
+    }
+
+    return false;
+  }
+
+  /**
    * Detects "S+S" full-response echo: the model generates a complete response,
    * then starts streaming the same content again from the beginning.
    * 

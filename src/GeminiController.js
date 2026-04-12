@@ -756,6 +756,23 @@ export class GeminiController extends EventEmitter {
             // [IONOSPHERE] Enhanced JSON Protocol: safety/content filter
             console.warn(`[GeminiController] [Turn ${turnId}] ⚠️ Safety block: ${json.reason || 'unknown reason'}`);
             if (activeCallbacks.onEvent) activeCallbacks.onEvent(json);
+          } else if (json.type === "retry") {
+            // [IONOSPHERE] Mid-Stream Fallback: Clear text accumulators for the retry
+            console.log(`[GeminiController] [Turn ${turnId}] 🔄 Mid-stream RETRY detected. Clearing text buffers.`);
+            if (proc.cleaner) proc.cleaner.flush();
+            proc.accumulatedText = "";
+            if (activeCallbacks.onRetry) {
+              activeCallbacks.onRetry(json);
+            }
+            if (activeCallbacks.onEvent) activeCallbacks.onEvent(json);
+          } else if (json.type === "model_info") {
+            // [IONOSPHERE] Mid-Stream Fallback: Track model switch
+            console.log(`[GeminiController] [Turn ${turnId}] 🤖 Model switched to: ${json.model}`);
+            proc.currentModel = json.model;
+            if (activeCallbacks.onModelInfo) {
+              activeCallbacks.onModelInfo(json);
+            }
+            if (activeCallbacks.onEvent) activeCallbacks.onEvent(json);
           } else {
             if (activeCallbacks.onEvent) activeCallbacks.onEvent(json);
           }

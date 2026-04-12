@@ -1127,6 +1127,21 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
       if (parkDebounceTimer) clearTimeout(parkDebounceTimer);
     };
 
+    const onRetry = (json) => {
+      console.log(`[API] [Turn ${activeTurnId}] Mid-stream retry detected. Resetting internal state for the new attempt.`);
+      accumulatedText = "";
+      accumulatedReasoning = "";
+      accumulatedCitations = [];
+      // Note: We don't clear accumulatedToolCalls because they might have been 
+      // complete from a previous turn phase (though unlikely mid-stream).
+    };
+
+    const onModelInfo = (json) => {
+      console.log(`[API] [Turn ${activeTurnId}] Model switch detected: ${json.model}`);
+      responseModel = json.model;
+    };
+
+
     const onResult = async (json) => {
       if (responseSent || res.writableEnded) {
         if (process.env.GEMINI_DEBUG_HANDOFF === "true")
@@ -1517,6 +1532,8 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
       onText,
       onThought,
       onCitation,
+      onRetry,
+      onModelInfo,
       onToolCall,
       onError,
       onResult,

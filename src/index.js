@@ -599,6 +599,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
   let heartbeatInterval = null;
   let parkDebounceTimer = null;
   const timer = new PerfTimer("pending", {});
+  let isStreaming = false;
 
   try {
     timer.mark('ingress');
@@ -847,7 +848,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
       }
     }
 
-    const isStreaming = req.body.stream === true;
+    isStreaming = req.body.stream === true;
     let accumulatedText = "";
     const rawCliBuffer = []; // Case 2: Reactive Debugging buffer
     let accumulatedToolCalls = [];

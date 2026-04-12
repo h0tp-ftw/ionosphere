@@ -739,6 +739,23 @@ export class GeminiController extends EventEmitter {
             json.type === "done"
           ) {
             if (activeCallbacks.onEvent) activeCallbacks.onEvent(json);
+          } else if (json.type === "thought") {
+            // [IONOSPHERE] Enhanced JSON Protocol: reasoning_content
+            // The bridge maps this to OpenAI's reasoning_content field.
+            if (activeCallbacks.onThought) {
+              activeCallbacks.onThought(json);
+            }
+            if (activeCallbacks.onEvent) activeCallbacks.onEvent(json);
+          } else if (json.type === "citation") {
+            // [IONOSPHERE] Enhanced JSON Protocol: citation metadata
+            if (activeCallbacks.onCitation) {
+              activeCallbacks.onCitation(json);
+            }
+            if (activeCallbacks.onEvent) activeCallbacks.onEvent(json);
+          } else if (json.type === "safety") {
+            // [IONOSPHERE] Enhanced JSON Protocol: safety/content filter
+            console.warn(`[GeminiController] [Turn ${turnId}] ⚠️ Safety block: ${json.reason || 'unknown reason'}`);
+            if (activeCallbacks.onEvent) activeCallbacks.onEvent(json);
           } else {
             if (activeCallbacks.onEvent) activeCallbacks.onEvent(json);
           }

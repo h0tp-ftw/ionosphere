@@ -854,6 +854,11 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
     let finalStats = null;
     let responseSent = false;
 
+    // [IONOSPHERE] Enhanced JSON Protocol state
+    let accumulatedReasoning = ""; // Collected reasoning_content for non-streaming
+    let accumulatedCitations = []; // Collected citation sources
+    let cliFinishReason = null; // Raw finish_reason from CLI result event
+
     // Parallel Call Aggregation State
     let expectedToolCallsCount = 0;
     let receivedToolCallsCount = 0;
@@ -964,6 +969,34 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         });
       } else {
         accumulatedText += text;
+      }
+    };
+
+    // [IONOSPHERE] Enhanced JSON Protocol: Emit reasoning_content via SSE
+    // Maps CLI 'thought' events to OpenAI's reasoning_content delta field.
+    // Clients like Cursor, OpenRouter, and reasoning-aware UIs will render this.
+    const onThought = (json) => {
+      if (responseSent || res.writableEnded) return;
+      const reasoningText = json.content || json.description || json.summary || '';
+      if (!reasoningText) return;
+
+      if (isStreaming) {
+        sendChunk({
+          id: `chatcmpl-stream`,
+          object: "chat.completion.chunk",
+          created: Math.floor(Date.now() / 1000),
+          model: responseModel,
+          choices: [{ index: 0, delta: { reasoning_content: reasoningText } }],
+        });
+      } else {
+        accumulatedReasoning += reasoningText;
+      }
+    };
+
+    // [IONOSPHERE] Enhanced JSON Protocol: Accumulate citations
+    const onCitation = (json) => {
+      if (json.citations && Array.isArray(json.citations)) {
+        accumulatedCitations.push(...json.citations);
       }
     };
 
@@ -1127,13 +1160,26 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         }
       }
 
+      // [IONOSPHERE] Map CLI finish_reason (Gemini values) to OpenAI values
+      const mapFinishReason = (cliReason) => {
+        if (accumulatedToolCalls.length > 0) return 'tool_calls';
+        if (!cliReason) return 'stop';
+        const r = cliReason.toUpperCase();
+        if (r === 'STOP' || r === 'END_TURN') return 'stop';
+        if (r === 'MAX_TOKENS' || r === 'MAX_OUTPUT_TOKENS') return 'length';
+        if (r === 'SAFETY' || r === 'BLOCKED_REASON_UNSPECIFIED' || r === 'BLOCKLIST' || r === 'PROHIBITED_CONTENT') return 'content_filter';
+        if (r === 'RECITATION') return 'content_filter';
+        return 'stop';
+      };
+      const resolvedFinishReason = mapFinishReason(cliFinishReason || json.finish_reason);
+
       if (isStreaming) {
         sendChunk({
           id: `chatcmpl-stream`,
           object: "chat.completion.chunk",
           created: Math.floor(Date.now() / 1000),
           model: responseModel,
-          choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+          choices: [{ index: 0, delta: {}, finish_reason: resolvedFinishReason }],
           usage: {
             prompt_tokens: finalStats.input_tokens || 0,
             completion_tokens: finalStats.output_tokens || 0,
@@ -1159,13 +1205,14 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
                 message: {
                   role: "assistant",
                   content: accumulatedText,
+                  // [IONOSPHERE] Include reasoning_content if the model produced thoughts
+                  reasoning_content: accumulatedReasoning || undefined,
                   tool_calls:
                     accumulatedToolCalls.length > 0
                       ? accumulatedToolCalls
                       : undefined,
                 },
-                finish_reason:
-                  accumulatedToolCalls.length > 0 ? "tool_calls" : "stop",
+                finish_reason: resolvedFinishReason,
               },
             ],
             usage: {
@@ -1175,6 +1222,8 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
                 (finalStats.input_tokens || 0) +
                 (finalStats.output_tokens || 0),
             },
+            // [IONOSPHERE] Include citations if the model provided sources
+            ...(accumulatedCitations.length > 0 ? { citations: accumulatedCitations } : {}),
           };
           logParsedOutput(payload);
           res.json(payload);
@@ -1466,6 +1515,8 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
 
     const allCallbacks = {
       onText,
+      onThought,
+      onCitation,
       onToolCall,
       onError,
       onResult,

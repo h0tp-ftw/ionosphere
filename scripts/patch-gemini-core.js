@@ -637,4 +637,171 @@ if (process.platform === 'linux') {
   fs.writeFileSync(keychainServiceTarget, content, "utf8");
 }
 
+// 10. Patch types.js (Enhanced JSON Protocol — THOUGHT, CITATION, SAFETY event types)
+const typesTarget = path.resolve(
+  __dirname,
+  "..",
+  "node_modules",
+  "@google",
+  "gemini-cli-core",
+  "dist",
+  "src",
+  "output",
+  "types.js",
+);
+if (fs.existsSync(typesTarget)) {
+  console.log(`[Patcher] Patching types.js for Enhanced JSON Protocol: ${typesTarget}`);
+  let content = fs.readFileSync(typesTarget, "utf8");
+
+  const typesSearch = `    JsonStreamEventType["RESULT"] = "result";\n})(JsonStreamEventType || (JsonStreamEventType = {}));`;
+  const typesReplace = `    JsonStreamEventType["RESULT"] = "result";\n` +
+    `    // [IONOSPHERE] Enhanced JSON Protocol v2\n` +
+    `    JsonStreamEventType["THOUGHT"] = "thought";\n` +
+    `    JsonStreamEventType["CITATION"] = "citation";\n` +
+    `    JsonStreamEventType["SAFETY"] = "safety";\n` +
+    `})(JsonStreamEventType || (JsonStreamEventType = {}));`;
+
+  if (content.includes(typesSearch) && !content.includes("THOUGHT")) {
+    content = content.replace(typesSearch, typesReplace);
+    console.log("  - Applied Enhanced JSON Protocol event types (THOUGHT, CITATION, SAFETY).");
+  } else if (content.includes("THOUGHT")) {
+    console.log("  - Enhanced JSON Protocol event types already applied.");
+  }
+
+  fs.writeFileSync(typesTarget, content, "utf8");
+}
+
+// 11. Patch nonInteractiveCli.js (Enhanced JSON Protocol — Thought/Citation/Finished handlers)
+// This adds handlers for three event types that are currently silently dropped:
+//   - GeminiEventType.Thought  -> emits JsonStreamEventType.THOUGHT (maps to reasoning_content in OpenAI)
+//   - GeminiEventType.Citation -> emits JsonStreamEventType.CITATION
+//   - GeminiEventType.Finished -> captures finishReason for the RESULT event
+// Also adds protocol_version and capabilities to INIT events.
+if (fs.existsSync(nonInteractiveTarget)) {
+  console.log(`[Patcher] Patching nonInteractiveCli.js for Enhanced JSON Protocol events: ${nonInteractiveTarget}`);
+  let niContent = fs.readFileSync(nonInteractiveTarget, "utf8");
+
+  // 11a. Add Thought and Citation handlers BEFORE the Content handler.
+  // Search for the Content event handler — this is the first event check in the loop.
+  const contentHandlerSearch =
+    "                    if (event.type === GeminiEventType.Content) {";
+  const thoughtCitationHandlers =
+    "                    // [IONOSPHERE] Enhanced JSON Protocol: Emit thought events for reasoning_content\n" +
+    "                    if (event.type === GeminiEventType.Thought) {\n" +
+    "                        if (streamFormatter) {\n" +
+    "                            streamFormatter.emitEvent({\n" +
+    "                                type: JsonStreamEventType.THOUGHT,\n" +
+    "                                timestamp: new Date().toISOString(),\n" +
+    "                                turn_id: event.traceId,\n" +
+    "                                summary: event.value.subject,\n" +
+    "                                content: event.value.description,\n" +
+    "                            });\n" +
+    "                        }\n" +
+    "                    }\n" +
+    "                    // [IONOSPHERE] Enhanced JSON Protocol: Emit citation events\n" +
+    "                    else if (event.type === GeminiEventType.Citation) {\n" +
+    "                        if (streamFormatter) {\n" +
+    "                            const citationText = typeof event.value === 'string' ? event.value : '';\n" +
+    "                            const citations = citationText.replace(/^Citations:\\n/, '').split('\\n').filter(Boolean);\n" +
+    "                            streamFormatter.emitEvent({\n" +
+    "                                type: JsonStreamEventType.CITATION,\n" +
+    "                                timestamp: new Date().toISOString(),\n" +
+    "                                citations: citations,\n" +
+    "                            });\n" +
+    "                        }\n" +
+    "                    }\n" +
+    "                    // [IONOSPHERE] Enhanced JSON Protocol: Capture finishReason from Finished event\n" +
+    "                    else if (event.type === GeminiEventType.Finished) {\n" +
+    "                        if (event.value && event.value.reason) {\n" +
+    "                            lastFinishReason = event.value.reason;\n" +
+    "                        }\n" +
+    "                    }\n" +
+    "                    else if (event.type === GeminiEventType.Content) {";
+
+  if (niContent.includes(contentHandlerSearch) && !niContent.includes("GeminiEventType.Thought")) {
+    niContent = niContent.replace(contentHandlerSearch, thoughtCitationHandlers);
+    console.log("  - Applied Thought/Citation/Finished event handlers.");
+  } else if (niContent.includes("GeminiEventType.Thought")) {
+    console.log("  - Thought/Citation/Finished event handlers already applied.");
+  }
+
+  // 11b. Add lastFinishReason variable declaration after 'let responseText'.
+  const responseTextSearch = "                let responseText = '';";
+  const responseTextReplace = "                let responseText = '';\n" +
+    "                let lastFinishReason = 'stop'; // [IONOSPHERE] Track finish reason from Finished events";
+
+  if (niContent.includes(responseTextSearch) && !niContent.includes("let lastFinishReason")) {
+    niContent = niContent.replace(responseTextSearch, responseTextReplace);
+    console.log("  - Applied lastFinishReason variable declaration.");
+  }
+
+  // 11c. Add finish_reason to all RESULT events.
+  // The RESULT event is emitted in 3 places with 2 indentation levels.
+  // 28-space indent (1 occurrence: final else path)
+  const resultSearch28 = "                            status: 'success',\n" +
+    "                            stats: streamFormatter.convertToStreamStats(metrics, durationMs),";
+  const resultReplace28 = "                            status: 'success',\n" +
+    "                            finish_reason: lastFinishReason || 'stop',\n" +
+    "                            stats: streamFormatter.convertToStreamStats(metrics, durationMs),";
+
+  // 32-space indent (2 occurrences: AgentExecutionStopped and StopExecution paths)
+  const resultSearch32 = "                                status: 'success',\n" +
+    "                                stats: streamFormatter.convertToStreamStats(metrics, durationMs),";
+  const resultReplace32 = "                                status: 'success',\n" +
+    "                                finish_reason: lastFinishReason || 'stop',\n" +
+    "                                stats: streamFormatter.convertToStreamStats(metrics, durationMs),";
+
+  if (!niContent.includes("finish_reason")) {
+    if (niContent.includes(resultSearch28)) {
+      niContent = niContent.replaceAll(resultSearch28, resultReplace28);
+    }
+    if (niContent.includes(resultSearch32)) {
+      niContent = niContent.replaceAll(resultSearch32, resultReplace32);
+    }
+    console.log("  - Applied finish_reason to RESULT events.");
+  }
+
+  // 11d. Add protocol_version and capabilities to INIT events.
+  // There are 2 INIT events (structured history path and normal path).
+  const initSearch = "session_id: config.getSessionId(), model: config.getModel() });";
+  const initReplace = "session_id: config.getSessionId(), model: config.getModel(), protocol_version: 2, capabilities: ['thought', 'citation', 'safety'] });";
+
+  if (niContent.includes(initSearch) && !niContent.includes("protocol_version")) {
+    niContent = niContent.replaceAll(initSearch, initReplace);
+    console.log("  - Applied protocol_version and capabilities to INIT events.");
+  }
+
+  // 11e. Add SAFETY event to AgentExecutionBlocked handler.
+  const blockedSearch =
+    "                    else if (event.type === GeminiEventType.AgentExecutionBlocked) {\n" +
+    "                        const blockMessage = `Agent execution blocked: ${event.value.systemMessage?.trim() || event.value.reason}`;\n" +
+    "                        if (config.getOutputFormat() === OutputFormat.TEXT) {\n" +
+    "                            process.stderr.write(`[WARNING] ${blockMessage}\\n`);\n" +
+    "                        }\n" +
+    "                    }";
+  const blockedReplace =
+    "                    else if (event.type === GeminiEventType.AgentExecutionBlocked) {\n" +
+    "                        const blockMessage = `Agent execution blocked: ${event.value.systemMessage?.trim() || event.value.reason}`;\n" +
+    "                        if (config.getOutputFormat() === OutputFormat.TEXT) {\n" +
+    "                            process.stderr.write(`[WARNING] ${blockMessage}\\n`);\n" +
+    "                        }\n" +
+    "                        // [IONOSPHERE] Enhanced JSON Protocol: Emit safety event\n" +
+    "                        if (streamFormatter) {\n" +
+    "                            streamFormatter.emitEvent({\n" +
+    "                                type: JsonStreamEventType.SAFETY,\n" +
+    "                                timestamp: new Date().toISOString(),\n" +
+    "                                blocked: true,\n" +
+    "                                reason: event.value.reason,\n" +
+    "                            });\n" +
+    "                        }\n" +
+    "                    }";
+
+  if (niContent.includes(blockedSearch) && !niContent.includes("JsonStreamEventType.SAFETY")) {
+    niContent = niContent.replace(blockedSearch, blockedReplace);
+    console.log("  - Applied SAFETY event emission to AgentExecutionBlocked handler.");
+  }
+
+  fs.writeFileSync(nonInteractiveTarget, niContent, "utf8");
+}
+
 console.log("[Patcher] Patching complete.");

@@ -1128,17 +1128,26 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
     };
 
     const onRetry = (json) => {
-      console.log(`[API] [Turn ${activeTurnId}] Mid-stream retry detected. Resetting internal state for the new attempt.`);
+      console.log(`[API] [Turn ${activeTurnId}] Mid-stream retry detected (Attempt ${json.attempt}, Reason: ${json.reason}). Resetting internal state.`);
       accumulatedText = "";
       accumulatedReasoning = "";
       accumulatedCitations = [];
-      // Note: We don't clear accumulatedToolCalls because they might have been 
-      // complete from a previous turn phase (though unlikely mid-stream).
+      
+      if (isStreaming && !res.writableEnded) {
+        // Emit formal SSE comment for technical signaling
+        res.write(`: retry attempt=${json.attempt} reason=${json.reason} prev_model=${json.prev_model || 'none'}\n\n`);
+      }
     };
 
     const onModelInfo = (json) => {
-      console.log(`[API] [Turn ${activeTurnId}] Model switch detected: ${json.model}`);
-      responseModel = json.model;
+      const model = json.model || json.value;
+      console.log(`[API] [Turn ${activeTurnId}] Model switch detected: ${model}`);
+      responseModel = model;
+      
+      if (isStreaming && !res.writableEnded) {
+        // Emit formal SSE comment for technical signaling
+        res.write(`: model_info attempt=${json.attempt || 1} model=${model} fallback=${!!json.fallback}\n\n`);
+      }
     };
 
 

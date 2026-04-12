@@ -580,6 +580,53 @@ export class GeminiController extends EventEmitter {
              }
           }
 
+          // [IONOSPHERE] Handle explicit retry signal from mid-stream fallback
+          if (json.type === "retry") {
+            const reason = json.reason || "unknown";
+            const attempt = json.attempt || 1;
+            console.log(`[GeminiController] [Turn ${turnId}] 🔄 RETRY SIGNAL RECEIVED (Attempt ${attempt}, Reason: ${reason}). Clearing buffers.`);
+            
+            // 1. Clear text buffers to prevent "Hello Hello world" doubling
+            proc.accumulatedText = ""; 
+            if (proc.cleaner) {
+              proc.cleaner.buffer = "";
+            }
+            
+            // 2. Clear tool usage for this specific attempt (allow re-calling)
+            proc.toolUsage = new Set();
+            
+            // 3. Reset TTFB tracking for the new attempt
+            proc.firstByteTime = null; 
+            
+            // 4. Signal to bridge (index.js) so it can send SSE comments
+            if (activeCallbacks.onEvent) {
+              activeCallbacks.onEvent({ 
+                type: "retry", 
+                attempt: attempt, 
+                reason: reason,
+                prev_model: json.prev_model 
+              });
+            }
+            return; // Don't process further for this line
+          }
+
+          // [IONOSPHERE] Handle model update signal
+          if (json.type === "model_info") {
+            const model = json.model || json.value;
+            const attempt = json.attempt || 1;
+            console.log(`[GeminiController] [Turn ${turnId}] 🤖 Model switched to: ${model} (Attempt ${attempt})`);
+            
+            if (activeCallbacks.onEvent) {
+              activeCallbacks.onEvent({ 
+                type: "model_info", 
+                model: model,
+                attempt: attempt,
+                fallback: !!json.fallback
+              });
+            }
+            return;
+          }
+
           // NO-OP: Stall detector is now reset on raw stdout data below
           // to ensure we catch partial lines or slow token streams.
           

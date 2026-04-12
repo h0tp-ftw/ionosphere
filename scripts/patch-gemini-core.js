@@ -723,6 +723,9 @@ if (fs.existsSync(nonInteractiveTarget)) {
     "                            streamFormatter.emitEvent({\n" +
     "                                type: JsonStreamEventType.RETRY,\n" +
     "                                timestamp: new Date().toISOString(),\n" +
+    "                                attempt: event.attempt,\n" +
+    "                                reason: event.reason,\n" +
+    "                                prev_model: event.prev_model,\n" +
     "                            });\n" +
     "                        }\n" +
     "                    }\n" +
@@ -732,7 +735,9 @@ if (fs.existsSync(nonInteractiveTarget)) {
     "                            streamFormatter.emitEvent({\n" +
     "                                type: JsonStreamEventType.MODEL_INFO,\n" +
     "                                timestamp: new Date().toISOString(),\n" +
+    "                                attempt: event.attempt,\n" +
     "                                model: event.value,\n" +
+    "                                fallback: !!event.fallback,\n" +
     "                            });\n" +
     "                        }\n" +
     "                    }\n" +
@@ -741,8 +746,14 @@ if (fs.existsSync(nonInteractiveTarget)) {
   if (niContent.includes(contentHandlerSearch) && !niContent.includes("GeminiEventType.Retry")) {
     niContent = niContent.replace(contentHandlerSearch, thoughtCitationHandlers);
     console.log("  - Applied Thought/Citation/Finished/Retry/ModelInfo event handlers.");
+  } else if (niContent.includes("GeminiEventType.Retry") && !niContent.includes("attempt: event.attempt")) {
+    console.log("  - Upgrading Thought/Citation/Finished/Retry/ModelInfo event handlers with metadata support...");
+    // Force upgrade: find the old thoughtCitationHandlers block starting with Thought comment and ending with Content if
+    const upgradeRegex = /\/\/ \[IONOSPHERE\] Enhanced JSON Protocol: Emit thought events[\s\S]*?else if \(event\.type === GeminiEventType\.Content\) {/g;
+    niContent = niContent.replace(upgradeRegex, thoughtCitationHandlers);
+    console.log("  - Upgraded Thought/Citation/Finished/Retry/ModelInfo event handlers.");
   } else if (niContent.includes("GeminiEventType.Retry")) {
-    console.log("  - Thought/Citation/Finished/Retry/ModelInfo event handlers already applied.");
+    console.log("  - Thought/Citation/Finished/Retry/ModelInfo event handlers (Enriched) already applied.");
   } else if (niContent.includes("GeminiEventType.Thought")) {
     // Upgrade path: already has Thought but missing Retry.
     const upgradeSearch = "                    // [IONOSPHERE] Enhanced JSON Protocol: Capture finishReason from Finished event\n" +
@@ -865,6 +876,55 @@ if (fs.existsSync(nonInteractiveTarget)) {
   fs.writeFileSync(nonInteractiveTarget, niContent, "utf8");
 }
 
+// 11.5. Patch turn.js (Enriched event propagation)
+const turnTarget = path.resolve(
+  __dirname,
+  "..",
+  "node_modules",
+  "@google",
+  "gemini-cli-core",
+  "dist",
+  "src",
+  "core",
+  "turn.js",
+);
+if (fs.existsSync(turnTarget)) {
+  console.log(`[Patcher] Patching turn.js for enriched event propagation: ${turnTarget}`);
+  let content = fs.readFileSync(turnTarget, "utf8");
+
+  const retrySearch = "                if (streamEvent.type === 'retry') {\n" +
+    "                    yield { type: GeminiEventType.Retry };\n" +
+    "                    continue; // Skip to the next event in the stream\n" +
+    "                }";
+  const retryReplace = "                if (streamEvent.type === 'retry') {\n" +
+    "                    yield { \n" +
+    "                        type: GeminiEventType.Retry,\n" +
+    "                        attempt: streamEvent.attempt,\n" +
+    "                        reason: streamEvent.reason,\n" +
+    "                        prev_model: streamEvent.prev_model\n" +
+    "                    };\n" +
+    "                    continue; // Skip to the next event in the stream\n" +
+    "                }\n" +
+    "                if (streamEvent.type === 'model_info') {\n" +
+    "                    yield {\n" +
+    "                        type: GeminiEventType.ModelInfo,\n" +
+    "                        value: streamEvent.value,\n" +
+    "                        attempt: streamEvent.attempt,\n" +
+    "                        fallback: !!streamEvent.fallback\n" +
+    "                    };\n" +
+    "                    continue;\n" +
+    "                }";
+
+  if (content.includes(retrySearch) && !content.includes("prev_model: streamEvent.prev_model")) {
+    content = content.replace(retrySearch, retryReplace);
+    console.log("  - Applied enriched event propagation to Turn.run.");
+  } else if (content.includes("prev_model: streamEvent.prev_model")) {
+      console.log("  - Enriched event propagation already applied to turn.js.");
+  }
+
+  fs.writeFileSync(turnTarget, content, "utf8");
+}
+
 // 12. Patch GeminiChat.js (Mid-Stream Fallback)
 const chatTarget = path.resolve(
   __dirname,
@@ -880,6 +940,14 @@ const chatTarget = path.resolve(
 if (fs.existsSync(chatTarget)) {
   console.log(`[Patcher] Patching GeminiChat.js for mid-stream fallback: ${chatTarget}`);
   let content = fs.readFileSync(chatTarget, "utf8");
+
+  // [IONOSPHERE] Step 1: Patch StreamEventType enum to include MODEL_INFO
+  const enumSearch = `})(StreamEventType || (StreamEventType = {}));`;
+  const enumReplace = `    /** [IONOSPHERE] Signal that model info has updated (fallback). */\n    StreamEventType["MODEL_INFO"] = "model_info";\n})(StreamEventType || (StreamEventType = {}));`;
+  if (!content.includes('StreamEventType["MODEL_INFO"]')) {
+    content = content.replace(enumSearch, enumReplace);
+    console.log("  - Applied MODEL_INFO to StreamEventType enum.");
+  }
 
   // We want to inject fallback logic into the streamWithRetries catch block.
   // This allows the model to switch even if the error happens after the stream starts.
@@ -902,6 +970,10 @@ if (fs.existsSync(chatTarget)) {
                                 const { handleFallback } = await import('../fallback/handler.js');
                                 const fallbackModel = await handleFallback(this.context.config, model, this.context.config.getContentGeneratorConfig()?.authType, error);
                                 if (fallbackModel) {
+                                    // Yield explicit signals to the generator so nonInteractiveCli.js can emit them
+                                    yield { type: StreamEventType.RETRY, attempt: attempt + 1, reason: errorType, prev_model: model };
+                                    yield { type: StreamEventType.MODEL_INFO, value: fallbackModel, attempt: attempt + 1, fallback: true };
+                                    
                                     attempt = 0; // Reset attempts to try again with the new model
                                     continue;
                                 }
@@ -916,10 +988,10 @@ if (fs.existsSync(chatTarget)) {
   if (content.includes(streamRetrySearch)) {
     content = content.replace(streamRetrySearch, streamRetryReplace);
     console.log("  - Applied Mid-Stream Fallback logic to streamWithRetries.");
-  } else if (content.includes("// [IONOSPHERE] Mid-Stream Fallback") && !content.includes("modelName.startsWith('auto-')")) {
-    console.log("  - Upgrading existing Mid-Stream Fallback logic...");
+  } else if (content.includes("// [IONOSPHERE] Mid-Stream Fallback") && !content.includes("StreamEventType.RETRY")) {
+    console.log("  - Upgrading existing Mid-Stream Fallback logic with signaling...");
     // Very coarse upgrade: find the old comment and replace the whole block until the next known line
-    const oldBlockSearch = /\/\/ \[IONOSPHERE\] Mid-Stream Fallback: Try to switch models if retries exhausted or terminal error[\s\S]*?logContentRetryFailure/g;
+    const oldBlockSearch = /\/\/ \[IONOSPHERE\] Mid-Stream Fallback: Try to switch models only for auto-\* selections[\s\S]*?logContentRetryFailure/g;
     const upgradeReplace = `// [IONOSPHERE] Mid-Stream Fallback: Try to switch models only for auto-* selections
                         try {
                             const modelName = model || "";
@@ -927,6 +999,10 @@ if (fs.existsSync(chatTarget)) {
                                 const { handleFallback } = await import('../fallback/handler.js');
                                 const fallbackModel = await handleFallback(this.context.config, model, this.context.config.getContentGeneratorConfig()?.authType, error);
                                 if (fallbackModel) {
+                                    // Yield explicit signals to the generator so nonInteractiveCli.js can emit them
+                                    yield { type: StreamEventType.RETRY, attempt: attempt + 1, reason: errorType, prev_model: model };
+                                    yield { type: StreamEventType.MODEL_INFO, value: fallbackModel, attempt: attempt + 1, fallback: true };
+
                                     attempt = 0; // Reset attempts to try again with the new model
                                     continue;
                                 }
@@ -937,9 +1013,9 @@ if (fs.existsSync(chatTarget)) {
 
                         logContentRetryFailure`;
     content = content.replace(oldBlockSearch, upgradeReplace);
-    console.log("  - Upgraded Mid-Stream Fallback logic.");
-  } else if (content.includes("modelName.startsWith('auto-')")) {
-    console.log("  - Mid-Stream Fallback (Auto-restricted) already applied.");
+    console.log("  - Upgraded Mid-Stream Fallback logic with signaling.");
+  } else if (content.includes("StreamEventType.RETRY")) {
+    console.log("  - Mid-Stream Fallback (Signaling enabled) already applied.");
   }
 
   fs.writeFileSync(chatTarget, content, "utf8");

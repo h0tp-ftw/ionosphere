@@ -156,17 +156,11 @@ function generateEnvFile(instance, globalPrefs) {
         `PORT=${instance.port}`,
         `MAX_CONCURRENT_CLI=${instance.maxCli}`,
         ``,
-        `# --- Google Auth ---`,
-        `GEMINI_AUTH_TYPE=${instance.authMethod === 'oauth' ? 'oauth-personal' : 'gemini-api-key'}`,
-    ];
-
-    if (instance.authMethod === 'oauth') {
-        lines.push(`GOOGLE_GENAI_USE_GCA=true`);
-    }
-
-    if (instance.apiKey) {
-        lines.push(`GEMINI_API_KEY=${instance.apiKey}`);
-    }
+        `# --- Google Auth ---
+GEMINI_AUTH_TYPE=${instance.authMethod === 'oauth' ? 'oauth-personal' : 'gemini-api-key'}
+${instance.authMethod === 'oauth' ? 'GOOGLE_GENAI_USE_GCA=true' : ''}
+${instance.apiKey ? `GEMINI_API_KEY=${instance.apiKey}` : ''}
+`.split('\n').filter(l => l.trim() !== ''),
 
     lines.push(
         ``,

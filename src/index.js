@@ -935,7 +935,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
       }, 20000);
     }
 
-    const responseModel =
+    let responseModel =
       req.body.model || process.env.GEMINI_MODEL || "gemini-2.5-flash-lite";
 
     const onText = (text) => {

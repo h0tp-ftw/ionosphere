@@ -895,13 +895,16 @@ if (fs.existsSync(chatTarget)) {
                             throw error;
                         }
                         
-                        // [IONOSPHERE] Mid-Stream Fallback: Try to switch models if retries exhausted or terminal error
+                        // [IONOSPHERE] Mid-Stream Fallback: Try to switch models only for auto-* selections
                         try {
-                            const { handleFallback } = await import('../fallback/handler.js');
-                            const fallbackModel = await handleFallback(this.context.config, model, this.context.config.getContentGeneratorConfig()?.authType, error);
-                            if (fallbackModel) {
-                                attempt = 0; // Reset attempts to try again with the new model
-                                continue;
+                            const modelName = model || "";
+                            if (typeof modelName === 'string' && modelName.startsWith('auto-')) {
+                                const { handleFallback } = await import('../fallback/handler.js');
+                                const fallbackModel = await handleFallback(this.context.config, model, this.context.config.getContentGeneratorConfig()?.authType, error);
+                                if (fallbackModel) {
+                                    attempt = 0; // Reset attempts to try again with the new model
+                                    continue;
+                                }
                             }
                         } catch (fErr) {
                             // If fallback fails, just log and throw original error
@@ -910,9 +913,33 @@ if (fs.existsSync(chatTarget)) {
                         logContentRetryFailure(this.context.config, new ContentRetryFailureEvent(attempt + 1, errorType, model));
                         throw error;`;
 
-  if (content.includes(streamRetrySearch) && !content.includes("Mid-Stream Fallback")) {
+  if (content.includes(streamRetrySearch)) {
     content = content.replace(streamRetrySearch, streamRetryReplace);
     console.log("  - Applied Mid-Stream Fallback logic to streamWithRetries.");
+  } else if (content.includes("// [IONOSPHERE] Mid-Stream Fallback") && !content.includes("modelName.startsWith('auto-')")) {
+    console.log("  - Upgrading existing Mid-Stream Fallback logic...");
+    // Very coarse upgrade: find the old comment and replace the whole block until the next known line
+    const oldBlockSearch = /\/\/ \[IONOSPHERE\] Mid-Stream Fallback: Try to switch models if retries exhausted or terminal error[\s\S]*?logContentRetryFailure/g;
+    const upgradeReplace = `// [IONOSPHERE] Mid-Stream Fallback: Try to switch models only for auto-* selections
+                        try {
+                            const modelName = model || "";
+                            if (typeof modelName === 'string' && modelName.startsWith('auto-')) {
+                                const { handleFallback } = await import('../fallback/handler.js');
+                                const fallbackModel = await handleFallback(this.context.config, model, this.context.config.getContentGeneratorConfig()?.authType, error);
+                                if (fallbackModel) {
+                                    attempt = 0; // Reset attempts to try again with the new model
+                                    continue;
+                                }
+                            }
+                        } catch (fErr) {
+                            // If fallback fails, just log and throw original error
+                        }
+
+                        logContentRetryFailure`;
+    content = content.replace(oldBlockSearch, upgradeReplace);
+    console.log("  - Upgraded Mid-Stream Fallback logic.");
+  } else if (content.includes("modelName.startsWith('auto-')")) {
+    console.log("  - Mid-Stream Fallback (Auto-restricted) already applied.");
   }
 
   fs.writeFileSync(chatTarget, content, "utf8");

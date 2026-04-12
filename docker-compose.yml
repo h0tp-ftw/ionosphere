@@ -43,6 +43,7 @@ services:
       - GEMINI_TOP_K=${GEMINI_TOP_K}
       - GEMINI_FREQUENCY_PENALTY=${GEMINI_FREQUENCY_PENALTY}
       - GEMINI_PRESENCE_PENALTY=${GEMINI_PRESENCE_PENALTY}
+      - STRIP_REASONING=${STRIP_REASONING:-false}
     command: node src/index.js
     ports:
       - "${PORT:-3000}:${PORT:-3000}"

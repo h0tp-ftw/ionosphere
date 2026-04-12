@@ -132,7 +132,7 @@ const buildGeminiHistory = (messages) => {
         for (const p of content) {
           if (p.type === "text") {
             currentModelParts.push({ text: p.text });
-          } else if (p.type === "thought" || p.type === "reasoning") {
+          } else if ((p.type === "thought" || p.type === "reasoning") && process.env.STRIP_REASONING !== "true") {
             currentModelParts.push({ thought: p.text || p.thought || p.reasoning });
           }
         }
@@ -142,7 +142,7 @@ const buildGeminiHistory = (messages) => {
 
       // Handle explicit reasoning_content or thought fields (OpenAI/reasoning models)
       const thought = msg.reasoning_content || msg.thought;
-      if (thought && typeof thought === "string") {
+      if (thought && typeof thought === "string" && process.env.STRIP_REASONING !== "true") {
         currentModelParts.push({ thought });
       }
 

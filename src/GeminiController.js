@@ -580,26 +580,9 @@ export class GeminiController extends EventEmitter {
              }
           }
 
-          // Reset stall detector on any output
-          if (proc.stallTimer) {
-            clearTimeout(proc.stallTimer);
-            proc.stallTimer = null;
-          }
+          // NO-OP: Stall detector is now reset on raw stdout data below
+          // to ensure we catch partial lines or slow token streams.
           
-          // Re-arm stall detector if the turn isn't finished
-          // We only arm it after 'init' to allow for startup time
-          if (json.type !== "result" && json.type !== "error") {
-            const STALL_TIMEOUT_MS = parseInt(process.env.CLI_STALL_TIMEOUT_MS) || 60000;
-            proc.stallTimer = setTimeout(() => {
-              console.error(
-                `[GeminiController] [STALL FATAL] [Turn ${turnId}] No CLI output for ${STALL_TIMEOUT_MS / 1000}s. Killing stalled process.`,
-              );
-              proc.isStalled = true;
-              proc.kill("SIGKILL");
-              // The close handler will reject the promise due to isStalled
-            }, STALL_TIMEOUT_MS);
-          }
-
           if (json.type === "message" && json.role === "assistant") {
             // Track first model text for perf timing
             if (PERF_ENABLED && !proc._perfFirstTextTime) {
@@ -790,6 +773,27 @@ export class GeminiController extends EventEmitter {
           }
         }
 
+        // [STALL DETECTOR] Reset timer on ANY stdout or stderr activity.
+        // This ensures the process is considered "alive" as long as it's emitting tokens,
+        // logs, or debug info, even if it hasn't finished a complete JSONL line yet.
+        const resetStallTimer = () => {
+          if (proc.stallTimer) {
+            clearTimeout(proc.stallTimer);
+            proc.stallTimer = null;
+          }
+          const STALL_TIMEOUT_MS = parseInt(process.env.CLI_STALL_TIMEOUT_MS) || 120000;
+          proc.stallTimer = setTimeout(() => {
+            console.error(
+              `[GeminiController] [STALL FATAL] [Turn ${turnId}] No CLI output for ${STALL_TIMEOUT_MS / 1000}s. Killing stalled process.`,
+            );
+            proc.isStalled = true;
+            proc.kill("SIGKILL");
+          }, STALL_TIMEOUT_MS);
+        };
+
+        // Initially arm it (will be reset/re-armed on data)
+        resetStallTimer();
+
         // NOTE: stdout -> accumulator.push is ALREADY wired in the cold-spawn
         // block (line ~376) or in replenishPool() for warm processes.
         // Adding another listener here caused every chunk to be pushed TWICE,
@@ -797,13 +801,17 @@ export class GeminiController extends EventEmitter {
         // writer here (the unique concern of this block).
         if (rawLogStream) {
           proc.stdout.on("data", (chunk) => {
+            resetStallTimer();
             rawLogStream.write(chunk);
           });
+        } else {
+          proc.stdout.on("data", () => resetStallTimer());
         }
 
         let lastStderr = "";
         let lastStderrLines = [];
         proc.stderr.on("data", (chunk) => {
+          resetStallTimer();
           const stderrText = chunk.toString().trim();
           if (stderrText) {
             lastStderrLines.push(stderrText);

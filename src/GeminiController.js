@@ -781,7 +781,10 @@ export class GeminiController extends EventEmitter {
             clearTimeout(proc.stallTimer);
             proc.stallTimer = null;
           }
-          const STALL_TIMEOUT_MS = parseInt(process.env.CLI_STALL_TIMEOUT_MS) || 120000;
+          // Default to 60s. With Raw IO monitoring enabled, this is safe even for reasoning models,
+          // as any chunk or stderr log resets the timer. For aggressive fail-fast, users can 
+          // set CLI_STALL_TIMEOUT_MS to 30000.
+          const STALL_TIMEOUT_MS = parseInt(process.env.CLI_STALL_TIMEOUT_MS) || 60000;
           proc.stallTimer = setTimeout(() => {
             console.error(
               `[GeminiController] [STALL FATAL] [Turn ${turnId}] No CLI output for ${STALL_TIMEOUT_MS / 1000}s. Killing stalled process.`,

@@ -149,3 +149,17 @@ export function formatErrorResponse(err, defaultType = ErrorType.SERVER, default
         err.param || null
     );
 }
+/**
+ * Custom error used to signal the orchestrator to perform an internal retry.
+ */
+export class RetryableError extends Error {
+  constructor(message, reason, attempt = 0, isRepetitionKill = false, isStall = false, isQuota = false) {
+    super(message);
+    this.name = "RetryableError";
+    this.reason = reason;
+    this.attempt = attempt;
+    this.isRepetitionKill = isRepetitionKill;
+    this.isStall = isStall;
+    this.isQuota = isQuota;
+  }
+}

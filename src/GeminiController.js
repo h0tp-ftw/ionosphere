@@ -9,6 +9,7 @@ import { createError, ErrorType, ErrorCode } from "./errorHandler.js";
 import { RepetitionBreaker } from "./RepetitionBreaker.js";
 import { CliRunner } from "./CliRunner.js";
 import { CliErrorParser } from "./CliErrorParser.js";
+import { RetryableError } from "./errorHandler.js";
 
 const PERF_ENABLED = process.env.GEMINI_PERF_TIMING === "true";
 
@@ -713,6 +714,14 @@ export class GeminiController extends EventEmitter {
 
             if (repeatStatus === "KILL") {
               proc.kill();
+              const err = new RetryableError(
+                `Turn ${turnId} killed due to repetition loop.`,
+                "repetition_breaker",
+                0,
+                true // isRepetitionKill
+              );
+              // Store it on the proc so sendPrompt can catch it
+              proc.pendingRetryError = err; 
               return;
             }
             if (repeatStatus === "IGNORE") return;
@@ -889,6 +898,13 @@ export class GeminiController extends EventEmitter {
               `[GeminiController] [STALL FATAL] [Turn ${turnId}] No CLI output for ${STALL_TIMEOUT_MS / 1000}s. Killing stalled process. (Wait method: ${proc._perfSpawnMethod}, First byte: ${!!proc.firstByteTime})`,
             );
             proc.isStalled = true;
+            proc.pendingRetryError = new RetryableError(
+              `CLI stalled after ${STALL_TIMEOUT_MS / 1000}s`,
+              "stall",
+              0,
+              false,
+              true // isStall
+            );
             proc.kill("SIGKILL");
           }, STALL_TIMEOUT_MS);
         };
@@ -956,7 +972,6 @@ export class GeminiController extends EventEmitter {
             `[GeminiController] Process closed for turn ${turnId} with code ${code}. Tool Usage: [${usageSummary}]`,
           );
 
-          // Capture perf timing for the CLI execution phase
           if (PERF_ENABLED) {
             proc._perfCloseTime = performance.now();
             proc._perfTotalCliMs = proc._perfCloseTime - (proc._perfPromiseStart || proc._perfCloseTime);
@@ -965,31 +980,34 @@ export class GeminiController extends EventEmitter {
             }
           }
 
-          // CRITICAL: Flush cleaner BEFORE deleting process/callbacks
-          // so that any remaining buffered text reaches the response.
           if (proc.cleaner) proc.cleaner.flush();
 
           if (accumulator.buffer) {
             accumulator.push("\n");
           }
 
-          // Clean up history file before deleting process reference
           if (proc._historyFilePath) {
             try { fs.unlinkSync(proc._historyFilePath); } catch (_) {}
           }
 
           this.processes.delete(turnId);
 
-          if (code === 0 || code === null || proc.isZeroOutputSuccess) {
-            // After successful completion, check for across-turn repetition
-            const fingerprint =
-              proc.extraEnv?.IONOSPHERE_HISTORY_HASH || turnId;
+          // [IONOSPHERE] Unified Retry Signaling
+          if (proc.pendingRetryError) {
+            reject(proc.pendingRetryError);
+            return;
+          }
+
+          if (proc.pendingQuotaError) {
+            reject(new RetryableError(proc.pendingQuotaError, "quota", 0, false, false, true));
+            return;
+          }
+
+          if (code === 0 || code === null) {
+            const fingerprint = proc.extraEnv?.IONOSPHERE_HISTORY_HASH || turnId;
             const fullText = proc.accumulatedText || "";
             this.repetitionBreaker.trackTurnResult(fingerprint, fullText);
 
-            // Attach perf data to the result before resolving, since the
-            // process reference is deleted by this point and index.js can't
-            // read it from controller.processes.get() anymore.
             const resultWithPerf = lastResultJson || {};
             resultWithPerf._perf = {
               spawnMethod: proc._perfSpawnMethod || 'unknown',
@@ -999,17 +1017,18 @@ export class GeminiController extends EventEmitter {
               stdinPayloadBytes: proc._perfStdinPayloadBytes || 0,
             };
             resolve(resultWithPerf);
+          } else if (proc.isZeroOutputSuccess) {
+            reject(new RetryableError("Zero output success detected", "zero_output"));
           } else {
             const diagnostics = lastStderrLines.join("\n").trim();
-            let errorMsg = diagnostics
-              ? `CLI failed (code ${code}): ${diagnostics}`
-              : `CLI process exited with code ${code}`;
-
-            if (proc.isStalled) {
-              errorMsg = `CLI stalled during turn ${turnId} (No output for 60s)`;
+            const errorMsg = diagnostics ? `CLI failed (code ${code}): ${diagnostics}` : `CLI process exited with code ${code}`;
+            
+            // Heuristic for quota in generic failures
+            if (/429|Quota|Capacity/i.test(errorMsg)) {
+              reject(new RetryableError(errorMsg, "quota", 0, false, false, true));
+            } else {
+              reject(new Error(errorMsg));
             }
-
-            reject(new Error(errorMsg));
           }
         });
 

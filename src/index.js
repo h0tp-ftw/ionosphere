@@ -14,6 +14,7 @@ import {
   createError,
   ErrorType,
   ErrorCode,
+  RetryableError,
 } from "./errorHandler.js";
 import {
   getHistoryHash,
@@ -848,7 +849,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
       }
     }
 
-    isStreaming = req.body.stream === true;
+    isStreaming = req.body.stream === true || req.body.stream === "true";
     let accumulatedText = "";
     const rawCliBuffer = []; // Case 2: Reactive Debugging buffer
     let accumulatedToolCalls = [];
@@ -2281,18 +2282,6 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
     });
     timer.measure('config_gen');
 
-    let retryZeroOutput = false;
-    let zeroOutputRetries = 0;
-    const MAX_ZERO_OUTPUT_RETRIES = 2; // (Initial + 2 retries = 3 attempts total)
-
-    let stallRetries = 0;
-    const MAX_STALL_RETRIES = 1; // (Initial + 1 retry = 2 attempts total)
-
-    let quotaRetries = 0;
-    const MAX_QUOTA_RETRIES = 2; // (Initial + 2 retries = 3 attempts total)
-
-    let shouldRetry = false;
-    let retryQuotaError = false; // Set inside executeTask catch to preserve IPC/temp for quota retries
 
     const executeTask = async () => {
       let taskResolve;
@@ -2475,49 +2464,57 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
       }
     };
 
+    const MAX_QUOTA_RETRIES = 5;
+    const MAX_STALL_RETRIES = 5;
+    const MAX_ZERO_OUTPUT_RETRIES = 3;
+    const MAX_REPETITION_RETRIES = 2;
+
+    let quotaRetries = 0;
+    let stallRetries = 0;
+    let zeroOutputRetries = 0;
+    let repetitionRetries = 0;
+    let shouldRetry = false;
+
     do {
       shouldRetry = false;
-      retryZeroOutput = false;
-      retryQuotaError = false;
+      pendingRetry = false;
 
       try {
         await enqueueControllerPrompt(executeTask);
-        if (retryZeroOutput) {
-          zeroOutputRetries++;
-          if (zeroOutputRetries <= MAX_ZERO_OUTPUT_RETRIES) {
-            shouldRetry = true;
-            console.log(`[API] Restarting executeTask for Turn ${activeTurnId} due to zero-output. Attempt ${zeroOutputRetries}/${MAX_ZERO_OUTPUT_RETRIES}`);
-          } else {
-            console.error(`[API] [Turn ${activeTurnId}] Zero-output retries exhausted.`);
-          }
-        }
       } catch (err) {
-        // [IONOSPHERE] Recognize Quota/Capacity errors for seamless fallback
-        const isQuotaError = /429|Quota|Capacity|RESOURCE_EXHAUSTED|MODEL_CAPACITY_EXHAUSTED/i.test(err.message);
-
-        if (err.message.includes("stalled") && stallRetries < MAX_STALL_RETRIES) {
-          stallRetries++;
-          shouldRetry = true;
-          console.log(`[API] Restarting executeTask for Turn ${activeTurnId} due to CLI stall. Attempt ${stallRetries}/${MAX_STALL_RETRIES}`);
-        } else if (isQuotaError && quotaRetries < MAX_QUOTA_RETRIES && process.env.GEMINI_SILENT_FALLBACK === "true") {
-          // Safety Check: Avoid content doubling by suppressing retry if text was already sent.
-          // Note: reasoning_content (thoughts) might have been sent, but we prioritize recovery.
-          if (accumulatedText.length > 0) {
-            console.warn(`[API] [Turn ${activeTurnId}] Quota error detected, but suppressed retry because ${accumulatedText.length} chars of text were already sent.`);
+        if (err instanceof RetryableError) {
+          if (err.isQuota && quotaRetries < MAX_QUOTA_RETRIES && process.env.GEMINI_SILENT_FALLBACK === "true") {
+            if (accumulatedText.length > 0) {
+              console.warn(`[API] [Turn ${activeTurnId}] Quota error detected, but suppressed retry because text was already sent.`);
+              throw err;
+            }
+            quotaRetries++;
+            shouldRetry = true;
+            console.log(`[API] [Turn ${activeTurnId}] Unified Retry: Quota (Attempt ${quotaRetries}/${MAX_QUOTA_RETRIES}). Backing off 2s...`);
+            await new Promise(r => setTimeout(r, 2000));
+          } else if (err.isStall && stallRetries < MAX_STALL_RETRIES) {
+            stallRetries++;
+            shouldRetry = true;
+            console.log(`[API] [Turn ${activeTurnId}] Unified Retry: Stall (Attempt ${stallRetries}/${MAX_STALL_RETRIES})`);
+          } else if (err.reason === "zero_output" && zeroOutputRetries < MAX_ZERO_OUTPUT_RETRIES) {
+            zeroOutputRetries++;
+            shouldRetry = true;
+            console.log(`[API] [Turn ${activeTurnId}] Unified Retry: Zero Output (Attempt ${zeroOutputRetries}/${MAX_ZERO_OUTPUT_RETRIES})`);
+          } else if (err.isRepetitionKill && repetitionRetries < MAX_REPETITION_RETRIES) {
+            repetitionRetries++;
+            shouldRetry = true;
+            console.log(`[API] [Turn ${activeTurnId}] Unified Retry: Repetition Kill (Attempt ${repetitionRetries}/${MAX_REPETITION_RETRIES})`);
+          } else {
             throw err;
           }
-          
-          quotaRetries++;
-          shouldRetry = true;
-          console.log(`[API] Restarting executeTask for Turn ${activeTurnId} due to quota failure (Backing off 2s). Attempt ${quotaRetries}/${MAX_QUOTA_RETRIES}`);
-          await new Promise(r => setTimeout(r, 2000));
         } else {
           throw err;
         }
       }
 
       if (shouldRetry) {
-        // [IONOSPHERE] Full State Reset for retry
+        pendingRetry = true;
+        // Full State Reset
         accumulatedText = "";
         accumulatedReasoning = "";
         accumulatedToolCalls = [];
@@ -2528,9 +2525,14 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         responseSent = false;
         responseModel = req.body.model || process.env.GEMINI_MODEL || "gemini-2.5-flash-lite";
 
-        stdoutToolCalls.clear();
-        stdoutPendingQueues.clear();
-        ipcHandledIds.clear();
+        stdoutToolCalls?.clear();
+        stdoutPendingQueues?.clear();
+        ipcHandledIds?.clear();
+        
+        // Signal to client if streaming
+        if (isStreaming && !res.writableEnded) {
+          res.write(`: retry [${activeTurnId}] internal orchestrator recovery\n\n`);
+        }
       }
     } while (shouldRetry);
   } catch (err) {

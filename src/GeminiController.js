@@ -1028,10 +1028,19 @@ export class GeminiController extends EventEmitter {
       console.error(`[GeminiController] Turn error: ${err.message}`);
       // Grab callbacks BEFORE finally runs and deletes them
       const activeCallbacks = this.callbacksByTurn.get(turnId) || {};
-      if (activeCallbacks.onError)
+
+      // If SILENT_FALLBACK is active and this is a quota/capacity error,
+      // do NOT call onError here. The orchestrator (index.js) needs to see
+      // the thrown error in its retry loop BEFORE the client is notified.
+      // Calling onError sets responseSent=true, which makes retry impossible.
+      const isQuotaError = /429|Quota|Capacity|RESOURCE_EXHAUSTED|MODEL_CAPACITY_EXHAUSTED/i.test(err.message);
+      if (isQuotaError && process.env.GEMINI_SILENT_FALLBACK === "true") {
+        console.warn(`[GeminiController] Turn ${turnId}: Quota error caught in sendPrompt catch block. Suppressing onError for orchestrator retry.`);
+      } else if (activeCallbacks.onError) {
         activeCallbacks.onError(
           createError(err.message, ErrorType.SERVER, ErrorCode.INTERNAL_ERROR),
         );
+      }
       // Re-throw so the caller (index.js) knows this turn failed.
       // Without this, sendPrompt() resolves to undefined and index.js
       // silently sends an empty success response to the OpenAI client.

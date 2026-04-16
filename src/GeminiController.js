@@ -728,12 +728,15 @@ export class GeminiController extends EventEmitter {
             lastResultJson = json;
             if (json.stats) {
               const { input_tokens, output_tokens, total_tokens } = json.stats;
+              const textLen = (proc.accumulatedText || "").trim().length;
+              
               console.log(
-                `[GeminiController] Turn ${turnId} Usage: In=${input_tokens || 0}, Out=${output_tokens || 0}, Total=${total_tokens || 0}`,
+                `[GeminiController] Turn ${turnId} Usage: In=${input_tokens || 0}, Out=${output_tokens || 0}, Total=${total_tokens || 0} (Content Chars: ${textLen})`,
               );
-              if ((output_tokens || 0) === 0) {
+              
+              if ((output_tokens || 0) === 0 || (output_tokens > 0 && textLen === 0)) {
                 console.warn(
-                  `[GeminiController] WARNING: Turn ${turnId} generated 0 tokens. This may indicate a safety block or context issue.`,
+                  `[GeminiController] WARNING: Turn ${turnId} generated 0 content tokens${textLen === 0 && output_tokens > 0 ? " (Reasoning only)" : ""}. This may indicate a safety block or context issue.`,
                 );
               }
             }
@@ -754,11 +757,12 @@ export class GeminiController extends EventEmitter {
               if (activeCallbacks.onResult) activeCallbacks.onResult(json);
 
               // OPTIMIZATION: Early exit for zero-output success.
-              // If the model generated 0 tokens but reports success, we kill the process
-              // immediately to trigger the retry loop in index.js without waiting for
-              // a potentially slow process termination (which the user reports can take 60s).
-              if (json.status === "success" && (json.stats?.output_tokens || 0) === 0) {
-                console.log(`[GeminiController] [Turn ${turnId}] Early exit for zero-output success to trigger immediate retry.`);
+              // If the model generated 0 tokens (or only reasoning tokens) but reports success, 
+              // we kill the process immediately to trigger the retry loop in index.js.
+              const hasNoContent = (json.stats?.output_tokens || 0) === 0 || (proc.accumulatedText || "").trim().length === 0;
+              
+              if (json.status === "success" && hasNoContent) {
+                console.log(`[GeminiController] [Turn ${turnId}] Early exit for zero-content success to trigger immediate retry.`);
                 proc.isZeroOutputSuccess = true;
                 proc.kill("SIGKILL");
               }
@@ -781,24 +785,31 @@ export class GeminiController extends EventEmitter {
               return;
             }
 
-            // [IONOSPHERE] Enhanced JSON Protocol: reasoning_content
-            // The bridge maps this to OpenAI's reasoning_content field.
             if (activeCallbacks.onThought) {
               activeCallbacks.onThought(json);
             }
             if (activeCallbacks.onEvent) {
               activeCallbacks.onEvent(json);
             }
+            resetStallTimer(); // Reset stall timer on reasoning progress
           } else if (json.type === "citation") {
             // [IONOSPHERE] Enhanced JSON Protocol: citation metadata
             if (activeCallbacks.onCitation) {
               activeCallbacks.onCitation(json);
             }
             if (activeCallbacks.onEvent) activeCallbacks.onEvent(json);
+            resetStallTimer(); 
           } else if (json.type === "safety") {
             // [IONOSPHERE] Enhanced JSON Protocol: safety/content filter
             console.warn(`[GeminiController] [Turn ${turnId}] ⚠️ Safety block: ${json.reason || 'unknown reason'}`);
+            // Explicitly notify orchestrator that this was a safety refusal
+            if (activeCallbacks.onSafety) {
+              activeCallbacks.onSafety(json);
+            }
             if (activeCallbacks.onEvent) activeCallbacks.onEvent(json);
+            resetStallTimer();
+          } else if (json.type === "message" || json.type === "tool_use" || json.type === "toolCall") {
+            resetStallTimer(); // Reset stall timer on any meaningful content/action
           } else if (json.type === "retry") {
             // [IONOSPHERE] Mid-Stream Fallback: Clear text accumulators for the retry
             console.log(`[GeminiController] [Turn ${turnId}] 🔄 Mid-stream RETRY detected. Clearing text buffers.`);
@@ -864,17 +875,18 @@ export class GeminiController extends EventEmitter {
         // writer here (the unique concern of this block).
         if (rawLogStream) {
           proc.stdout.on("data", (chunk) => {
-            resetStallTimer();
+            // STALL DETECTION: Only reset on "line" events (model progress) in strict mode.
+            // Raw data reset is moved to accumulator JSONL parsing logic to avoid
+            // CLI logs ("Still waiting") from masking a genuine model stall.
             rawLogStream.write(chunk);
           });
-        } else {
-          proc.stdout.on("data", () => resetStallTimer());
         }
 
-        let lastStderr = "";
         let lastStderrLines = [];
         proc.stderr.on("data", (chunk) => {
-          resetStallTimer();
+          // STALL DETECTION: We do NOT reset stall timer on stderr.
+          // This ensures that periodic CLI meta-logs like "Still waiting" 
+          // don't prevent the stall detector from killing a stuck model.
           const stderrText = chunk.toString().trim();
           if (stderrText) {
             lastStderrLines.push(stderrText);

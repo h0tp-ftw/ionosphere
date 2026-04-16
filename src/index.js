@@ -1001,6 +1001,21 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
       }
     };
 
+    // [IONOSPHERE] Handle safety blocks as fallback triggers
+    const onSafety = (json) => {
+      console.warn(`[API] [Turn ${activeTurnId}] SAFETY BLOCK DETECTED: ${json.reason || 'unknown'}. Content may be censored.`);
+      if (isStreaming && !res.writableEnded) {
+        res.write(`: safety_block reason=${json.reason || 'unknown'}\n\n`);
+      }
+      
+      // If we haven't sent a response yet, we can try to trigger a retry/fallback
+      // to a different model if one is available.
+      if (!responseSent) {
+        console.log(`[API] [Turn ${activeTurnId}] Safety block triggered on model ${responseModel}. Signaling retry/fallback.`);
+        retryZeroOutput = true; 
+      }
+    };
+
     const onToolCall = async (info) => {
       // Stop diagnostic heartbeat once data starts flowing (even if it's a tool call)
       if (heartbeatInterval) {
@@ -1129,7 +1144,8 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
     };
 
     const onRetry = (json) => {
-      console.log(`[API] [Turn ${activeTurnId}] Mid-stream retry detected (Attempt ${json.attempt}, Reason: ${json.reason}). Resetting internal state.`);
+      const modelSwitch = json.prev_model ? ` (Switched from ${json.prev_model})` : "";
+      console.log(`[API] [Turn ${activeTurnId}] 🔄 Mid-stream RETRY detected${modelSwitch}. Attempt ${json.attempt}, Reason: ${json.reason}. Resetting internal state.`);
       accumulatedText = "";
       accumulatedReasoning = "";
       accumulatedCitations = [];
@@ -1544,6 +1560,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
       onCitation,
       onRetry,
       onModelInfo,
+      onSafety,
       onToolCall,
       onError,
       onResult,

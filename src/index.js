@@ -67,6 +67,25 @@ app.use(express.urlencoded({ limit: "50mb", extended: true }));
 app.use(cors());
 
 /**
+ * Fallback ladders for 'auto' model aliases.
+ * Sequential downgrade paths to handle transient capacity failures.
+ */
+const AUTO_MODEL_LADDERS = {
+  "auto-gemini-3": [
+    "gemini-3.1-pro-preview",
+    "gemini-3-flash-preview",
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+  ],
+  "auto-gemini-2.5": [
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+  ],
+};
+
+/**
  * Refines the JSON Schema to prevent Gemini CLI validation crashes
  * while maintaining structural integrity for the model.
  */
@@ -939,6 +958,14 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
 
     let responseModel =
       req.body.model || process.env.GEMINI_MODEL || "gemini-2.5-flash-lite";
+
+    // [IONOSPHERE] Handle Auto-Model Fallback Ladders
+    let modelQueue = [];
+    if (AUTO_MODEL_LADDERS[responseModel]) {
+      modelQueue = [...AUTO_MODEL_LADDERS[responseModel]];
+      responseModel = modelQueue.shift();
+      console.log(`[API] [Turn ${activeTurnId}] Initializing Auto-Model ladder for ${req.body.model} -> starting with ${responseModel}`);
+    }
 
     const onText = (text) => {
       if (responseSent || res.writableEnded) {
@@ -2295,6 +2322,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
     let shouldRetry = false;
     let pendingRetry = false;
 
+
     const executeTask = async () => {
       let taskResolve;
       const executePromise = new Promise((r) => (taskResolve = r));
@@ -2486,8 +2514,17 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
               throw err;
             }
             quotaRetries++;
+            
+            // [IONOSPHERE] Auto-Model Fallback Logic
+            if (modelQueue.length > 0) {
+              const oldModel = responseModel;
+              responseModel = modelQueue.shift();
+              console.log(`[API] [Turn ${activeTurnId}] Unified Retry: Quota Fallback (${quotaRetries}/${MAX_QUOTA_RETRIES}). Switching: ${oldModel} -> ${responseModel}`);
+            } else {
+              console.log(`[API] [Turn ${activeTurnId}] Unified Retry: Quota (Attempt ${quotaRetries}/${MAX_QUOTA_RETRIES}). Backing off 2s...`);
+            }
+            
             shouldRetry = true;
-            console.log(`[API] [Turn ${activeTurnId}] Unified Retry: Quota (Attempt ${quotaRetries}/${MAX_QUOTA_RETRIES}). Backing off 2s...`);
             await new Promise(r => setTimeout(r, 2000));
           } else if (err.isStall && stallRetries < MAX_STALL_RETRIES) {
             stallRetries++;
@@ -2520,7 +2557,8 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         expectedToolCallsCount = 0;
         receivedToolCallsCount = 0;
         responseSent = false;
-        responseModel = req.body.model || process.env.GEMINI_MODEL || "gemini-2.5-flash-lite";
+        // [IONOSPHERE] Do not reset responseModel here; we want to persist 
+        // the switched fallback model across the retry attempt.
 
         stdoutToolCalls?.clear();
         stdoutPendingQueues?.clear();
@@ -2555,6 +2593,38 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
 });
 
 const MODELS_LIST = [
+  {
+    id: "auto-gemini-3",
+    object: "model",
+    created: 1731628800,
+    owned_by: "google",
+    context_window: 2000000,
+    description: "Ionosphere Auto-Model Ladder (3.x series)",
+  },
+  {
+    id: "auto-gemini-2.5",
+    object: "model",
+    created: 1731628800,
+    owned_by: "google",
+    context_window: 2000000,
+    description: "Ionosphere Auto-Model Ladder (2.5 series)",
+  },
+  {
+    id: "gemini-3.1-pro-preview",
+    object: "model",
+    created: 1731628800,
+    owned_by: "google",
+    context_window: 2000000,
+    description: "Gemini 3.1 Pro (Preview)",
+  },
+  {
+    id: "gemini-3-flash-preview",
+    object: "model",
+    created: 1731628800,
+    owned_by: "google",
+    context_window: 1000000,
+    description: "Gemini 3 Flash (Preview)",
+  },
   {
     id: "gemini-2.5-pro",
     object: "model",

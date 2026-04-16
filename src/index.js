@@ -1248,7 +1248,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
                   role: "assistant",
                   content: accumulatedText,
                   // [IONOSPHERE] Include reasoning_content if the model produced thoughts
-                  reasoning_content: accumulatedReasoning || undefined,
+                  reasoning_content: (process.env.STRIP_REASONING !== "true") ? (accumulatedReasoning || undefined) : undefined,
                   tool_calls:
                     accumulatedToolCalls.length > 0
                       ? accumulatedToolCalls

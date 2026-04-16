@@ -402,6 +402,23 @@ export class GeminiController extends EventEmitter {
       // match every incoming turn regardless of repetition-breaker drift.
       const hashKey = this.hashConfig(workspacePath, settingsPath, null, attachments);
 
+      // Calculate dynamic stall timeout based on prompt size to prevent false-positives
+      // during long context prefill phases.
+      // Formula: max(floor, min(ceiling, base + (input_tokens * factor)))
+      const payloadChars = structuredContents ? JSON.stringify(structuredContents).length : text.length;
+      const estimatedTokens = payloadChars / 3; // Conservative estimate
+      const msPerToken = parseFloat(process.env.CLI_STALL_MS_PER_TOKEN) || 1.5;
+      const baseStall = parseInt(process.env.CLI_STALL_TIMEOUT_MS) || 60000;
+      
+      const dynamicStallTimeout = Math.max(
+        baseStall,
+        Math.min(600000, baseStall + Math.round(estimatedTokens * msPerToken))
+      );
+      
+      if (dynamicStallTimeout > baseStall || process.env.GEMINI_DEBUG_PROMPTS === "true") {
+        console.log(`[GeminiController] [Turn ${turnId}] Dynamic Stall Timeout: ${dynamicStallTimeout}ms (Base: ${baseStall}ms, Estimated Tokens: ${Math.round(estimatedTokens)})`);
+      }
+
       const result = await new Promise((resolve, reject) => {
         const promiseStartTime = PERF_ENABLED ? performance.now() : 0;
         let lastResultJson = null;
@@ -852,10 +869,8 @@ export class GeminiController extends EventEmitter {
             clearTimeout(proc.stallTimer);
             proc.stallTimer = null;
           }
-          // Default to 60s. With Raw IO monitoring enabled, this is safe even for reasoning models,
-          // as any chunk or stderr log resets the timer. For aggressive fail-fast, users can 
-          // set CLI_STALL_TIMEOUT_MS to 30000.
-          const STALL_TIMEOUT_MS = parseInt(process.env.CLI_STALL_TIMEOUT_MS) || 60000;
+          // Default to 60s, or the dynamically calculated timeout for large prompts.
+          const STALL_TIMEOUT_MS = dynamicStallTimeout;
           proc.stallTimer = setTimeout(() => {
             console.error(
               `[GeminiController] [STALL FATAL] [Turn ${turnId}] No CLI output for ${STALL_TIMEOUT_MS / 1000}s. Killing stalled process.`,

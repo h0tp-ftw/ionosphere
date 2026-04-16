@@ -2287,6 +2287,10 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
 
     let stallRetries = 0;
     const MAX_STALL_RETRIES = 1; // (Initial + 1 retry = 2 attempts total)
+
+    let quotaRetries = 0;
+    const MAX_QUOTA_RETRIES = 2; // (Initial + 2 retries = 3 attempts total)
+
     let shouldRetry = false;
 
     const executeTask = async () => {
@@ -2477,20 +2481,42 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
           }
         }
       } catch (err) {
+        // [IONOSPHERE] Recognize Quota/Capacity errors for seamless fallback
+        const isQuotaError = /429|Quota|Capacity|RESOURCE_EXHAUSTED|MODEL_CAPACITY_EXHAUSTED/i.test(err.message);
+
         if (err.message.includes("stalled") && stallRetries < MAX_STALL_RETRIES) {
           stallRetries++;
           shouldRetry = true;
           console.log(`[API] Restarting executeTask for Turn ${activeTurnId} due to CLI stall. Attempt ${stallRetries}/${MAX_STALL_RETRIES}`);
+        } else if (isQuotaError && quotaRetries < MAX_QUOTA_RETRIES && process.env.GEMINI_SILENT_FALLBACK === "true") {
+          // Safety Check: Avoid content doubling by suppressing retry if text was already sent.
+          // Note: reasoning_content (thoughts) might have been sent, but we prioritize recovery.
+          if (accumulatedText.length > 0) {
+            console.warn(`[API] [Turn ${activeTurnId}] Quota error detected, but suppressed retry because ${accumulatedText.length} chars of text were already sent.`);
+            throw err;
+          }
+          
+          quotaRetries++;
+          shouldRetry = true;
+          console.log(`[API] Restarting executeTask for Turn ${activeTurnId} due to quota failure (Backing off 2s). Attempt ${quotaRetries}/${MAX_QUOTA_RETRIES}`);
+          await new Promise(r => setTimeout(r, 2000));
         } else {
           throw err;
         }
       }
 
       if (shouldRetry) {
+        // [IONOSPHERE] Full State Reset for retry
         accumulatedText = "";
+        accumulatedReasoning = "";
         accumulatedToolCalls = [];
+        accumulatedCitations = [];
+        cliFinishReason = null;
         expectedToolCallsCount = 0;
         receivedToolCallsCount = 0;
+        responseSent = false;
+        responseModel = req.body.model || process.env.GEMINI_MODEL || "gemini-2.5-flash-lite";
+
         stdoutToolCalls.clear();
         stdoutPendingQueues.clear();
         ipcHandledIds.clear();

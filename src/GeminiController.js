@@ -762,13 +762,23 @@ export class GeminiController extends EventEmitter {
             // as a RATE_LIMIT error so the client gets a proper 429 response instead
             // of an empty success that then has its error silently dropped.
             if (proc.pendingQuotaError) {
-              console.warn(
-                `[GeminiController] Turn ${turnId}: Intercepting empty result — surfacing pending RATE_LIMIT error to client.`,
-              );
-              if (activeCallbacks.onError) {
-                activeCallbacks.onError(
-                  createError(proc.pendingQuotaError, ErrorType.RATE_LIMIT, ErrorCode.RATE_LIMIT_EXCEEDED),
+              // If GEMINI_SILENT_FALLBACK is enabled, we skip calling onError here.
+              // This allows the orchestrator (index.js) to catch the final process 
+              // failure and trigger its own retry/fallback logic before the client 
+              // is notified of a terminal error.
+              if (process.env.GEMINI_SILENT_FALLBACK === "true") {
+                console.warn(
+                  `[GeminiController] Turn ${turnId}: Quota error detected, but SILENT_FALLBACK is active. Suppressing proactive onError and awaiting process close.`,
                 );
+              } else {
+                console.warn(
+                  `[GeminiController] Turn ${turnId}: Intercepting empty result — surfacing pending RATE_LIMIT error to client.`,
+                );
+                if (activeCallbacks.onError) {
+                  activeCallbacks.onError(
+                    createError(proc.pendingQuotaError, ErrorType.RATE_LIMIT, ErrorCode.RATE_LIMIT_EXCEEDED),
+                  );
+                }
               }
             } else {
               if (activeCallbacks.onResult) activeCallbacks.onResult(json);

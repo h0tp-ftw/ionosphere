@@ -2292,6 +2292,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
     const MAX_QUOTA_RETRIES = 2; // (Initial + 2 retries = 3 attempts total)
 
     let shouldRetry = false;
+    let retryQuotaError = false; // Set inside executeTask catch to preserve IPC/temp for quota retries
 
     const executeTask = async () => {
       let taskResolve;
@@ -2419,14 +2420,23 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
             }
           }
         }
+      } catch (execErr) {
+        // [IONOSPHERE] Detect quota errors early so the finally block can preserve
+        // IPC server and temp directory for the orchestrator's retry loop.
+        const isQuota = /429|Quota|Capacity|RESOURCE_EXHAUSTED|MODEL_CAPACITY_EXHAUSTED/i.test(execErr.message);
+        if (isQuota && process.env.GEMINI_SILENT_FALLBACK === "true" && quotaRetries < MAX_QUOTA_RETRIES) {
+          retryQuotaError = true;
+        }
+        throw execErr; // Re-throw for the do...while catch to handle
       } finally {
+        const pendingRetry = retryZeroOutput || retryQuotaError;
         const parkedCount = parkedTurns.size;
         console.log(
-          `[Turn ${activeTurnId}] Concluded. Active: ${currentlyRunning}/${MAX_CONCURRENT_CLI}, Parked: ${parkedCount}`,
+          `[Turn ${activeTurnId}] Concluded. Active: ${currentlyRunning}/${MAX_CONCURRENT_CLI}, Parked: ${parkedCount}${pendingRetry ? ' (retry pending)' : ''}`,
         );
 
         timer.mark('cleanup');
-        if (!retryZeroOutput) {
+        if (!pendingRetry) {
           if (activeTurnsByHash.get(fingerprint) === activeTurnId) {
             activeTurnsByHash.delete(fingerprint);
           }
@@ -2438,7 +2448,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         globalPromiseMap.delete(activeTurnId);
         if (taskResolve) taskResolve();
         
-        if (!retryZeroOutput) {
+        if (!pendingRetry) {
           ipcServer.close();
           if (process.platform !== "win32") {
             try {
@@ -2452,13 +2462,13 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
             `[Turn ${activeTurnId}] Retaining workspace due to GEMINI_DEBUG_KEEP_TEMP: ${turnTempDir}`,
           );
         } else {
-          if (!retryZeroOutput) {
+          if (!pendingRetry) {
             fs.rmSync(turnTempDir, { recursive: true, force: true });
           }
         }
         
         timer.measure('cleanup');
-        if (!retryZeroOutput) {
+        if (!pendingRetry) {
           timer.outputDir = (process.env.GEMINI_DEBUG_KEEP_TEMP === 'true') ? turnTempDir : null;
           timer.finish();
         }
@@ -2468,6 +2478,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
     do {
       shouldRetry = false;
       retryZeroOutput = false;
+      retryQuotaError = false;
 
       try {
         await enqueueControllerPrompt(executeTask);

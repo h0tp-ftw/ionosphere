@@ -892,7 +892,6 @@ export class GeminiController extends EventEmitter {
             lastStderrLines.push(stderrText);
             if (lastStderrLines.length > 5) lastStderrLines.shift();
 
-            lastStderr = stderrText.split("\n").slice(-3).join("\n"); // Keep last 3 lines
             const activeCallbacks = this.callbacksByTurn.get(turnId) || {};
             console.error(`[Gemini CLI STDERR] [Turn ${turnId}] ${stderrText}`);
 

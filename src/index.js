@@ -2283,6 +2283,18 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
     timer.measure('config_gen');
 
 
+    const MAX_QUOTA_RETRIES = 5;
+    const MAX_STALL_RETRIES = 5;
+    const MAX_ZERO_OUTPUT_RETRIES = 3;
+    const MAX_REPETITION_RETRIES = 2;
+
+    let quotaRetries = 0;
+    let stallRetries = 0;
+    let zeroOutputRetries = 0;
+    let repetitionRetries = 0;
+    let shouldRetry = false;
+    let pendingRetry = false;
+
     const executeTask = async () => {
       let taskResolve;
       const executePromise = new Promise((r) => (taskResolve = r));
@@ -2410,15 +2422,11 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
           }
         }
       } catch (execErr) {
-        // [IONOSPHERE] Detect quota errors early so the finally block can preserve
-        // IPC server and temp directory for the orchestrator's retry loop.
-        const isQuota = /429|Quota|Capacity|RESOURCE_EXHAUSTED|MODEL_CAPACITY_EXHAUSTED/i.test(execErr.message);
-        if (isQuota && process.env.GEMINI_SILENT_FALLBACK === "true" && quotaRetries < MAX_QUOTA_RETRIES) {
-          retryQuotaError = true;
+        if (execErr instanceof RetryableError) {
+          pendingRetry = true;
         }
         throw execErr; // Re-throw for the do...while catch to handle
       } finally {
-        const pendingRetry = retryZeroOutput || retryQuotaError;
         const parkedCount = parkedTurns.size;
         console.log(
           `[Turn ${activeTurnId}] Concluded. Active: ${currentlyRunning}/${MAX_CONCURRENT_CLI}, Parked: ${parkedCount}${pendingRetry ? ' (retry pending)' : ''}`,
@@ -2463,17 +2471,6 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         }
       }
     };
-
-    const MAX_QUOTA_RETRIES = 5;
-    const MAX_STALL_RETRIES = 5;
-    const MAX_ZERO_OUTPUT_RETRIES = 3;
-    const MAX_REPETITION_RETRIES = 2;
-
-    let quotaRetries = 0;
-    let stallRetries = 0;
-    let zeroOutputRetries = 0;
-    let repetitionRetries = 0;
-    let shouldRetry = false;
 
     do {
       shouldRetry = false;

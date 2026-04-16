@@ -978,6 +978,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
     // Clients like Cursor, OpenRouter, and reasoning-aware UIs will render this.
     const onThought = (json) => {
       if (responseSent || res.writableEnded) return;
+      if (process.env.STRIP_REASONING === "true") return;
       const reasoningText = json.content || json.description || json.summary || '';
       if (!reasoningText) return;
 

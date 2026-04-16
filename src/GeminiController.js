@@ -879,11 +879,14 @@ export class GeminiController extends EventEmitter {
             clearTimeout(proc.stallTimer);
             proc.stallTimer = null;
           }
-          // Default to 60s, or the dynamically calculated timeout for large prompts.
-          const STALL_TIMEOUT_MS = dynamicStallTimeout;
+          // [IONOSPHERE] Harmonization: If we haven't received the first byte yet,
+          // grant extra leeway (60s) to accommodate backend prefill latency.
+          const extraStall = !proc.firstByteTime ? 60000 : 0;
+          const STALL_TIMEOUT_MS = dynamicStallTimeout + extraStall;
+
           proc.stallTimer = setTimeout(() => {
             console.error(
-              `[GeminiController] [STALL FATAL] [Turn ${turnId}] No CLI output for ${STALL_TIMEOUT_MS / 1000}s. Killing stalled process.`,
+              `[GeminiController] [STALL FATAL] [Turn ${turnId}] No CLI output for ${STALL_TIMEOUT_MS / 1000}s. Killing stalled process. (Wait method: ${proc._perfSpawnMethod}, First byte: ${!!proc.firstByteTime})`,
             );
             proc.isStalled = true;
             proc.kill("SIGKILL");

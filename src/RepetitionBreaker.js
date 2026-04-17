@@ -23,6 +23,9 @@ export class RepetitionBreaker {
   checkToolRepeatLimit(proc, toolName, argsObj, historyHash, historyTools, activeCallbacks) {
     if (!proc) return false;
     
+    // MASTER TOGGLE: Allow disabling all repetition breaker logic for stress tests
+    if (process.env.GEMINI_DISABLE_REPETITION_BREAKER === "true") return false;
+
     // Scope repeat tracker to the process/turn to prevent persistence bugs on retries
     if (!proc.repeatTracker) proc.repeatTracker = new Map();
 
@@ -94,6 +97,9 @@ export class RepetitionBreaker {
     proc.accumulatedText = (proc.accumulatedText || "") + text;
     const accumulated = proc.accumulatedText;
 
+    // MASTER TOGGLE: Allow disabling all repetition breaker logic for stress tests
+    if (process.env.GEMINI_DISABLE_REPETITION_BREAKER === "true") return false;
+
     // Check 1: S+S full-response echo detection (catches 2-occurrence full duplications)
     const echoResult = this.checkFullEcho(accumulated);
     if (echoResult) {
@@ -113,9 +119,9 @@ export class RepetitionBreaker {
       return true; // Signal to kill process
     }
     
-    // Check 2: Original 3+ occurrence small-block repetition
+    // Check 2: Original N-occurrence block repetition
     if (accumulated.length > 600) {
-      const checkLen = 200;
+      const checkLen = parseInt(process.env.REPETITION_BLOCK_SIZE) || 200;
       const tail = accumulated.slice(-checkLen);
       
       let count = 0;
@@ -126,8 +132,10 @@ export class RepetitionBreaker {
         count++;
         searchFrom = idx + 1;
       }
+      
+      const threshold = parseInt(process.env.REPETITION_THRESHOLD) || 3;
 
-      if (count >= 3) {
+      if (count >= threshold) {
         console.error(
           `[RepetitionBreaker] WITHIN-TURN REPETITION: Turn ${turnId} repeated ${checkLen}-char block ${count} times.`,
         );
@@ -151,6 +159,9 @@ export class RepetitionBreaker {
   checkReasoningRepetition(proc, json, turnId, activeCallbacks) {
     const content = typeof json.content === "string" ? json.content : (json.thought || "");
     if (!content || content.length < 10) return false; // Ignore empty or trivial thoughts
+
+    // MASTER TOGGLE: Allow disabling all repetition breaker logic for stress tests
+    if (process.env.GEMINI_DISABLE_REPETITION_BREAKER === "true") return false;
 
     // 1. Exact Content Repetition Detection (Content-Agnostic)
     // Most reasoning loops repeat the exact same content block.

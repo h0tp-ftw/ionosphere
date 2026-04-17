@@ -2190,124 +2190,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
       );
     }
 
-    timer.measure('ipc_setup');
-    timer.mark('config_gen');
-
-    // Config
-    const settingsPath = path.join(turnTempDir, ".gemini", "settings.json");
-    const openAiTools = req.body.tools || null;
-    let mcpServers = null;
-    if (openAiTools || req.body.mcpServers) {
-      const toolBridgeEnv = {
-        TOOL_BRIDGE_IPC: ipcPath,
-        GEMINI_DEBUG_TOOLS: process.env.GEMINI_DEBUG_TOOLS || "false",
-        GEMINI_DEBUG_IPC: process.env.GEMINI_DEBUG_IPC || "false",
-      };
-      if (openAiTools) {
-        const toolsPath = path.join(turnTempDir, "tools.json");
-        // Universal Tool Support: We no longer prefix with 'ionosphere__'
-        // as Phase 2 hardening deactivates native tool collisions in the CLI.
-        const namespacedTools = [];
-        for (const t of openAiTools) {
-          const originalName = t.function?.name || t.name;
-
-          // Always deep-copy to avoid side-effects on the original req.body.tools
-          const toolCopy = JSON.parse(JSON.stringify(t));
-          const fn = toolCopy.function || toolCopy;
-
-          // ALWAYS disable 'strict' mode for all tools to prevent validation hallucinations
-          toolCopy.strict = false;
-          if (fn.strict !== undefined) fn.strict = false;
-
-          // Generic Schema Relaxation: Recursively remove problematic constraints (like 'format').
-          // We now PRESERVE 'required' and 'type' for model awareness.
-          loosenSchema(fn.parameters);
-
-          // Ensure the tool name is what the model expects (original name)
-          if (toolCopy.function) toolCopy.function.name = originalName;
-          else toolCopy.name = originalName;
-          namespacedTools.push(toolCopy);
-        }
-        fs.writeFileSync(toolsPath, JSON.stringify(namespacedTools, null, 2));
-        toolBridgeEnv.TOOL_BRIDGE_TOOLS = toolsPath;
-      }
-      if (req.body.mcpServers) {
-        const mcpPath = path.join(turnTempDir, "mcp_servers.json");
-        await fs.promises.writeFile(
-          mcpPath,
-          JSON.stringify(req.body.mcpServers, null, 2),
-        );
-        toolBridgeEnv.TOOL_BRIDGE_MCP_SERVERS = mcpPath;
-      }
-      mcpServers = {
-        [MCP_SERVER_ALIAS]: {
-          command: "node",
-          args: [TOOL_BRIDGE_PATH],
-          env: toolBridgeEnv,
-          trust: true,
-        },
-      };
-    }
-
-    const generationConfig = {};
-    if (req.body.max_tokens !== undefined)
-      generationConfig.maxOutputTokens = req.body.max_tokens;
-    if (req.body.max_completion_tokens !== undefined)
-      generationConfig.maxOutputTokens = req.body.max_completion_tokens;
-    if (req.body.temperature !== undefined)
-      generationConfig.temperature = req.body.temperature;
-    if (req.body.top_p !== undefined) generationConfig.topP = req.body.top_p;
-    if (req.body.top_k !== undefined) generationConfig.topK = req.body.top_k;
-    if (req.body.presence_penalty !== undefined)
-      generationConfig.presencePenalty = req.body.presence_penalty;
-    if (req.body.frequency_penalty !== undefined)
-      generationConfig.frequencyPenalty = req.body.frequency_penalty;
-    if (req.body.seed !== undefined) generationConfig.seed = req.body.seed;
-    if (req.body.n !== undefined) generationConfig.candidateCount = req.body.n;
-
-    if (req.body.logprobs) {
-      generationConfig.responseLogprobs = true;
-      if (req.body.top_logprobs !== undefined)
-        generationConfig.logprobs = req.body.top_logprobs;
-    }
-
-    if (req.body.stop) {
-      generationConfig.stopSequences = Array.isArray(req.body.stop)
-        ? req.body.stop
-        : [req.body.stop];
-    }
-
-    // Map OpenAI reasoning_effort to Gemini thinkingConfig
-    const reasoningEffort = req.body.reasoning_effort;
-    if (reasoningEffort) {
-      generationConfig.thinkingConfig = {
-        includeThoughts: true,
-      };
-      if (reasoningEffort === "low") {
-        generationConfig.thinkingConfig.thinkingBudget = 4096;
-      } else if (reasoningEffort === "medium") {
-        generationConfig.thinkingConfig.thinkingBudget = 16384;
-      } else if (reasoningEffort === "high") {
-        generationConfig.thinkingConfig.thinkingBudget = 32768;
-      }
-    }
-
-    // Explicit reasoning controls (Preview)
-    if (req.body.include_thoughts !== undefined || req.body.thinking_budget !== undefined) {
-      generationConfig.thinkingConfig = generationConfig.thinkingConfig || {};
-      if (req.body.include_thoughts !== undefined)
-        generationConfig.thinkingConfig.includeThoughts = !!req.body.include_thoughts;
-      if (req.body.thinking_budget !== undefined)
-        generationConfig.thinkingConfig.thinkingBudget = req.body.thinking_budget;
-    }
-
-    generateConfig({
-      targetPath: settingsPath,
-      mcpServers,
-      modelName: req.body.model,
-      generationConfig,
-    });
-    timer.measure('config_gen');
+    // Config and Generation moved into the retry loop to support dynamic fallback ladders.
 
 
     const MAX_QUOTA_RETRIES = 5;
@@ -2511,6 +2394,105 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
       retryZeroOutput = false;
 
       try {
+        // [IONOSPHERE] Dynamic Configuration Regeneration
+        // We regenerate settings.json for EVERY attempt to ensure that fallback models
+        // are correctly propagated to the Gemini CLI.
+        const settingsPath = path.join(turnTempDir, ".gemini", "settings.json");
+        const openAiTools = req.body.tools || null;
+        let mcpServers = null;
+
+        if (openAiTools || req.body.mcpServers) {
+          const toolBridgeEnv = {
+            TOOL_BRIDGE_IPC: ipcPath,
+            GEMINI_DEBUG_TOOLS: process.env.GEMINI_DEBUG_TOOLS || "false",
+            GEMINI_DEBUG_IPC: process.env.GEMINI_DEBUG_IPC || "false",
+          };
+          if (openAiTools) {
+            const toolsPath = path.join(turnTempDir, "tools.json");
+            const namespacedTools = [];
+            for (const t of openAiTools) {
+              const originalName = t.function?.name || t.name;
+              const toolCopy = JSON.parse(JSON.stringify(t));
+              const fn = toolCopy.function || toolCopy;
+              toolCopy.strict = false;
+              if (fn.strict !== undefined) fn.strict = false;
+              loosenSchema(fn.parameters);
+              if (toolCopy.function) toolCopy.function.name = originalName;
+              else toolCopy.name = originalName;
+              namespacedTools.push(toolCopy);
+            }
+            fs.writeFileSync(toolsPath, JSON.stringify(namespacedTools, null, 2));
+            toolBridgeEnv.TOOL_BRIDGE_TOOLS = toolsPath;
+          }
+          if (req.body.mcpServers) {
+            const mcpPath = path.join(turnTempDir, "mcp_servers.json");
+            await fs.promises.writeFile(
+              mcpPath,
+              JSON.stringify(req.body.mcpServers, null, 2),
+            );
+            toolBridgeEnv.TOOL_BRIDGE_MCP_SERVERS = mcpPath;
+          }
+          mcpServers = {
+            [MCP_SERVER_ALIAS]: {
+              command: "node",
+              args: [TOOL_BRIDGE_PATH],
+              env: toolBridgeEnv,
+              trust: true,
+            },
+          };
+        }
+
+        const generationConfig = {};
+        if (req.body.max_tokens !== undefined)
+          generationConfig.maxOutputTokens = req.body.max_tokens;
+        if (req.body.max_completion_tokens !== undefined)
+          generationConfig.maxOutputTokens = req.body.max_completion_tokens;
+        if (req.body.temperature !== undefined)
+          generationConfig.temperature = req.body.temperature;
+        if (req.body.top_p !== undefined) generationConfig.topP = req.body.top_p;
+        if (req.body.top_k !== undefined) generationConfig.topK = req.body.top_k;
+        if (req.body.presence_penalty !== undefined)
+          generationConfig.presencePenalty = req.body.presence_penalty;
+        if (req.body.frequency_penalty !== undefined)
+          generationConfig.frequencyPenalty = req.body.frequency_penalty;
+        if (req.body.seed !== undefined) generationConfig.seed = req.body.seed;
+        if (req.body.n !== undefined) generationConfig.candidateCount = req.body.n;
+
+        if (req.body.logprobs) {
+          generationConfig.responseLogprobs = true;
+          if (req.body.top_logprobs !== undefined)
+            generationConfig.logprobs = req.body.top_logprobs;
+        }
+
+        if (req.body.stop) {
+          generationConfig.stopSequences = Array.isArray(req.body.stop)
+            ? req.body.stop
+            : [req.body.stop];
+        }
+
+        const reasoningEffort = req.body.reasoning_effort;
+        if (reasoningEffort) {
+          generationConfig.thinkingConfig = { includeThoughts: true };
+          if (reasoningEffort === "low") generationConfig.thinkingConfig.thinkingBudget = 4096;
+          else if (reasoningEffort === "medium") generationConfig.thinkingConfig.thinkingBudget = 16384;
+          else if (reasoningEffort === "high") generationConfig.thinkingConfig.thinkingBudget = 32768;
+        }
+
+        if (req.body.include_thoughts !== undefined || req.body.thinking_budget !== undefined) {
+          generationConfig.thinkingConfig = generationConfig.thinkingConfig || {};
+          if (req.body.include_thoughts !== undefined)
+            generationConfig.thinkingConfig.includeThoughts = !!req.body.include_thoughts;
+          if (req.body.thinking_budget !== undefined)
+            generationConfig.thinkingConfig.thinkingBudget = req.body.thinking_budget;
+        }
+
+        generateConfig({
+          targetPath: settingsPath,
+          mcpServers,
+          modelName: responseModel, // CRITICAL: Use current fallback model
+          generationConfig,
+        });
+
         await enqueueControllerPrompt(executeTask);
       } catch (err) {
         if (err instanceof RetryableError) {

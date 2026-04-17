@@ -2319,6 +2319,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
     let stallRetries = 0;
     let zeroOutputRetries = 0;
     let repetitionRetries = 0;
+    let retryZeroOutput = false; 
     let shouldRetry = false;
     let pendingRetry = false;
 
@@ -2412,6 +2413,10 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
           structuredContents,
         );
 
+        if (retryZeroOutput) {
+          throw new RetryableError("Model returned zero output or was safety blocked", "zero_output");
+        }
+
         // Harvest CLI-level perf data from the sendPrompt result
         // (previously read from controller.processes which was always undefined
         //  because the process is deleted in the close handler before resolve)
@@ -2503,6 +2508,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
     do {
       shouldRetry = false;
       pendingRetry = false;
+      retryZeroOutput = false;
 
       try {
         await enqueueControllerPrompt(executeTask);

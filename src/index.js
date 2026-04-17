@@ -714,6 +714,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
     timer.turnId = activeTurnId;
 
     const turnTempDir = path.join(baseTempDir, activeTurnId); // Needed early for parsed logger
+    const settingsPath = path.join(turnTempDir, ".gemini", "settings.json");
 
     const logForensics = (data) => {
       const logFile = path.join(turnTempDir, "forensics.log");
@@ -2397,7 +2398,6 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         // [IONOSPHERE] Dynamic Configuration Regeneration
         // We regenerate settings.json for EVERY attempt to ensure that fallback models
         // are correctly propagated to the Gemini CLI.
-        const settingsPath = path.join(turnTempDir, ".gemini", "settings.json");
         const openAiTools = req.body.tools || null;
         let mcpServers = null;
 

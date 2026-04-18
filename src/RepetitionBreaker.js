@@ -157,20 +157,62 @@ export class RepetitionBreaker {
    * Returns true if a loop/collapse is detected and the process should be killed.
    */
   checkReasoningRepetition(proc, json, turnId, activeCallbacks) {
-    const content = typeof json.content === "string" ? json.content : (json.thought || "");
-    if (!content || content.length < 10) return false; // Ignore empty or trivial thoughts
-
     // MASTER TOGGLE: Allow disabling all repetition breaker logic for stress tests
     if (process.env.GEMINI_DISABLE_REPETITION_BREAKER === "true") return false;
 
-    // 1. Exact Content Repetition Detection (Content-Agnostic)
+    // 0. Global Reasoning Step Limit (Safety Net)
+    if (!proc.reasoningSteps) proc.reasoningSteps = 0;
+    proc.reasoningSteps++;
+
+    const maxSteps = parseInt(process.env.MAX_REASONING_STEPS) || 50;
+    if (proc.reasoningSteps > maxSteps) {
+      const errorMsg = `Response terminated: Model exceeded the global reasoning limit (${maxSteps} steps). This usually indicates a stuck thinking process.`;
+      console.error(`[RepetitionBreaker] THOUGHT LIMIT EXCEEDED: Turn ${turnId} reached ${proc.reasoningSteps} steps.`);
+      if (activeCallbacks.onError) {
+        activeCallbacks.onError({
+          message: errorMsg,
+          type: "server_error",
+          code: "reasoning_limit_reached",
+        });
+      }
+      return true;
+    }
+
+    // 1. Summary Repetition Detection
+    // Catches "cycling" loops where the model changes content but keeps the same higher-level intent.
+    const summary = json.summary || "";
+    if (summary && summary.length > 5) {
+      if (!proc.summaryMap) proc.summaryMap = new Map();
+      const sCount = (proc.summaryMap.get(summary) || 0) + 1;
+      proc.summaryMap.set(summary, sCount);
+
+      const sThreshold = parseInt(process.env.REPETITION_THRESHOLD) || 3;
+      if (sCount >= sThreshold) {
+        const errorMsg = `Response terminated: Model repeated the same reasoning summary ('${summary}') ${sCount} times.`;
+        console.error(`[RepetitionBreaker] IDENTICAL SUMMARY DETECTED: Turn ${turnId} for summary: "${summary}"`);
+        if (activeCallbacks.onError) {
+          activeCallbacks.onError({
+            message: errorMsg,
+            type: "server_error",
+            code: "reasoning_loop",
+          });
+        }
+        return true;
+      }
+    }
+
+    const content = typeof json.content === "string" ? json.content : (json.thought || "");
+    if (!content || content.length < 10) return false; // Ignore empty or trivial thoughts for the exact-content/substring checks
+
+    // 2. Exact Content Repetition Detection (Content-Agnostic)
     // Most reasoning loops repeat the exact same content block.
     if (!proc.thoughtMap) proc.thoughtMap = new Map();
     
     const count = (proc.thoughtMap.get(content) || 0) + 1;
     proc.thoughtMap.set(content, count);
 
-    if (count >= 3) {
+    const threshold = parseInt(process.env.REPETITION_THRESHOLD) || 3;
+    if (count >= threshold) {
       console.error(
         `[RepetitionBreaker] IDENTICAL THOUGHT DETECTED: Turn ${turnId} repeated the exact same reasoning block ${count} times.`,
       );

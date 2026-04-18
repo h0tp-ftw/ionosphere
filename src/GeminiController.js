@@ -592,10 +592,21 @@ export class GeminiController extends EventEmitter {
           }
           
           if (json.type === "message") {
-             const keys = Object.keys(json.content || {});
-             if (json.content?.thought || json.content?.thinking || json.thinking) {
-                console.log(`[GeminiController] [Turn ${turnId}] 🧠 DETECTED REASONING/THOUGHT tokens in message (Keys: ${keys.join(", ")}).`);
-             }
+            const contentObj = json.content || {};
+            const thought = contentObj.thought || contentObj.thinking || json.thinking;
+            if (thought) {
+              console.log(`[GeminiController] [Turn ${turnId}] 🧠 DETECTED REASONING/THOUGHT tokens in message.`);
+              // [IONOSPHERE] Reasoning Loop Watchdog for embedded thoughts
+              if (this.repetitionBreaker.checkReasoningRepetition(
+                proc,
+                { type: "thought", content: thought, summary: json.summary || "" },
+                turnId,
+                activeCallbacks
+              )) {
+                proc.kill("SIGKILL");
+                return;
+              }
+            }
           }
 
           // [IONOSPHERE] Handle explicit retry signal from mid-stream fallback

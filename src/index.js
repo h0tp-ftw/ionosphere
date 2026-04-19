@@ -989,6 +989,11 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         clearInterval(heartbeatInterval);
         heartbeatInterval = null;
       }
+
+      // [IONOSPHERE] Always accumulate text regardless of streaming status. 
+      // This is CRITICAL for the zero-content verification in onResult.
+      accumulatedText += text;
+
       if (isStreaming) {
         sendChunk({
           id: `chatcmpl-stream`,
@@ -997,8 +1002,6 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
           model: responseModel,
           choices: [{ index: 0, delta: { content: text } }],
         });
-      } else {
-        accumulatedText += text;
       }
     };
 
@@ -1011,6 +1014,10 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
       const reasoningText = json.content || json.description || json.summary || '';
       if (!reasoningText) return;
 
+      // [IONOSPHERE] Always accumulate reasoning regardless of streaming status.
+      // This ensures that reasoning-only turns are not incorrectly flagged as zero-output.
+      accumulatedReasoning += reasoningText;
+
       if (isStreaming) {
         sendChunk({
           id: `chatcmpl-stream`,
@@ -1019,8 +1026,6 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
           model: responseModel,
           choices: [{ index: 0, delta: { reasoning_content: reasoningText } }],
         });
-      } else {
-        accumulatedReasoning += reasoningText;
       }
     };
 
@@ -1209,12 +1214,19 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
       if (disconnectTimeout) clearTimeout(disconnectTimeout);
       finalStats = json.stats || {};
       const outTokens = finalStats.output_tokens || 0;
-      const hasNoContent = (outTokens === 0 || (accumulatedText || "").trim().length === 0) && accumulatedToolCalls.length === 0;
+      const textLen = (accumulatedText || "").trim().length;
+      const reasonLen = (accumulatedReasoning || "").trim().length;
+      const toolCount = accumulatedToolCalls.length;
+
+      // [IONOSPHERE] Refined Zero Output Check:
+      // A turn is only "Zero Output" if it produced NO tokens, OR it produced tokens
+      // but they yielded NO text AND NO reasoning AND NO tool calls.
+      const hasNoContent = (outTokens === 0 || (textLen === 0 && reasonLen === 0)) && toolCount === 0;
 
       // Case 2: Reactive Debugging Dump / Zero Output Retry
       if (hasNoContent) {
         if (zeroOutputRetries < MAX_ZERO_OUTPUT_RETRIES) {
-          console.warn(`[API] [Turn ${activeTurnId}] WARNING: Zero Output Turn (outTokens: ${outTokens}). Triggering seamless retry (${zeroOutputRetries + 1}/${MAX_ZERO_OUTPUT_RETRIES}). Dumping last 60 lines of raw CLI output for context:`);
+          console.warn(`[API] [Turn ${activeTurnId}] WARNING: Zero Output Turn (outTokens: ${outTokens}, textLen: ${textLen}, reasonLen: ${reasonLen}, tools: ${toolCount}). Triggering seamless retry (${zeroOutputRetries + 1}/${MAX_ZERO_OUTPUT_RETRIES}). Dumping last 60 lines of raw CLI output for context:`);
           const proc = controller.processes.get(activeTurnId);
           if (proc && proc.rawOutputBuffer) {
              console.log("----------------- [CLI RAW DUMP START] -----------------");
@@ -1226,7 +1238,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
           retryZeroOutput = true;
           return; // Skip sending to client and allow retry loop to catch it
         } else {
-          console.error(`[API] [Turn ${activeTurnId}] Repeated Zero Output Turns exhausted retries. Failing.`);
+          console.error(`[API] [Turn ${activeTurnId}] Repeated Zero Output Turns exhausted retries (outTokens: ${outTokens}, textLen: ${textLen}, reasonLen: ${reasonLen}, tools: ${toolCount}). Failing.`);
         }
       }
 

@@ -900,8 +900,8 @@ export class GeminiController extends EventEmitter {
             proc.stallTimer = null;
           }
           // [IONOSPHERE] Harmonization: If we haven't received the first byte yet,
-          // grant extra leeway (60s) to accommodate backend prefill latency.
-          const extraStall = !proc.firstByteTime ? 60000 : 0;
+          // grant extra leeway (180s) to accommodate backend prefill latency for massive prompts.
+          const extraStall = !proc.firstByteTime ? 180000 : 0;
           const STALL_TIMEOUT_MS = dynamicStallTimeout + extraStall;
 
           proc.stallTimer = setTimeout(() => {

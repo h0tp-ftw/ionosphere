@@ -975,14 +975,16 @@ export class GeminiController extends EventEmitter {
             proc.stallTimer = null;
           }
           clearTimeout(timeout);
+          const procRef = this.processes.get(turnId);
           const usageSummary =
-            Array.from(this.processes.get(turnId)?.toolUsage || []).join(
+            Array.from(procRef?.toolUsage || []).join(
               ", ",
             ) || "none";
           console.log(
             `[GeminiController] Process closed for turn ${turnId} with code ${code}. Tool Usage: [${usageSummary}]`,
           );
 
+          this.processes.delete(turnId);
           if (PERF_ENABLED) {
             proc._perfCloseTime = performance.now();
             proc._perfTotalCliMs = proc._perfCloseTime - (proc._perfPromiseStart || proc._perfCloseTime);
@@ -1000,8 +1002,6 @@ export class GeminiController extends EventEmitter {
           if (proc._historyFilePath) {
             try { fs.unlinkSync(proc._historyFilePath); } catch (_) {}
           }
-
-          this.processes.delete(turnId);
 
           // [IONOSPHERE] Unified Retry Signaling
           if (proc.pendingRetryError) {

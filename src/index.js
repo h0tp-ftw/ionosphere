@@ -1384,9 +1384,9 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
       }
     };
 
-    const executePark = (msg, force = false) => {
+    const executePark = (msg, force = false, isTimeout = false) => {
       if (process.env.GEMINI_DEBUG_PARALLEL === "true") {
-        console.log(`[Turn ${activeTurnId}] executePark entry for ${msg.name}. responseSent=${responseSent}, force=${force}, received=${receivedToolCallsCount}, expected=${expectedToolCallsCount}`);
+        console.log(`[Turn ${activeTurnId}] executePark entry for ${msg.name}. responseSent=${responseSent}, force=${force}, isTimeout=${isTimeout}, received=${receivedToolCallsCount}, expected=${expectedToolCallsCount}`);
       }
 
       if (!force && receivedToolCallsCount < expectedToolCallsCount) {
@@ -1538,8 +1538,8 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
             );
             pendingParkExecutes.delete(toolName);
             if (parkDebounceTimer) clearTimeout(parkDebounceTimer);
-            executePark(msg);
-          }, 2000),
+            executePark(msg, false, true); // Added isTimeout=true flag
+          }, 30000),
         });
       }
     };

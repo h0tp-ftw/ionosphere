@@ -806,7 +806,7 @@ export class GeminiController extends EventEmitter {
               // OPTIMIZATION: Early exit for zero-output success.
               // If the model generated 0 tokens (or only reasoning tokens) but reports success, 
               // we kill the process immediately to trigger the retry loop in index.js.
-              const hasNoContent = (json.stats?.output_tokens || 0) === 0 || (proc.accumulatedText || "").trim().length === 0;
+              const hasNoContent = ((json.stats?.output_tokens || 0) === 0 || (proc.accumulatedText || "").trim().length === 0) && (proc.toolUsage?.size || 0) === 0;
               
               if (json.status === "success" && hasNoContent) {
                 console.log(`[GeminiController] [Turn ${turnId}] Early exit for zero-content success to trigger immediate retry.`);
@@ -1062,13 +1062,16 @@ export class GeminiController extends EventEmitter {
       // Grab callbacks BEFORE finally runs and deletes them
       const activeCallbacks = this.callbacksByTurn.get(turnId) || {};
 
-      // If SILENT_FALLBACK is active and this is a quota/capacity error,
-      // do NOT call onError here. The orchestrator (index.js) needs to see
-      // the thrown error in its retry loop BEFORE the client is notified.
-      // Calling onError sets responseSent=true, which makes retry impossible.
+      // Suppression Logic: If this is a RetryableError (Zero output, Stall, Repetition, or Quota), 
+      // do NOT call onError here. The orchestrator (index.js) needs to see the thrown error 
+      // in its retry loop BEFORE the client is notified. Calling onError sets responseSent=true, 
+      // which makes orchestrator-level retries impossible.
+      const isRetryable = err && (err.name === "RetryableError" || err.isRetryable);
       const isQuotaError = /429|Quota|Capacity|RESOURCE_EXHAUSTED|MODEL_CAPACITY_EXHAUSTED/i.test(err.message);
-      if (isQuotaError && process.env.GEMINI_SILENT_FALLBACK === "true") {
-        console.warn(`[GeminiController] Turn ${turnId}: Quota error caught in sendPrompt catch block. Suppressing onError for orchestrator retry.`);
+      const shouldSuppress = isRetryable || (isQuotaError && process.env.GEMINI_SILENT_FALLBACK === "true");
+
+      if (shouldSuppress) {
+        console.warn(`[GeminiController] Turn ${turnId}: ${err.name || 'Error'} caught in sendPrompt. Suppressing proactive onError to allow orchestrator retry.`);
       } else if (activeCallbacks.onError) {
         activeCallbacks.onError(
           createError(err.message, ErrorType.SERVER, ErrorCode.INTERNAL_ERROR),

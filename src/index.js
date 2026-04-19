@@ -1207,15 +1207,14 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         return;
       }
       if (disconnectTimeout) clearTimeout(disconnectTimeout);
-      if (process.env.GEMINI_DEBUG_PARALLEL === "true") console.log(`[Turn ${activeTurnId}] onResult: Setting responseSent = true`);
-      responseSent = true;
       finalStats = json.stats || {};
-
-      // Case 2: Reactive Debugging Dump
       const outTokens = finalStats.output_tokens || 0;
-      if (outTokens === 0 && accumulatedText.length === 0 && accumulatedToolCalls.length === 0) {
+      const hasNoContent = (outTokens === 0 || (accumulatedText || "").trim().length === 0) && accumulatedToolCalls.length === 0;
+
+      // Case 2: Reactive Debugging Dump / Zero Output Retry
+      if (hasNoContent) {
         if (zeroOutputRetries < MAX_ZERO_OUTPUT_RETRIES) {
-          console.warn(`[API] [Turn ${activeTurnId}] WARNING: Zero Output Turn. Triggering seamless retry (${zeroOutputRetries + 1}/${MAX_ZERO_OUTPUT_RETRIES}). Dumping last 60 lines of raw CLI output for context:`);
+          console.warn(`[API] [Turn ${activeTurnId}] WARNING: Zero Output Turn (outTokens: ${outTokens}). Triggering seamless retry (${zeroOutputRetries + 1}/${MAX_ZERO_OUTPUT_RETRIES}). Dumping last 60 lines of raw CLI output for context:`);
           const proc = controller.processes.get(activeTurnId);
           if (proc && proc.rawOutputBuffer) {
              console.log("----------------- [CLI RAW DUMP START] -----------------");
@@ -1230,6 +1229,9 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
           console.error(`[API] [Turn ${activeTurnId}] Repeated Zero Output Turns exhausted retries. Failing.`);
         }
       }
+
+      if (process.env.GEMINI_DEBUG_PARALLEL === "true") console.log(`[Turn ${activeTurnId}] onResult: Setting responseSent = true`);
+      responseSent = true;
 
       // [IONOSPHERE] Map CLI finish_reason (Gemini values) to OpenAI values
       const mapFinishReason = (cliReason) => {

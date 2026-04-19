@@ -1389,6 +1389,22 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         console.log(`[Turn ${activeTurnId}] executePark entry for ${msg.name}. responseSent=${responseSent}, force=${force}, isTimeout=${isTimeout}, received=${receivedToolCallsCount}, expected=${expectedToolCallsCount}`);
       }
 
+      // [CRITICAL FIX] If this was a forced park from a sync timeout, and we STILL have NO tool calls,
+      // something is deeply wrong with CLI/stdout sync. DO NOT send an empty success to the client
+      // as it will lead to a loop. Instead, trigger an orchestrator-level retry.
+      if (isTimeout && accumulatedToolCalls.length === 0) {
+        console.error(`[Turn ${activeTurnId}] [FATAL SYNC ERROR] Forcing park on timeout for tool ${msg.name} but captured 0 tools. Triggering RetryableError instead of empty success.`);
+        const err = new RetryableError(
+          `Sync timeout: CLI parked for ${msg.name} but emitted no tool details on stdout within 30s.`,
+          "sync_timeout",
+          0,
+          false,
+          true // treat as stall/timeout
+        );
+        onError(err);
+        return;
+      }
+
       if (!force && receivedToolCallsCount < expectedToolCallsCount) {
         if (process.env.GEMINI_DEBUG_PARALLEL === "true") {
           console.log(`[Turn ${activeTurnId}] Parallel Sync: Delaying executePark for ${msg.name}. Waiting for ${expectedToolCallsCount - receivedToolCallsCount} more tools.`);

@@ -150,7 +150,6 @@ export class RepetitionBreaker {
         }
         return true; // Signal to kill process
       }
-    }
     return false;
   }
 

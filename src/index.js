@@ -1,3 +1,4 @@
+import "./env_loader.js";
 import express from "express";
 import cors from "cors";
 import multer from "multer";
@@ -5,7 +6,7 @@ import net from "net";
 import { GeminiController } from "./GeminiController.js";
 import fs from "fs";
 import path from "path";
-import { randomUUID } from "crypto";
+import { randomUUID, createHash } from "crypto";
 import { fileURLToPath } from "url";
 import { generateConfig } from "../scripts/generate_settings.js";
 import {
@@ -401,6 +402,12 @@ const globalPromiseMap = new Map();
 const MAX_CONCURRENT_CLI = parseInt(process.env.MAX_CONCURRENT_CLI) || 5;
 let currentlyRunning = 0;
 const requestQueue = [];
+
+const logForensics = (msg) => {
+  if (process.env.GEMINI_DEBUG_HANDOFF === "true") {
+    console.log(`[FORENSICS] ${msg}`);
+  }
+};
 
 // Helper: resolve a pending tool call with a result string.
 // If the callKey matches a parked turn, it unblocks the CLI logic.
@@ -949,13 +956,18 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
       heartbeatInterval = setInterval(() => {
         if (!responseSent && !res.writableEnded) {
           const elapsed = Math.round((Date.now() - startTime) / 1000);
-          console.log(`[Turn ${activeTurnId}] Still waiting for model response (elapsed: ${elapsed}s)...`);
+          const hijackContext = hijackedTurnId ? ` [HIJACKING Turn ${hijackedTurnId}]` : "";
+          const targetProc = hijackedTurnId ? controller.processes.get(hijackedTurnId) : controller.processes.get(activeTurnId);
+          const phase = targetProc?.currentPhase || "unknown";
+          const statusSuffix = ` (Phase: ${phase}, Alive: ${!!targetProc})`;
+          console.log(`[Turn ${activeTurnId}] Still waiting for model response (elapsed: ${elapsed}s)...${hijackContext}${statusSuffix}`);
           res.write(`: heartbeat\n\n`);
         } else {
           clearInterval(heartbeatInterval);
         }
       }, 20000);
     }
+
 
     let responseModel =
       req.body.model || process.env.GEMINI_MODEL || "gemini-2.5-flash-lite";
@@ -1129,7 +1141,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
     };
 
     const onError = async (err) => {
-      console.log(`[DEBUG] index.js: onError called with error: ${err.message || err}`);
+      console.log(`[Turn ${activeTurnId}] index.js: onError called. Message: ${err.message || err}. responseSent: ${responseSent}`);
       if (responseSent || res.writableEnded) {
         if (process.env.GEMINI_DEBUG_HANDOFF === "true")
           console.log(
@@ -1412,11 +1424,11 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         if (!parallelSafetyTimer) {
           parallelSafetyTimer = setTimeout(() => {
             if (process.env.GEMINI_DEBUG_PARALLEL === "true") {
-              console.warn(`[Turn ${activeTurnId}] Parallel sync safety timeout reached (1s). Forcing executePark for ${msg.name}. This usually happens when the CLI executes parallel tool calls sequentially.`);
+              console.warn(`[Turn ${activeTurnId}] Parallel sync safety timeout reached (200ms). Forcing executePark for ${msg.name}. This usually happens when the CLI executes parallel tool calls sequentially.`);
             }
             parallelSafetyTimer = null;
             executePark(msg, true);
-          }, 1000);
+          }, 200);
         }
         return;
       }
@@ -1713,13 +1725,13 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
           controller.updateCallbacks(hijackedTurnId, allCallbacks, extraEnv);
 
           // 2. Resolve or Re-emit
-          // Deep-scan: Check the last 10 messages for tool results.
+          // Deep-scan: Check the last 20 messages for tool results.
           // We scan BACKWARDS to find the most recent/relevant results first.
           let resolvedAny = false;
 
           // Race Condition Mitigation: wait a moment for the re-emission to arrive over IPC
           // if history indicates we have results to deliver.
-          const scanRange = messages.slice(-10);
+          const scanRange = messages.slice(-20);
           const hasUnresolvedResult = scanRange.some(
             (m) =>
               m.role === "tool" ||
@@ -1742,7 +1754,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
 
           if (process.env.GEMINI_DEBUG_HANDOFF === "true") {
             console.log(
-              `[FORENSICS] Handoff scanRange (last 10): ${JSON.stringify(
+              `[FORENSICS] Handoff scanRange (last 20): ${JSON.stringify(
                 scanRange.map((m) => ({
                   role: m.role,
                   tool_id: m.tool_call_id,
@@ -1755,8 +1767,9 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
                 2,
               )}`,
             );
+            const pendingIds = Array.from(pendingToolCalls.keys()).filter((k) => pendingToolCalls.get(k).turnId === hijackedTurnId);
             console.log(
-              `[FORENSICS] Pending tools for turn ${hijackedTurnId}: ${Array.from(pendingToolCalls.keys()).filter((k) => pendingToolCalls.get(k).turnId === hijackedTurnId)}`,
+              `[FORENSICS] Pending tools for turn ${hijackedTurnId}: ${pendingIds.join(', ') || 'none'}`,
             );
           }
 
@@ -1812,7 +1825,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
                           const match = nextContent.match(narrationPattern);
                           if (match && match[1]) {
                             console.log(
-                              `[API] Deep-scan match (Narrated): Extracted result for ${callId} from USER narration.`,
+                              `[API] Deep-scan match (Narrated): Extracted result for ${callId} from USER narration: "${match[1].substring(0, 100).replace(/\n/g, " ")}..."`,
                             );
                             resultData = match[1].trim();
                           }
@@ -1840,66 +1853,66 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
                 }
               }
             }
-            if (resolvedAny) break;
+            // Removed break to allow parallel tool resolution
           }
 
-          if (!resolvedAny) {
-            // If no results found in messages, it might be a Proxy Hijack (Retry)
-            // Re-emit the pending tool call so the client knows we are still waiting
-            let reemitted = false;
-            for (const [callKey, pending] of pendingToolCalls.entries()) {
-              if (pending.turnId === hijackedTurnId) {
-                const callId = `call_${callKey.substring(0, 8)}`;
-                const clientToolName =
-                  pending.clientName || stripMcpPrefix(pending.name);
+          // [IONOSPHERE] Partial Parallel Handoff Fix: 
+          // ALWAYS check for remaining pending tool calls after the history scan.
+          // If the model is still waiting for more tools, we must re-emit them to the client
+          // to prevent a deadlock where the model and client wait on each other.
+          let reemitted = false;
+          for (const [callKey, pending] of pendingToolCalls.entries()) {
+            if (pending.turnId === hijackedTurnId) {
+              const callId = `call_${callKey.substring(0, 8)}`;
+              const clientToolName =
+                pending.clientName || stripMcpPrefix(pending.name);
 
-                // Forensics: Log the arguments we are re-emitting
-                const argsLog =
-                  typeof pending.arguments === "string"
-                    ? pending.arguments
-                    : JSON.stringify(pending.arguments);
-                console.log(
-                  `[API] Proxy Hijack: Re-emitting call ${callId} for tool '${clientToolName}' (Internal: ${pending.name}) FULL ARGS: ${argsLog}`,
-                );
-
-                onToolCall({
-                  id: callId,
-                  name: clientToolName,
-                  arguments: pending.arguments,
-                });
-
-                // End the request since we are just re-emitting a parked state
-                onPark({
-                  id: callId,
-                  name: clientToolName,
-                  arguments: pending.arguments,
-                });
-                reemitted = true;
-                logForensics(`HANDOFF: Proxy Hijack re-emitted call ${callId} for tool '${clientToolName}'.`);
-                break;
-              }
-            }
-            if (!reemitted) {
-              console.warn(
-                `[API] Proxy Hijack: No pending tool call found for Turn ${hijackedTurnId}. Falling back.`,
+              // Forensics: Log the arguments we are re-emitting
+              const argsLog =
+                typeof pending.arguments === "string"
+                  ? pending.arguments
+                  : JSON.stringify(pending.arguments);
+              console.log(
+                `[API] Proxy Hijack: Re-emitting call ${callId} for tool '${clientToolName}' (Internal: ${pending.name}) FULL ARGS: ${argsLog}`,
               );
-              logForensics(`HANDOFF: No pending tool call found for Turn ${hijackedTurnId}. Falling back.`);
-              hijackedTurnId = null;
-              // Fall through to NEW TURN CASE
-            } else {
-              timer.measure('handoff');
-              timer.addMeta('path', 're-emit');
-              timer.finish();
-              return; // Request handled by re-emit
+
+              onToolCall({
+                id: callId,
+                name: clientToolName,
+                arguments: pending.arguments,
+              });
+
+              // End the request since we are just re-emitting a parked state
+              onPark({
+                id: callId,
+                name: clientToolName,
+                arguments: pending.arguments,
+              });
+              reemitted = true;
+              logForensics(`HANDOFF: Proxy Hijack re-emitted call ${callId} for tool '${clientToolName}'.`);
+              break;
             }
-          } else {
-            // 3. Await the conclusion of the TASK from the new request side
-            timer.measure('handoff');
-            timer.addMeta('path', 'tool-resolution');
-            timer.finish();
-            await parked.executePromise;
-            return;
           }
+          if (!reemitted) {
+            console.warn(
+              `[API] Proxy Hijack: No pending tool call found for Turn ${hijackedTurnId}. Falling back.`,
+            );
+            logForensics(`HANDOFF: No pending tool call found for Turn ${hijackedTurnId}. Falling back.`);
+            hijackedTurnId = null;
+            // Fall through to NEW TURN CASE
+          } else {
+            timer.measure('handoff');
+            timer.addMeta('path', 're-emit');
+            timer.finish();
+            return; // Request handled by re-emit
+          }
+
+          // 3. Await the conclusion of the TASK from the new request side
+          timer.measure('handoff');
+          timer.addMeta('path', 'tool-resolution');
+          timer.finish();
+          await parked.executePromise;
+          return;
         }
       }
     }
@@ -2133,12 +2146,19 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
                   ? msg.arguments
                   : JSON.stringify(msg.arguments || {});
 
+              // Calculate a content hash for ID-less matching fallback
+              const contentHash = createHash('sha256')
+                .update(`${msg.name}:${argsStr}`)
+                .digest('hex')
+                .substring(0, 16);
+
               pendingToolCalls.set(callKey, {
                 socket,
                 turnId: activeTurnId,
                 name: msg.name, // Internal namespaced name
                 clientName: clientToolName, // Stripped name for client compatibility
                 arguments: argsStr,
+                contentHash,
               });
 
               // Ensure the turn is marked as PARKED if it wasn't already

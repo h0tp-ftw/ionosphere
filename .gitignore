@@ -9,6 +9,7 @@ temp/
 uploads/
 files.json
 *.log
+perf_timing.jsonl
 
 # Python artifacts
 __pycache__/

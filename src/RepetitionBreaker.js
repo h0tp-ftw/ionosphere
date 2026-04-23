@@ -120,9 +120,11 @@ export class RepetitionBreaker {
     }
     
     // Check 2: Original N-occurrence block repetition
-    if (accumulated.length > 600) {
+      // [IONOSPHERE] Fuzzy Match: Look for repetitions of the START of the last block 
+      // to ignore trailing variations like timestamps or random IDs.
       const checkLen = parseInt(process.env.REPETITION_BLOCK_SIZE) || 200;
-      const tail = accumulated.slice(-checkLen);
+      const fuzzyLen = Math.floor(checkLen * 0.75); // Check first 75% of the block
+      const tail = accumulated.slice(-checkLen, - (checkLen - fuzzyLen));
       
       let count = 0;
       let searchFrom = 0;
@@ -137,7 +139,7 @@ export class RepetitionBreaker {
 
       if (count >= threshold) {
         console.error(
-          `[RepetitionBreaker] WITHIN-TURN REPETITION: Turn ${turnId} repeated ${checkLen}-char block ${count} times.`,
+          `[RepetitionBreaker] WITHIN-TURN REPETITION (Fuzzy): Turn ${turnId} repeated ${fuzzyLen}-char prefix ${count} times.`,
         );
         if (activeCallbacks.onError) {
           activeCallbacks.onError({
@@ -233,7 +235,8 @@ export class RepetitionBreaker {
 
     if (accumulated.length > 500) {
       const checkLen = 150;
-      const tail = accumulated.slice(-checkLen);
+      const fuzzyLen = 110; // ~75%
+      const tail = accumulated.slice(-checkLen, - (checkLen - fuzzyLen));
       
       let subCount = 0;
       let searchFrom = 0;
@@ -246,7 +249,7 @@ export class RepetitionBreaker {
 
       if (subCount >= 3) {
         console.error(
-          `[RepetitionBreaker] REASONING SUBSTRING LOOP: Turn ${turnId} repeated ${checkLen}-char block ${subCount} times in thoughts.`,
+          `[RepetitionBreaker] REASONING SUBSTRING LOOP (Fuzzy): Turn ${turnId} repeated ${fuzzyLen}-char prefix ${subCount} times in thoughts.`,
         );
         if (activeCallbacks.onError) {
           activeCallbacks.onError({

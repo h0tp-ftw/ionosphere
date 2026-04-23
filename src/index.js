@@ -1705,6 +1705,15 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
     if (hijackedTurnId && parkedTurns.has(hijackedTurnId)) {
       timer.mark('handoff');
       const parked = parkedTurns.get(hijackedTurnId);
+      
+      // [IONOSPHERE] Restore fallback state for hijacked turns.
+      // This ensures that if a handoff fails due to quota, it can continue down the ladder.
+      if (parked.modelQueue) {
+        modelQueue = [...parked.modelQueue];
+        responseModel = parked.responseModel;
+        console.log(`[API] [Turn ${activeTurnId}] Restored model ladder from hijacked turn ${hijackedTurnId}: ${responseModel} (Remaining: ${modelQueue.length} models)`);
+      }
+
       const proc = controller.processes.get(hijackedTurnId);
 
       if (!proc || proc.killed) {
@@ -2277,6 +2286,8 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
                     }
                   },
                   historyHash,
+                  modelQueue: [...modelQueue], // Preserve the current ladder state
+                  responseModel: responseModel
                 };
                 parkedTurns.set(activeTurnId, parkedInfo);
                 console.log(`[TRACE] IPC: EMITTING parked:${activeTurnId}`);

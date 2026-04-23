@@ -126,14 +126,21 @@ export class RepetitionBreaker {
       const fuzzyLen = Math.floor(checkLen * 0.75); // Check first 75% of the block
       const tail = accumulated.slice(-checkLen, - (checkLen - fuzzyLen));
       
+      // [IONOSPHERE] Performance Optimization: Limit search range to the last 10,000 characters.
+      // Searching the entire 250k+ buffer on every chunk was blocking the event loop.
+      const searchWindow = 10000;
+      const searchStartIndex = Math.max(0, accumulated.length - searchWindow);
+      const searchBuffer = accumulated.slice(searchStartIndex);
+      
       let count = 0;
       let searchFrom = 0;
       while (true) {
-        const idx = accumulated.indexOf(tail, searchFrom);
+        const idx = searchBuffer.indexOf(tail, searchFrom);
         if (idx === -1) break;
         count++;
         searchFrom = idx + 1;
       }
+
       
       const threshold = parseInt(process.env.REPETITION_THRESHOLD) || 3;
 
@@ -237,14 +244,20 @@ export class RepetitionBreaker {
       const fuzzyLen = 110; // ~75%
       const tail = accumulated.slice(-checkLen, - (checkLen - fuzzyLen));
       
+      // [IONOSPHERE] Performance Optimization: Limit search range to last 10,000 chars
+      const searchWindow = 10000;
+      const searchStartIndex = Math.max(0, accumulated.length - searchWindow);
+      const searchBuffer = accumulated.slice(searchStartIndex);
+
       let subCount = 0;
       let searchFrom = 0;
       while (true) {
-        const idx = accumulated.indexOf(tail, searchFrom);
+        const idx = searchBuffer.indexOf(tail, searchFrom);
         if (idx === -1) break;
         subCount++;
         searchFrom = idx + 1;
       }
+
 
       if (subCount >= 3) {
         console.error(

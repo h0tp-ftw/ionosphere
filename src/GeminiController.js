@@ -419,7 +419,7 @@ export class GeminiController extends EventEmitter {
       
       const estimatedTokens = Math.max(100, payloadChars / 3); // Floor of 100 tokens
       const msPerToken = parseFloat(process.env.CLI_STALL_MS_PER_TOKEN) || 10; // Increased from 1.5 for reasoning
-      const baseStall = parseInt(process.env.CLI_STALL_TIMEOUT_MS) || 120000; // Increased from 60000 for complex turns
+      const baseStall = parseInt(process.env.CLI_STALL_TIMEOUT_MS) || 180000; // Increased from 120000 for complex turns
       
       const dynamicStallTimeout = Math.max(
         baseStall,
@@ -599,6 +599,14 @@ export class GeminiController extends EventEmitter {
             console.log(
               `[Turn ${turnId}] CLI Raw Line: ${JSON.stringify(json)}`,
             );
+          }
+
+          // [IONOSPHERE] Forensic: Track latency from tool result to resume
+          if (proc.lastResultInjectedAt) {
+             const resumeLatency = Date.now() - proc.lastResultInjectedAt;
+             console.log(`[GeminiController] [Turn ${turnId}] Resume latency: ${resumeLatency}ms after tool result (Phase: ${proc.currentPhase})`);
+             delete proc.lastResultInjectedAt;
+             proc.currentPhase = "executing";
           } else if (json.type !== "message" || process.env.GEMINI_DEBUG_RAW === "true") {
             console.log(
               `[Turn ${turnId}] CLI Raw Line: ${json.type}${json.role ? " [" + json.role + "]" : ""}`,
@@ -914,7 +922,7 @@ export class GeminiController extends EventEmitter {
             proc.stallTimer = null;
           }
           // [IONOSPHERE] Dynamic Stall Timeout calculation (Synchronized)
-          const baseStall = parseInt(process.env.CLI_STALL_TIMEOUT_MS) || 120000;
+          const baseStall = parseInt(process.env.CLI_STALL_TIMEOUT_MS) || 180000;
           const msPerToken = parseFloat(process.env.CLI_STALL_MS_PER_TOKEN) || 10;
           const estimatedTokens = (proc._perfStdinPayloadBytes || 0) / 3;
           const dynamicStallTimeout = Math.max(baseStall, Math.min(900000, baseStall + Math.round(estimatedTokens * msPerToken)));
@@ -927,12 +935,18 @@ export class GeminiController extends EventEmitter {
           }
 
           proc.stallTimer = setTimeout(() => {
+            const lastLine = (proc.rawOutputBuffer && proc.rawOutputBuffer.length > 0) 
+              ? proc.rawOutputBuffer[proc.rawOutputBuffer.length - 1] 
+              : "none";
             console.error(
-              `[GeminiController] [STALL FATAL] [Turn ${turnId}] No CLI output for ${STALL_TIMEOUT_MS / 1000}s. Killing stalled process. (Wait method: ${proc._perfSpawnMethod}, First byte: ${!!proc.firstByteTime})`,
+              `[GeminiController] [STALL FATAL] [Turn ${turnId}] No CLI output for ${STALL_TIMEOUT_MS / 1000}s. ` +
+              `Current Phase: ${proc.currentPhase || 'unknown'}. ` +
+              `Last CLI line: "${lastLine.substring(0, 100)}". ` +
+              `Killing stalled process. (Wait method: ${proc._perfSpawnMethod}, First byte: ${!!proc.firstByteTime})`
             );
             proc.isStalled = true;
             proc.pendingRetryError = new RetryableError(
-              `CLI stalled after ${STALL_TIMEOUT_MS / 1000}s`,
+              `CLI stalled after ${STALL_TIMEOUT_MS / 1000}s (Phase: ${proc.currentPhase})`,
               "stall",
               0,
               false,
@@ -941,6 +955,9 @@ export class GeminiController extends EventEmitter {
             proc.kill("SIGKILL");
           }, STALL_TIMEOUT_MS);
         };
+
+        // Expose the reset function so the orchestrator can keep us alive while parked
+        proc.resetStallTimer = resetStallTimer;
 
         // Initially arm it (will be reset/re-armed on data)
         resetStallTimer();

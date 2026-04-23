@@ -404,7 +404,7 @@ let currentlyRunning = 0;
 const requestQueue = [];
 
 const logForensics = (msg) => {
-  if (process.env.GEMINI_DEBUG_HANDOFF === "true") {
+  if (process.env.GEMINI_DEBUG_HANDOFF !== "false") {
     console.log(`[FORENSICS] ${msg}`);
   }
 };
@@ -420,6 +420,18 @@ const resolveToolCall = (callKey, result) => {
     return false;
   }
   pendingToolCalls.delete(callKey);
+
+  // [IONOSPHERE] State Persistence: Reset the stall timer of the parent process
+  // when we receive and resolve a tool call. This prevents the process from
+  // being killed while the tool (potentially high-latency) is executing.
+  const proc = controller.processes.get(pending.turnId);
+  if (proc && typeof proc.resetStallTimer === "function") {
+    if (process.env.GEMINI_DEBUG_IPC === "true") {
+      console.log(`[IPC] Resetting stall timer for Turn ${pending.turnId} due to tool resolution (${callKey})`);
+    }
+    proc.resetStallTimer();
+  }
+
   try {
     // Robust Extraction: Detect and unwrap MCP/OpenAI-style content blocks
     let extractedResult = result;
@@ -454,6 +466,15 @@ const resolveToolCall = (callKey, result) => {
     console.log(
       `[IPC] Sending result to turn ${pending.turnId} for tool ${callKey}`,
     );
+    
+    // [IONOSPHERE] Keep-alive: Reset the stall timer in the controller
+    // since the CLI is about to resume activity after receiving this result.
+    const proc = controller.processes.get(pending.turnId);
+    if (proc && proc.resetStallTimer) {
+      if (process.env.GEMINI_DEBUG_IPC === "true") console.log(`[IPC] Resetting stall timer for Turn ${pending.turnId}`);
+      proc.resetStallTimer();
+    }
+
     if (process.env.GEMINI_DEBUG_IPC === "true") {
       const snippet =
         resultStr.length > 500
@@ -464,8 +485,17 @@ const resolveToolCall = (callKey, result) => {
       );
     }
 
+    const sendStartTime = Date.now();
     pending.socket.write(
       JSON.stringify({ event: "tool_result", result: resultStr }) + "\n",
+      () => {
+        const sendDuration = Date.now() - sendStartTime;
+        console.log(`[IPC] Result delivered to socket for Turn ${pending.turnId} (${sendDuration}ms). Waiting for CLI activity...`);
+        if (proc) {
+          proc.lastResultInjectedAt = Date.now();
+          proc.currentPhase = "awaiting_resume_after_tool";
+        }
+      }
     );
     pending.socket.end();
     console.log(
@@ -483,8 +513,9 @@ async function enqueueControllerPrompt(executeTask) {
   }
   currentlyRunning++;
   const start = Date.now();
+  const parkedCount = parkedTurns.size;
   console.log(
-    `[Queue] CLI task started. Active: ${currentlyRunning}/${MAX_CONCURRENT_CLI}, Parked: ${parkedTurns.size}, Queue: ${requestQueue.length}`,
+    `[Queue] CLI task started. Active: ${currentlyRunning}/${MAX_CONCURRENT_CLI}, Parked: ${parkedCount}, Queue: ${requestQueue.length}`,
   );
   try {
     await executeTask();
@@ -1456,6 +1487,13 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         `[Turn ${activeTurnId}] Yielding response on Parked state. Tool: ${msg.name}`,
       );
 
+      // [IONOSPHERE] Keep-alive: Reset stall timer while parked
+      const proc = controller.processes.get(activeTurnId);
+      if (proc && proc.resetStallTimer) {
+        if (process.env.GEMINI_DEBUG_IPC === "true") console.log(`[Sync] Resetting stall timer for Turn ${activeTurnId} (Parked)`);
+        proc.resetStallTimer();
+      }
+
       if (isStreaming) {
         // Send finish_reason if we have tool calls
         sendChunk({
@@ -1523,7 +1561,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
       }
     };
 
-    const onPark = (msg) => {
+    const onPark = (msg, bypassSync = false) => {
       const toolName = stripMcpPrefix(msg.name);
 
       if (process.env.GEMINI_DEBUG_PARALLEL === "true") {
@@ -1538,7 +1576,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         clearTimeout(parkDebounceTimer);
       }
 
-      if (stdoutToolCalls.has(toolName)) {
+      if (stdoutToolCalls.has(toolName) || bypassSync) {
         if (process.env.GEMINI_DEBUG_RAW === "true" || process.env.GEMINI_DEBUG_PARALLEL === "true") {
           console.log(
             `[Sync] Tool ${toolName} already emitted by stdout. Executing debounced park.`,
@@ -1752,35 +1790,44 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
             await new Promise((r) => setTimeout(r, 50));
           }
 
-          if (process.env.GEMINI_DEBUG_HANDOFF === "true") {
-            console.log(
-              `[FORENSICS] Handoff scanRange (last 20): ${JSON.stringify(
-                scanRange.map((m) => ({
-                  role: m.role,
-                  tool_id: m.tool_call_id,
-                  content:
-                    typeof m.content === "string"
-                      ? m.content.substring(0, 50)
-                      : "obj",
-                })),
-                null,
-                2,
-              )}`,
-            );
-            const pendingIds = Array.from(pendingToolCalls.keys()).filter((k) => pendingToolCalls.get(k).turnId === hijackedTurnId);
-            console.log(
-              `[FORENSICS] Pending tools for turn ${hijackedTurnId}: ${pendingIds.join(', ') || 'none'}`,
-            );
-          }
+          const pendingForThisTurn = Array.from(pendingToolCalls.entries())
+            .filter(([_, p]) => p.turnId === hijackedTurnId);
+          
+          console.log(
+            `[FORENSICS] Handoff scanRange (last 20): ${JSON.stringify(
+              scanRange.map((m) => ({
+                role: m.role,
+                tool_id: m.tool_call_id,
+                name: m.name, // For older OpenAI/function roles
+                contentSnippet: typeof m.content === "string" ? m.content.substring(0, 30) : "obj"
+              })),
+              null,
+              2,
+            )}`,
+          );
+          console.log(
+            `[FORENSICS] Pending tools for turn ${hijackedTurnId}: ${pendingForThisTurn.map(([k, p]) => `${k} (${p.clientName})`).join(', ') || 'none'}`,
+          );
+
 
           // First pass: look for AUTHENTIC tool results
           for (let i = scanRange.length - 1; i >= 0; i--) {
             const msg = scanRange[i];
             if (msg.role === "tool" || msg.role === "function") {
               const callId = msg.tool_call_id;
-              const shortKey = callId?.startsWith("call_")
-                ? callId.substring(5)
-                : callId;
+              // [IONOSPHERE] Enhanced ID Cleaning:
+              // 1. Strip 'call' or 'call_' prefix
+              // 2. Strip trailing digits (some clients append them for retries, e.g. callABC1, callABC2)
+              const shortKey = callId
+                ?.replace(/^call_?/, "")
+                ?.replace(/\d+$/, "");
+
+
+              // [IONOSPHERE] Diagnostic logging (Optional)
+              if (process.env.GEMINI_DEBUG_HANDOFF === "true") {
+                console.log(`[IPC] Deep-scan: Checking message with role=${msg.role}, tool_id=${callId} (shortKey=${shortKey})`);
+              }
+
 
               let resultData = msg.content;
               if (Array.isArray(resultData)) {
@@ -1797,7 +1844,12 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
 
               if (shortKey) {
                 for (const [callKey, pending] of pendingToolCalls.entries()) {
-                  if (callKey.startsWith(shortKey)) {
+                  // FORCED LOGGING
+                  console.log(`[IPC] Comparing pending callKey=${callKey} with shortKey=${shortKey}`);
+
+                  // [IONOSPHERE] Broad Match: check if the callKey contains the shortKey or vice-versa
+                  // Also added contentHash fallback match (experimental)
+                  if (callKey.startsWith(shortKey) || shortKey.startsWith(callKey) || (callKey.length > 8 && shortKey === callKey.substring(0, 8))) {
                     if (isGarbage) {
                       // If this is garbage, see if the NEXT message is a USER narration of this tool result
                       const nextMsg = scanRange[i + 1];
@@ -1843,12 +1895,29 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
                     }
 
                     console.log(
-                      `[API] Deep-scan match: Resolving ${callId} (Tool: ${pending.name}) for turn ${hijackedTurnId}`,
+                      `[API] Deep-scan match: Resolving ${callId || 'fuzzy'} (Tool: ${pending.name}) for turn ${hijackedTurnId}`,
                     );
-                    logForensics(`HANDOFF: Deep-scan matched callId ${callId} (Tool: ${pending.name}). Resolving.`);
+                    logForensics(`HANDOFF: Deep-scan matched callId ${callId || 'fuzzy'} (Tool: ${pending.name}). Resolving.`);
                     resolveToolCall(callKey, resultData);
                     resolvedAny = true;
                     break;
+                  }
+                }
+              }
+
+              // [IONOSPHERE] Fuzzy Fallback: If we couldn't match by ID but we have a tool result,
+              // check if we can match by tool name (clientName) if only one of that type is pending.
+              if (!resolvedAny && (msg.role === "tool" || msg.role === "function")) {
+                const toolNameFromMsg = msg.name || ""; // function-role often has 'name'
+                for (const [callKey, pending] of pendingToolCalls.entries()) {
+                  if (pending.turnId === hijackedTurnId) {
+                    // If the tool name matches or we only have ONE tool pending anyway, treat it as a match
+                    if (pendingForThisTurn.length === 1 || (toolNameFromMsg && pending.clientName === toolNameFromMsg)) {
+                       console.log(`[API] Deep-scan Fuzzy Match: Matching by name/order for ${pending.clientName}`);
+                       resolveToolCall(callKey, resultData);
+                       resolvedAny = true;
+                       break;
+                    }
                   }
                 }
               }
@@ -1866,6 +1935,17 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
               const callId = `call_${callKey.substring(0, 8)}`;
               const clientToolName =
                 pending.clientName || stripMcpPrefix(pending.name);
+
+              // [IONOSPHERE] Loop Protection: Stop infinite re-emission
+              pending.reemitCount = (pending.reemitCount || 0) + 1;
+              if (pending.reemitCount > 5) {
+                console.error(`[API] Proxy Hijack: DEADBOLT loop detected for ${callId} on turn ${hijackedTurnId}. Terminating.`);
+                logForensics(`HANDOFF: DEADBOLT loop detected for ${callId}. Terminating.`);
+                controller.cancelCurrentTurn(hijackedTurnId);
+                pendingToolCalls.delete(callKey);
+                hijackedTurnId = null;
+                break;
+              }
 
               // Forensics: Log the arguments we are re-emitting
               const argsLog =
@@ -1887,7 +1967,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
                 id: callId,
                 name: clientToolName,
                 arguments: pending.arguments,
-              });
+              }, true); // Bypassing sync for Proxy Hijack (it will NEVER arrive on stdout)
               reemitted = true;
               logForensics(`HANDOFF: Proxy Hijack re-emitted call ${callId} for tool '${clientToolName}'.`);
               break;
@@ -2559,11 +2639,11 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
               responseModel = modelQueue.shift();
               console.log(`[API] [Turn ${activeTurnId}] Unified Retry: Quota Fallback (${quotaRetries}/${MAX_QUOTA_RETRIES}). Switching: ${oldModel} -> ${responseModel}`);
             } else {
-              console.log(`[API] [Turn ${activeTurnId}] Unified Retry: Quota (Attempt ${quotaRetries}/${MAX_QUOTA_RETRIES}). Backing off 2s...`);
+              console.log(`[API] [Turn ${activeTurnId}] Unified Retry: Quota (Attempt ${quotaRetries}/${MAX_QUOTA_RETRIES}). Backing off 10s...`);
             }
             
             shouldRetry = true;
-            await new Promise(r => setTimeout(r, 2000));
+            await new Promise(r => setTimeout(r, 10000));
           } else if (err.isStall && stallRetries < MAX_STALL_RETRIES) {
             stallRetries++;
             shouldRetry = true;

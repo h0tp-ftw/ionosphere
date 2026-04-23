@@ -805,8 +805,16 @@ export class GeminiController extends EventEmitter {
           } else if (json.type === "error") {
             if (activeCallbacks.onError) activeCallbacks.onError(json);
           } else if (json.type === "result") {
-            // Flush any pending text before the final result event
-            if (proc.cleaner) proc.cleaner.flush();
+            // [IONOSPHERE] Heartbeat: Monitor for event loop lockup during large turn cleanup
+            console.log(`[GeminiController] [Turn ${turnId}] Final result received. Entering final repetition check (flush)...`);
+            if (proc.cleaner) {
+              try {
+                proc.cleaner.flush();
+                console.log(`[GeminiController] [Turn ${turnId}] Final repetition check (flush) complete.`);
+              } catch (e) {
+                console.error(`[GeminiController] [Turn ${turnId}] CRITICAL: Repetition check failed: ${e.message}`);
+              }
+            }
 
             lastResultJson = json;
             if (json.stats) {

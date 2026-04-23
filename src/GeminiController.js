@@ -445,9 +445,13 @@ export class GeminiController extends EventEmitter {
             if (this.processes.has(turnId)) {
                console.error(`[GeminiController] [Turn ${turnId}] STALL: No output from CLI for ${dynamicStallTimeout}ms. Killing process.`);
                const p = this.processes.get(turnId);
-               if (p) p.kill("SIGKILL");
+               if (p) {
+                 p.isStallKill = true;
+                 p.kill("SIGKILL");
+               }
             }
           }, dynamicStallTimeout);
+
         };
         
         // Expose to proc for manual resets via IPC/Bridge
@@ -1103,7 +1107,13 @@ export class GeminiController extends EventEmitter {
           }
 
           // [IONOSPHERE] Unified Retry Signaling
+          if (proc.isStallKill) {
+            reject(new RetryableError(`CLI stalled (no output for ${dynamicStallTimeout}ms)`, "stall"));
+            return;
+          }
+
           if (proc.pendingRetryError) {
+
             reject(proc.pendingRetryError);
             return;
           }

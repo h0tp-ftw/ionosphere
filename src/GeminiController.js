@@ -230,6 +230,7 @@ export class GeminiController extends EventEmitter {
     proc.warmAccumulator = accumulator;
     
     proc.stdout.on("data", (chunk) => {
+       if (proc.resetStallTimer) proc.resetStallTimer();
        const lines = chunk.toString().split("\n");
        for (const line of lines) {
          if (line.trim()) {
@@ -508,7 +509,7 @@ export class GeminiController extends EventEmitter {
           accumulator = new JsonlAccumulator();
           proc.rawOutputBuffer = []; // Reactive Debugging
           proc.stdout.on("data", (chunk) => {
-            if (resetStallTimer) resetStallTimer();
+            if (proc.resetStallTimer) proc.resetStallTimer();
             if (!proc.firstByteTime) {
               proc.firstByteTime = Date.now();
               proc.currentPhase = "responding";
@@ -946,48 +947,10 @@ export class GeminiController extends EventEmitter {
           }
         }
 
-        // [STALL DETECTOR] Reset timer on ANY stdout or stderr activity.
-        // This ensures the process is considered "alive" as long as it's emitting tokens,
-        // logs, or debug info, even if it hasn't finished a complete JSONL line yet.
-        resetStallTimer = () => {
-          if (proc.stallTimer) {
-            clearTimeout(proc.stallTimer);
-            proc.stallTimer = null;
-          }
-          // [IONOSPHERE] Dynamic Stall Timeout calculation (Synchronized)
-          const baseStall = parseInt(process.env.CLI_STALL_TIMEOUT_MS) || 180000;
-          const msPerToken = parseFloat(process.env.CLI_STALL_MS_PER_TOKEN) || 10;
-          const estimatedTokens = (proc._perfStdinPayloadBytes || 0) / 3;
-          const dynamicStallTimeout = Math.max(baseStall, Math.min(900000, baseStall + Math.round(estimatedTokens * msPerToken)));
-          
-          const extraStall = !proc.firstByteTime ? 60000 : 0;
-          const STALL_TIMEOUT_MS = dynamicStallTimeout + extraStall;
+        // [IONOSPHERE] The stall detector is now initialized and managed 
+        // at the top of sendPrompt via attachStallProtection().
+        // No redundant definition needed here.
 
-          if (GEMINI_DEBUG_HANDOFF) {
-            console.log(`[GeminiController] [Turn ${turnId}] Dynamic Stall Threshold: ${Math.round(STALL_TIMEOUT_MS/1000)}s (Base: ${baseStall}, EstTokens: ${Math.round(estimatedTokens)})`);
-          }
-
-          proc.stallTimer = setTimeout(() => {
-            const lastLine = (proc.rawOutputBuffer && proc.rawOutputBuffer.length > 0) 
-              ? proc.rawOutputBuffer[proc.rawOutputBuffer.length - 1] 
-              : "none";
-            console.error(
-              `[GeminiController] [STALL FATAL] [Turn ${turnId}] No CLI output for ${STALL_TIMEOUT_MS / 1000}s. ` +
-              `Current Phase: ${proc.currentPhase || 'unknown'}. ` +
-              `Last CLI line: "${lastLine.substring(0, 100)}". ` +
-              `Killing stalled process. (Wait method: ${proc._perfSpawnMethod}, First byte: ${!!proc.firstByteTime})`
-            );
-            proc.isStalled = true;
-            proc.pendingRetryError = new RetryableError(
-              `CLI stalled after ${STALL_TIMEOUT_MS / 1000}s (Phase: ${proc.currentPhase})`,
-              "stall",
-              0,
-              false,
-              true // isStall
-            );
-            proc.kill("SIGKILL");
-          }, STALL_TIMEOUT_MS);
-        };
 
         // Expose the reset function so the orchestrator can keep us alive while parked
         proc.resetStallTimer = resetStallTimer;

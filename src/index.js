@@ -384,13 +384,30 @@ console.log(
   `Starting Gemini Ionosphere (${sessionMode === "stateful" ? "Session-Aware" : "Stateless"} Mode)...`,
 );
 const controller = new GeminiController();
+
+// [IONOSPHERE] Automated Teardown for Parked Turns
+// When a process finally exits (regardless of whether it was hijacked or parked),
+// we ensure its workspace and metadata are purged.
+controller.on("turn_closed", (turnId) => {
+  const parked = parkedTurns.get(turnId);
+  if (parked) {
+    if (process.env.GEMINI_DEBUG_KEEP_TEMP !== "true") {
+      console.log(`[Turn ${turnId}] Process exited. Triggering deferred workspace cleanup.`);
+      if (typeof parked.cleanupWorkspace === "function") {
+        try { parked.cleanupWorkspace(); } catch (_) {}
+      }
+    }
+    parkedTurns.delete(turnId);
+  }
+});
+
 const WARM_HANDOFF_ENABLED = process.env.WARM_HANDOFF_ENABLED !== "false";
 console.log(
   `[Config] Warm Handoff: ${WARM_HANDOFF_ENABLED ? "ENABLED" : "DISABLED"}`,
 );
 
 // Global state for Warm Stateless Handoff
-// pendingToolCalls: callKey -> { socket, turnId }
+
 const pendingToolCalls = new Map();
 // parkedTurns: turnId -> { controller, executePromise, resolveTask, cleanupWorkspace, historyHash }
 const parkedTurns = new Map();
@@ -532,34 +549,38 @@ async function enqueueControllerPrompt(executeTask) {
   }
 }
 
-// Garbage Collector: Force-delete temp/ directories older than GC_WORKSPACE_TTL_MS (default: 60 minutes)
+// Garbage Collector: Force-delete temp/ entries older than GC_WORKSPACE_TTL_MS (default: 30 minutes)
 setInterval(
   () => {
     try {
       if (fs.existsSync(baseTempDir)) {
         const now = Date.now();
-        const gcTtlMs = parseInt(process.env.GC_WORKSPACE_TTL_MS) || 60 * 60 * 1000;
+        const gcTtlMs = parseInt(process.env.GC_WORKSPACE_TTL_MS) || 30 * 60 * 1000;
         const entries = fs.readdirSync(baseTempDir, { withFileTypes: true });
+        
         for (const entry of entries) {
-          if (entry.isDirectory()) {
-            const dirPath = path.join(baseTempDir, entry.name);
-            const stats = fs.statSync(dirPath);
-            if (now - stats.mtimeMs > gcTtlMs) {
-              // Check if turn is still parked OR actively running
-              if (!parkedTurns.has(entry.name) && !controller.processes.has(entry.name)) {
-                if (process.env.GEMINI_DEBUG_KEEP_TEMP === "true") {
-                  if (process.env.GEMINI_DEBUG_RAW === "true") {
-                    console.log(
-                      `[GC] Skipping cleanup of workspace due to GEMINI_DEBUG_KEEP_TEMP: ${entry.name}`,
-                    );
-                  }
-                } else {
-                  console.log(
-                    `[GC] Sweeping abandoned workspace (TTL: ${Math.round(gcTtlMs / 60000)}m): ${entry.name}`,
-                  );
-                  fs.rmSync(dirPath, { recursive: true, force: true });
-                }
-              }
+          const entryPath = path.join(baseTempDir, entry.name);
+          const stats = fs.statSync(entryPath);
+          
+          if (now - stats.mtimeMs > gcTtlMs) {
+            const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(entry.name);
+            const isHistoryFile = entry.name.startsWith("turn-") && entry.name.endsWith("-history.json");
+            const isDebugFile = entry.name.endsWith(".txt") || entry.name.endsWith(".json");
+
+            // Safety Check: Never delete if currently active in Ionosphere state maps
+            const turnIdMatch = entry.name.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+            const associatedTurnId = turnIdMatch ? turnIdMatch[0] : entry.name;
+            
+            if (parkedTurns.has(associatedTurnId) || controller.processes.has(associatedTurnId)) {
+              continue; 
+            }
+
+            if (entry.isDirectory() && isUUID) {
+              console.log(`[GC] Sweeping abandoned workspace: ${entry.name}`);
+              fs.rmSync(entryPath, { recursive: true, force: true });
+            } else if (entry.isFile() && (isHistoryFile || isDebugFile)) {
+              console.log(`[GC] Sweeping orphaned temp file: ${entry.name}`);
+              fs.unlinkSync(entryPath);
             }
           }
         }
@@ -570,6 +591,7 @@ setInterval(
   },
   5 * 60 * 1000,
 ); // Run every 5 minutes
+
 
 // Process Safety
 process.on("SIGINT", () => {
@@ -2474,13 +2496,18 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
         }
         throw execErr; // Re-throw for the do...while catch to handle
       } finally {
+        const isActuallyParked = parkedTurns.has(activeTurnId);
         const parkedCount = parkedTurns.size;
+        
         console.log(
-          `[Turn ${activeTurnId}] Concluded. Active: ${currentlyRunning}/${MAX_CONCURRENT_CLI}, Parked: ${parkedCount}${pendingRetry ? ' (retry pending)' : ''}`,
+          `[Turn ${activeTurnId}] Concluded. Active: ${currentlyRunning}/${MAX_CONCURRENT_CLI}, Parked: ${parkedCount}${pendingRetry ? ' (retry pending)' : ''}${isActuallyParked ? ' (staying parked)' : ''}`,
         );
 
         timer.mark('cleanup');
-        if (!pendingRetry) {
+        
+        // Only perform teardown if we aren't waiting for a tool result (parking) 
+        // and aren't about to retry the same turn.
+        if (!pendingRetry && !isActuallyParked) {
           if (activeTurnsByHash.get(fingerprint) === activeTurnId) {
             activeTurnsByHash.delete(fingerprint);
           }
@@ -2488,35 +2515,33 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
             activeTurnsByHash.delete(historyHash);
           }
           parkedTurns.delete(activeTurnId);
-        }
-        globalPromiseMap.delete(activeTurnId);
-        if (taskResolve) taskResolve();
-        
-        if (!pendingRetry) {
+          
           ipcServer.close();
           if (process.platform !== "win32") {
             try {
               if (fs.existsSync(ipcPath)) fs.unlinkSync(ipcPath);
             } catch (_) { }
           }
-        }
-        
-        if (process.env.GEMINI_DEBUG_KEEP_TEMP === "true") {
-          console.log(
-            `[Turn ${activeTurnId}] Retaining workspace due to GEMINI_DEBUG_KEEP_TEMP: ${turnTempDir}`,
-          );
-        } else {
-          if (!pendingRetry) {
+
+          if (process.env.GEMINI_DEBUG_KEEP_TEMP === "true") {
+            console.log(
+              `[Turn ${activeTurnId}] Retaining workspace due to GEMINI_DEBUG_KEEP_TEMP: ${turnTempDir}`,
+            );
+          } else {
             fs.rmSync(turnTempDir, { recursive: true, force: true });
           }
         }
+
+        globalPromiseMap.delete(activeTurnId);
+        if (taskResolve) taskResolve();
         
         timer.measure('cleanup');
-        if (!pendingRetry) {
+        if (!pendingRetry && !isActuallyParked) {
           timer.outputDir = (process.env.GEMINI_DEBUG_KEEP_TEMP === 'true') ? turnTempDir : null;
           timer.finish();
         }
       }
+
     };
 
     do {

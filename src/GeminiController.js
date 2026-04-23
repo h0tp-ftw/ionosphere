@@ -1037,6 +1037,8 @@ export class GeminiController extends EventEmitter {
           );
 
           this.processes.delete(turnId);
+          this.emit("turn_closed", turnId);
+
           if (PERF_ENABLED) {
             proc._perfCloseTime = performance.now();
             proc._perfTotalCliMs = proc._perfCloseTime - (proc._perfPromiseStart || proc._perfCloseTime);

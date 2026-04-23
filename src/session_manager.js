@@ -75,39 +75,122 @@ export const findHijackedTurnId = (messages, historyHash, fingerprint, activeTur
     let hijackedTurnId = null;
     let matchType = null;
 
-    // 1. Tool Call ID Match (Deep Scan)
+    // 1. Tool Call ID Match (Deep Scan - Tool Results)
     // We scan the last few messages for tool results. If we find a tool result
     // that matches a pending tool call, we hijack that turn.
-    // This is robust against history truncation and non-last-message scenarios.
-    const scanRange = messages.slice(-10); // Check last 10 messages to be safe
-    for (const msg of [...scanRange].reverse()) { // Reverse to prioritize recent
+    const scanRange = messages.slice(-10);
+    for (const msg of [...scanRange].reverse()) {
         if (msg.role === 'tool' || msg.role === 'function') {
             const callId = msg.tool_call_id;
             const shortKey = callId?.startsWith('call_') ? callId.substring(5) : callId;
 
             if (shortKey) {
-                if (debug) {
-                    console.log(`[Handoff] Deep-scan checking callId: ${callId} (short: ${shortKey})`);
-                }
-
-                // Find the full callKey in pendingToolCalls
                 for (const [callKey, pending] of pendingToolCalls.entries()) {
                     if (callKey.startsWith(shortKey)) {
                         hijackedTurnId = pending.turnId;
                         matchType = 'tool_call';
-                        console.log(`[API] Hijack discovery: Match found for ${callId} -> Turn ${hijackedTurnId}`);
+                        console.log(`[API] Hijack discovery: Match found via tool_id ${callId} -> Turn ${hijackedTurnId}`);
                         if (PERF_ENABLED) {
                             findHijackedTurnId._lastDurationMs = performance.now() - start;
                             findHijackedTurnId._pendingToolCallsSize = pendingToolCalls.size;
                         }
-                        return { turnId: hijackedTurnId, matchType }; // Immediate return on strong match
+                        return { turnId: hijackedTurnId, matchType };
                     }
                 }
             }
         }
     }
 
-    // 2. Hash/Fingerprint Match
+    // 2. Assistant Tool Call Match (Proxy Scan)
+    // If the history ends with (or near) an assistant tool call that is in pendingToolCalls,
+    // and the user just replied to it (or it's a retry), hijack it.
+    for (const msg of [...scanRange].reverse()) {
+        if (msg.role === 'assistant' && msg.tool_calls) {
+            for (const tc of msg.tool_calls) {
+                const callId = tc.id || tc.tool_call_id;
+                const shortKey = callId?.startsWith('call_') ? callId.substring(5) : callId;
+                if (shortKey) {
+                    for (const [callKey, pending] of pendingToolCalls.entries()) {
+                        if (callKey.startsWith(shortKey)) {
+                            hijackedTurnId = pending.turnId;
+                            matchType = 'assistant_tool_match';
+                            console.log(`[API] Hijack discovery: Match found via assistant tool_call ${callId} -> Turn ${hijackedTurnId}`);
+                            if (PERF_ENABLED) {
+                                findHijackedTurnId._lastDurationMs = performance.now() - start;
+                                findHijackedTurnId._pendingToolCallsSize = pendingToolCalls.size;
+                            }
+                            return { turnId: hijackedTurnId, matchType };
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Tool Content Match (Exact Args Fallback)
+    // If we have an assistant tool call but no ID match, compare the hash of the 
+    // tool name and arguments. This is the ultimate "exact form" check.
+    for (const msg of [...scanRange].reverse()) {
+        if (msg.role === 'assistant' && msg.tool_calls) {
+            for (const tc of msg.tool_calls) {
+                const toolName = tc.function?.name || tc.name;
+                const rawArgs = tc.function?.arguments || tc.arguments || "{}";
+                const argsStr = typeof rawArgs === 'string' ? rawArgs : JSON.stringify(rawArgs);
+                
+                // Note: We use the namespaced name matching logic if needed, 
+                // but usually the bridge handles the 'mcp_io_' prefix.
+                // We'll check both the raw name and the prefixed name for robustness.
+                const namespacedName = `mcp_io_${toolName}`;
+
+                const contentHash = createHash('sha256')
+                    .update(`${toolName}:${argsStr}`)
+                    .digest('hex')
+                    .substring(0, 16);
+                
+                const namespacedHash = createHash('sha256')
+                    .update(`${namespacedName}:${argsStr}`)
+                    .digest('hex')
+                    .substring(0, 16);
+
+                for (const [callKey, pending] of pendingToolCalls.entries()) {
+                    if (pending.contentHash === contentHash || pending.contentHash === namespacedHash) {
+                        hijackedTurnId = pending.turnId;
+                        matchType = 'tool_content_match';
+                        console.log(`[API] Hijack discovery: Match found via tool content hash for ${toolName} -> Turn ${hijackedTurnId}`);
+                        if (PERF_ENABLED) {
+                            findHijackedTurnId._lastDurationMs = performance.now() - start;
+                            findHijackedTurnId._pendingToolCallsSize = pendingToolCalls.size;
+                        }
+                        return { turnId: hijackedTurnId, matchType };
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. Sliding History Match (Continuity Match)
+    // If we can't match via tool IDs, we check if the current history (minus last message)
+    // matches a previously active turn. This is extremely robust for simple continuations.
+    if (messages.length > 1) {
+        // Try matching history minus 1, 2, or 3 messages (to account for narrations/metadata)
+        for (let i = 1; i <= 3 && messages.length > i; i++) {
+            const subHistory = messages.slice(0, -i);
+            const subHash = getHistoryHash(subHistory);
+            const candidateTurnId = activeTurnsByHash.get(subHash);
+            if (candidateTurnId && parkedTurns.has(candidateTurnId)) {
+                hijackedTurnId = candidateTurnId;
+                matchType = `history_parent_${i}`;
+                console.log(`[HIJACK] Parent History Match (Offset ${i}): Turn ${hijackedTurnId}`);
+                if (PERF_ENABLED) {
+                    findHijackedTurnId._lastDurationMs = performance.now() - start;
+                    findHijackedTurnId._pendingToolCallsSize = pendingToolCalls.size;
+                }
+                return { turnId: hijackedTurnId, matchType };
+            }
+        }
+    }
+
+    // 5. Hash/Fingerprint Match (Legacy/Retry)
     const byHash = activeTurnsByHash.get(historyHash);
     const byFinger = activeTurnsByHash.get(fingerprint);
 
@@ -116,28 +199,16 @@ export const findHijackedTurnId = (messages, historyHash, fingerprint, activeTur
         matchType = 'hash';
         console.log(`[HIJACK] Exact Hash Match (Thread Safe): Turn ${hijackedTurnId}`);
     } else if (byFinger && parkedTurns.has(byFinger)) {
-        // Priority: If the turn is already Parked, we MUST hijack it to deliver the next message (approval/data)
         hijackedTurnId = byFinger;
         matchType = 'fingerprint_parked';
         console.log(`[HIJACK] Fingerprint Match (Parked Turn): Turn ${hijackedTurnId}`);
     } else if (byFinger) {
-        // We have a fingerprint match, but it's not parked.
-        // It might be a tool continuation where the history changed (so hash mismatch),
-        // but since we didn't find a tool call match in step 1,
-        // this is likely a NEW instruction or a retry on an active turn.
-
-        // We check if the LAST message is a tool result. If so, we might have missed it in pendingToolCalls
-        // (e.g. server restart lost state), but we should try to attach to the fingerprinted turn
-        // if it's the same conversation.
         const lastMsg = messages[messages.length - 1];
         if (lastMsg && (lastMsg.role === 'tool' || lastMsg.role === 'function')) {
             hijackedTurnId = byFinger;
             matchType = 'fingerprint_tool';
             console.log(`[HIJACK] Fingerprint Anchor Match (Tool Continuation, Fallback): Turn ${hijackedTurnId}`);
         } else {
-            // New Instruction / Retry on active turn
-            // This case is handled by the caller (Preemption/Cancellation) or Wait-and-Hijack logic
-            // We return matching turn ID, caller decides what to do.
             hijackedTurnId = byFinger;
             matchType = 'fingerprint_active';
             if (debug) console.log(`[HIJACK] Fingerprint Match (Active/Unknown state): Turn ${hijackedTurnId}`);
@@ -155,3 +226,4 @@ export const findHijackedTurnId = (messages, historyHash, fingerprint, activeTur
 
     return null;
 };
+

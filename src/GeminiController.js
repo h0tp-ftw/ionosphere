@@ -406,15 +406,20 @@ export class GeminiController extends EventEmitter {
       // Calculate dynamic stall timeout based on prompt size to prevent false-positives
       // during long context prefill phases.
       // Formula: max(floor, min(ceiling, base + (input_tokens * factor)))
-      const payloadChars = structuredContents ? JSON.stringify(structuredContents).length : text.length;
-      const estimatedTokens = payloadChars / 3; // Conservative estimate
-      const msPerToken = parseFloat(process.env.CLI_STALL_MS_PER_TOKEN) || 1.5;
-      const baseStall = parseInt(process.env.CLI_STALL_TIMEOUT_MS) || 60000;
+      const structLen = (structuredContents && Array.isArray(structuredContents)) ? JSON.stringify(structuredContents).length : 0;
+      const rawLen = (text && typeof text === 'string') ? text.length : 0;
+      const payloadChars = Math.max(structLen, rawLen);
+      
+      const estimatedTokens = Math.max(100, payloadChars / 3); // Floor of 100 tokens
+      const msPerToken = parseFloat(process.env.CLI_STALL_MS_PER_TOKEN) || 10; // Increased from 1.5 for reasoning
+      const baseStall = parseInt(process.env.CLI_STALL_TIMEOUT_MS) || 120000; // Increased from 60000 for complex turns
       
       const dynamicStallTimeout = Math.max(
         baseStall,
-        Math.min(600000, baseStall + Math.round(estimatedTokens * msPerToken))
+        Math.min(900000, baseStall + Math.round(estimatedTokens * msPerToken))
       );
+
+
       
       if (dynamicStallTimeout > baseStall || process.env.GEMINI_DEBUG_PROMPTS === "true") {
         console.log(`[GeminiController] [Turn ${turnId}] Dynamic Stall Timeout: ${dynamicStallTimeout}ms (Base: ${baseStall}ms, Estimated Tokens: ${Math.round(estimatedTokens)})`);
@@ -1062,13 +1067,16 @@ export class GeminiController extends EventEmitter {
       // Grab callbacks BEFORE finally runs and deletes them
       const activeCallbacks = this.callbacksByTurn.get(turnId) || {};
 
-      // Suppression Logic: If this is a RetryableError (Zero output, Stall, Repetition, or Quota), 
-      // do NOT call onError here. The orchestrator (index.js) needs to see the thrown error 
-      // in its retry loop BEFORE the client is notified. Calling onError sets responseSent=true, 
-      // which makes orchestrator-level retries impossible.
+      // Suppression Logic: If this is a RetryableError, do NOT call onError here
+      // UNLESS the turn was hijacked. Hijacked turns (Wait-and-Hijack or Handoff)
+      // are not part of the orchestrator retry loop and would hang forever 
+      // if the error is suppressed.
       const isRetryable = err && (err.name === "RetryableError" || err.isRetryable);
       const isQuotaError = /429|Quota|Capacity|RESOURCE_EXHAUSTED|MODEL_CAPACITY_EXHAUSTED/i.test(err.message);
-      const shouldSuppress = isRetryable || (isQuotaError && process.env.GEMINI_SILENT_FALLBACK === "true");
+      const isHijacked = !!activeCallbacks.hijackedFrom;
+      
+      const shouldSuppress = !isHijacked && (isRetryable || (isQuotaError && process.env.GEMINI_SILENT_FALLBACK === "true"));
+
 
       if (shouldSuppress) {
         console.warn(`[GeminiController] Turn ${turnId}: ${err.name || 'Error'} caught in sendPrompt. Suppressing proactive onError to allow orchestrator retry.`);

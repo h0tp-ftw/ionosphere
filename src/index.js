@@ -5,7 +5,7 @@ import net from "net";
 import { GeminiController } from "./GeminiController.js";
 import fs from "fs";
 import path from "path";
-import { randomUUID } from "crypto";
+import { randomUUID, createHash } from "crypto";
 import { fileURLToPath } from "url";
 import { generateConfig } from "../scripts/generate_settings.js";
 import {
@@ -2117,12 +2117,19 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
                   ? msg.arguments
                   : JSON.stringify(msg.arguments || {});
 
+              // Calculate a content hash for ID-less matching fallback
+              const contentHash = createHash('sha256')
+                .update(`${msg.name}:${argsStr}`)
+                .digest('hex')
+                .substring(0, 16);
+
               pendingToolCalls.set(callKey, {
                 socket,
                 turnId: activeTurnId,
                 name: msg.name, // Internal namespaced name
                 clientName: clientToolName, // Stripped name for client compatibility
                 arguments: argsStr,
+                contentHash,
               });
 
               // Ensure the turn is marked as PARKED if it wasn't already

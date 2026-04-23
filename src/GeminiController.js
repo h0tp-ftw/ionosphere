@@ -437,7 +437,24 @@ export class GeminiController extends EventEmitter {
         let lastResultJson = null;
         let proc = null;
         let accumulator = null;
-        let resetStallTimer = null;
+        let stallTimer = null;
+        
+        const resetStallTimer = () => {
+          if (stallTimer) clearTimeout(stallTimer);
+          stallTimer = setTimeout(() => {
+            if (this.processes.has(turnId)) {
+               console.error(`[GeminiController] [Turn ${turnId}] STALL: No output from CLI for ${dynamicStallTimeout}ms. Killing process.`);
+               const p = this.processes.get(turnId);
+               if (p) p.kill("SIGKILL");
+            }
+          }, dynamicStallTimeout);
+        };
+        
+        // Expose to proc for manual resets via IPC/Bridge
+        const attachStallProtection = (p) => {
+          p.resetStallTimer = resetStallTimer;
+          resetStallTimer();
+        };
 
         const currentPool = this.warmPool.get(hashKey) || [];
         if (currentPool.length > 0) {
@@ -446,6 +463,7 @@ export class GeminiController extends EventEmitter {
             proc = currentPool.splice(readyIdx, 1)[0];
             accumulator = proc.warmAccumulator;
             proc._perfSpawnMethod = "warm";
+            attachStallProtection(proc);
             console.log(`[GeminiController] Acquired WARM process from pool!`);
           } else {
             // Case: Process is still 'warming' (waiting for INIT).
@@ -453,6 +471,7 @@ export class GeminiController extends EventEmitter {
             proc = currentPool.shift();
             accumulator = proc.warmAccumulator;
             proc._perfSpawnMethod = "warming";
+            attachStallProtection(proc);
             console.log(`[GeminiController] Acquired WARMING process from pool. Waiting for INIT...`);
           }
         }
@@ -472,7 +491,7 @@ export class GeminiController extends EventEmitter {
             shell: process.platform === "win32",
           });
           
-          proc._perfSpawnMethod = "cold";
+          attachStallProtection(proc);
           if (PERF_ENABLED) {
             proc._perfSpawnMs = performance.now() - spawnT0;
           }
@@ -824,6 +843,16 @@ export class GeminiController extends EventEmitter {
               }
             } else {
               if (activeCallbacks.onResult) activeCallbacks.onResult(json);
+              
+              // [IONOSPHERE] Result Watchdog: Force exit if CLI hangs after emitting result
+              console.log(`[GeminiController] [Turn ${turnId}] Final result received. Initiating 5s graceful exit watchdog.`);
+              proc._exitWatchdog = setTimeout(() => {
+                if (this.processes.has(turnId)) {
+                   console.warn(`[GeminiController] [Turn ${turnId}] CLI hung for 5s after 'result' event. SIGKILLing to unblock.`);
+                   const p = this.processes.get(turnId);
+                   if (p) p.kill("SIGKILL");
+                }
+              }, 5000);
 
               // OPTIMIZATION: Early exit for zero-output success.
               // If the model generated 0 tokens (or only reasoning tokens) but reports success, 
@@ -1025,6 +1054,14 @@ export class GeminiController extends EventEmitter {
           if (proc.stallTimer) {
             clearTimeout(proc.stallTimer);
             proc.stallTimer = null;
+          }
+          if (proc._exitWatchdog) {
+            clearTimeout(proc._exitWatchdog);
+            proc._exitWatchdog = null;
+          }
+          if (stallTimer) {
+            clearTimeout(stallTimer);
+            stallTimer = null;
           }
           clearTimeout(timeout);
           const procRef = this.processes.get(turnId);

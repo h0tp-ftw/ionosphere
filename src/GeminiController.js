@@ -809,6 +809,7 @@ export class GeminiController extends EventEmitter {
             console.log(`[GeminiController] [Turn ${turnId}] Final result received. Entering final repetition check (flush)...`);
             if (proc.cleaner) {
               try {
+                this.repetitionBreaker.finalize(proc);
                 proc.cleaner.flush();
                 console.log(`[GeminiController] [Turn ${turnId}] Final repetition check (flush) complete.`);
               } catch (e) {
@@ -1105,6 +1106,7 @@ export class GeminiController extends EventEmitter {
             };
             
             const fingerprint = proc.extraEnv?.IONOSPHERE_HISTORY_HASH || turnId;
+            this.repetitionBreaker.finalize(proc);
             const fullText = proc.accumulatedText || "";
             this.repetitionBreaker.trackTurnResult(fingerprint, fullText);
             resolve(resultWithPerf);

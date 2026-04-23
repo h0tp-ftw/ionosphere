@@ -94,48 +94,51 @@ export class RepetitionBreaker {
    * Returns true if a loop is detected and the process should be killed.
    */
   checkTextRepetition(proc, text, turnId, activeCallbacks) {
-    proc.accumulatedText = (proc.accumulatedText || "") + text;
-    const accumulated = proc.accumulatedText;
+    if (!proc._textChunks) proc._textChunks = [];
+    proc._textChunks.push(text);
+    
+    // Maintain a small windowed string for the repetition checks to avoid O(N^2) join/concat
+    const windowSize = 15000; // Large enough for block checks + buffer
+    let accumulatedWindow = "";
+    let charCount = 0;
+    for (let i = proc._textChunks.length - 1; i >= 0; i--) {
+      accumulatedWindow = proc._textChunks[i] + accumulatedWindow;
+      charCount += proc._textChunks[i].length;
+      if (charCount > windowSize) break;
+    }
 
     // MASTER TOGGLE: Allow disabling all repetition breaker logic for stress tests
     if (process.env.GEMINI_DISABLE_REPETITION_BREAKER === "true") return false;
 
-    // Check 1: S+S full-response echo detection (catches 2-occurrence full duplications)
-    const echoResult = this.checkFullEcho(accumulated);
-    if (echoResult) {
-      console.error(
-        `[RepetitionBreaker] FULL ECHO DETECTED: Turn ${turnId} is repeating its own output from the beginning. ` +
-        `Echo starts at char ${echoResult.echoStart} of ${accumulated.length} (${echoResult.overlapPct}% overlap).`,
-      );
-      // Truncate accumulated text to just the unique portion
-      proc.accumulatedText = accumulated.slice(0, echoResult.echoStart);
-      if (activeCallbacks.onError) {
-        activeCallbacks.onError({
-          message: `Response terminated: Model echoed its own full response.`,
-          type: "server_error",
-          code: "repetition_loop",
-        });
-      }
-      return true; // Signal to kill process
+    // Check 1: S+S full-response echo detection
+    // We only perform this if the turn is reasonably sized, as it requires joining the full history
+    const totalLength = proc._textChunks.reduce((acc, chunk) => acc + chunk.length, 0);
+    if (totalLength < 100000) { 
+       const fullText = proc._textChunks.join("");
+       const echoResult = this.checkFullEcho(fullText);
+       if (echoResult) {
+         console.error(`[RepetitionBreaker] FULL ECHO DETECTED: Turn ${turnId} is repeating its own output.`);
+         if (activeCallbacks.onError) {
+           activeCallbacks.onError({
+             message: `Response terminated: Model echoed its own full response.`,
+             type: "server_error",
+             code: "repetition_loop",
+           });
+         }
+         return true;
+       }
     }
-    
+
     // Check 2: Original N-occurrence block repetition
-      // [IONOSPHERE] Fuzzy Match: Look for repetitions of the START of the last block 
-      // to ignore trailing variations like timestamps or random IDs.
-      const checkLen = parseInt(process.env.REPETITION_BLOCK_SIZE) || 200;
-      const fuzzyLen = Math.floor(checkLen * 0.75); // Check first 75% of the block
-      const tail = accumulated.slice(-checkLen, - (checkLen - fuzzyLen));
-      
-      // [IONOSPHERE] Performance Optimization: Limit search range to the last 10,000 characters.
-      // Searching the entire 250k+ buffer on every chunk was blocking the event loop.
-      const searchWindow = 10000;
-      const searchStartIndex = Math.max(0, accumulated.length - searchWindow);
-      const searchBuffer = accumulated.slice(searchStartIndex);
+    const checkLen = parseInt(process.env.REPETITION_BLOCK_SIZE) || 200;
+    if (accumulatedWindow.length > checkLen * 2) {
+      const fuzzyLen = Math.floor(checkLen * 0.75);
+      const tail = accumulatedWindow.slice(-checkLen, - (checkLen - fuzzyLen));
       
       let count = 0;
       let searchFrom = 0;
       while (true) {
-        const idx = searchBuffer.indexOf(tail, searchFrom);
+        const idx = accumulatedWindow.indexOf(tail, searchFrom);
         if (idx === -1) break;
         count++;
         searchFrom = idx + 1;
@@ -235,29 +238,31 @@ export class RepetitionBreaker {
     }
 
     // 2. Substring repetition in thoughts (Secondary Defense)
-    // Catches loops with slight variations (e.g. timestamps or random nonces).
-    proc.accumulatedThoughts = (proc.accumulatedThoughts || "") + content;
-    const accumulated = proc.accumulatedThoughts;
+    if (!proc._thoughtChunks) proc._thoughtChunks = [];
+    proc._thoughtChunks.push(content);
 
-    if (accumulated.length > 500) {
+    const windowSize = 10000;
+    let accumulatedWindow = "";
+    let charCount = 0;
+    for (let i = proc._thoughtChunks.length - 1; i >= 0; i--) {
+      accumulatedWindow = proc._thoughtChunks[i] + accumulatedWindow;
+      charCount += proc._thoughtChunks[i].length;
+      if (charCount > windowSize) break;
+    }
+
+    if (accumulatedWindow.length > 500) {
       const checkLen = 150;
-      const fuzzyLen = 110; // ~75%
-      const tail = accumulated.slice(-checkLen, - (checkLen - fuzzyLen));
+      const fuzzyLen = 110; 
+      const tail = accumulatedWindow.slice(-checkLen, - (checkLen - fuzzyLen));
       
-      // [IONOSPHERE] Performance Optimization: Limit search range to last 10,000 chars
-      const searchWindow = 10000;
-      const searchStartIndex = Math.max(0, accumulated.length - searchWindow);
-      const searchBuffer = accumulated.slice(searchStartIndex);
-
       let subCount = 0;
       let searchFrom = 0;
       while (true) {
-        const idx = searchBuffer.indexOf(tail, searchFrom);
+        const idx = accumulatedWindow.indexOf(tail, searchFrom);
         if (idx === -1) break;
         subCount++;
         searchFrom = idx + 1;
       }
-
 
       if (subCount >= 3) {
         console.error(
@@ -275,6 +280,19 @@ export class RepetitionBreaker {
     }
 
     return false;
+  }
+
+  /**
+   * Finalizes the accumulated text and thoughts by joining chunks.
+   * This avoids O(N^2) overhead during streaming.
+   */
+  finalize(proc) {
+    if (proc._textChunks) {
+      proc.accumulatedText = proc._textChunks.join("");
+    }
+    if (proc._thoughtChunks) {
+      proc.accumulatedThoughts = proc._thoughtChunks.join("");
+    }
   }
 
   /**

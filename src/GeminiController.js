@@ -230,6 +230,7 @@ export class GeminiController extends EventEmitter {
     proc.warmAccumulator = accumulator;
     
     proc.stdout.on("data", (chunk) => {
+       if (proc.resetStallTimer) proc.resetStallTimer();
        const lines = chunk.toString().split("\n");
        for (const line of lines) {
          if (line.trim()) {
@@ -419,7 +420,7 @@ export class GeminiController extends EventEmitter {
       
       const estimatedTokens = Math.max(100, payloadChars / 3); // Floor of 100 tokens
       const msPerToken = parseFloat(process.env.CLI_STALL_MS_PER_TOKEN) || 10; // Increased from 1.5 for reasoning
-      const baseStall = parseInt(process.env.CLI_STALL_TIMEOUT_MS) || 120000; // Increased from 60000 for complex turns
+      const baseStall = parseInt(process.env.CLI_STALL_TIMEOUT_MS) || 180000; // Increased from 120000 for complex turns
       
       const dynamicStallTimeout = Math.max(
         baseStall,
@@ -437,7 +438,28 @@ export class GeminiController extends EventEmitter {
         let lastResultJson = null;
         let proc = null;
         let accumulator = null;
-        let resetStallTimer = null;
+        let stallTimer = null;
+        
+        const resetStallTimer = () => {
+          if (stallTimer) clearTimeout(stallTimer);
+          stallTimer = setTimeout(() => {
+            if (this.processes.has(turnId)) {
+               console.error(`[GeminiController] [Turn ${turnId}] STALL: No output from CLI for ${dynamicStallTimeout}ms. Killing process.`);
+               const p = this.processes.get(turnId);
+               if (p) {
+                 p.isStallKill = true;
+                 p.kill("SIGKILL");
+               }
+            }
+          }, dynamicStallTimeout);
+
+        };
+        
+        // Expose to proc for manual resets via IPC/Bridge
+        const attachStallProtection = (p) => {
+          p.resetStallTimer = resetStallTimer;
+          resetStallTimer();
+        };
 
         const currentPool = this.warmPool.get(hashKey) || [];
         if (currentPool.length > 0) {
@@ -446,6 +468,7 @@ export class GeminiController extends EventEmitter {
             proc = currentPool.splice(readyIdx, 1)[0];
             accumulator = proc.warmAccumulator;
             proc._perfSpawnMethod = "warm";
+            attachStallProtection(proc);
             console.log(`[GeminiController] Acquired WARM process from pool!`);
           } else {
             // Case: Process is still 'warming' (waiting for INIT).
@@ -453,6 +476,7 @@ export class GeminiController extends EventEmitter {
             proc = currentPool.shift();
             accumulator = proc.warmAccumulator;
             proc._perfSpawnMethod = "warming";
+            attachStallProtection(proc);
             console.log(`[GeminiController] Acquired WARMING process from pool. Waiting for INIT...`);
           }
         }
@@ -472,7 +496,7 @@ export class GeminiController extends EventEmitter {
             shell: process.platform === "win32",
           });
           
-          proc._perfSpawnMethod = "cold";
+          attachStallProtection(proc);
           if (PERF_ENABLED) {
             proc._perfSpawnMs = performance.now() - spawnT0;
           }
@@ -485,7 +509,7 @@ export class GeminiController extends EventEmitter {
           accumulator = new JsonlAccumulator();
           proc.rawOutputBuffer = []; // Reactive Debugging
           proc.stdout.on("data", (chunk) => {
-            if (resetStallTimer) resetStallTimer();
+            if (proc.resetStallTimer) proc.resetStallTimer();
             if (!proc.firstByteTime) {
               proc.firstByteTime = Date.now();
               proc.currentPhase = "responding";
@@ -599,6 +623,14 @@ export class GeminiController extends EventEmitter {
             console.log(
               `[Turn ${turnId}] CLI Raw Line: ${JSON.stringify(json)}`,
             );
+          }
+
+          // [IONOSPHERE] Forensic: Track latency from tool result to resume
+          if (proc.lastResultInjectedAt) {
+             const resumeLatency = Date.now() - proc.lastResultInjectedAt;
+             console.log(`[GeminiController] [Turn ${turnId}] Resume latency: ${resumeLatency}ms after tool result (Phase: ${proc.currentPhase})`);
+             delete proc.lastResultInjectedAt;
+             proc.currentPhase = "executing";
           } else if (json.type !== "message" || process.env.GEMINI_DEBUG_RAW === "true") {
             console.log(
               `[Turn ${turnId}] CLI Raw Line: ${json.type}${json.role ? " [" + json.role + "]" : ""}`,
@@ -773,8 +805,17 @@ export class GeminiController extends EventEmitter {
           } else if (json.type === "error") {
             if (activeCallbacks.onError) activeCallbacks.onError(json);
           } else if (json.type === "result") {
-            // Flush any pending text before the final result event
-            if (proc.cleaner) proc.cleaner.flush();
+            // [IONOSPHERE] Heartbeat: Monitor for event loop lockup during large turn cleanup
+            console.log(`[GeminiController] [Turn ${turnId}] Final result received. Entering final repetition check (flush)...`);
+            if (proc.cleaner) {
+              try {
+                this.repetitionBreaker.finalize(proc);
+                proc.cleaner.flush();
+                console.log(`[GeminiController] [Turn ${turnId}] Final repetition check (flush) complete.`);
+              } catch (e) {
+                console.error(`[GeminiController] [Turn ${turnId}] CRITICAL: Repetition check failed: ${e.message}`);
+              }
+            }
 
             lastResultJson = json;
             if (json.stats) {
@@ -816,6 +857,16 @@ export class GeminiController extends EventEmitter {
               }
             } else {
               if (activeCallbacks.onResult) activeCallbacks.onResult(json);
+              
+              // [IONOSPHERE] Result Watchdog: Force exit if CLI hangs after emitting result
+              console.log(`[GeminiController] [Turn ${turnId}] Final result received. Initiating 5s graceful exit watchdog.`);
+              proc._exitWatchdog = setTimeout(() => {
+                if (this.processes.has(turnId)) {
+                   console.warn(`[GeminiController] [Turn ${turnId}] CLI hung for 5s after 'result' event. SIGKILLing to unblock.`);
+                   const p = this.processes.get(turnId);
+                   if (p) p.kill("SIGKILL");
+                }
+              }, 5000);
 
               // OPTIMIZATION: Early exit for zero-output success.
               // If the model generated 0 tokens (or only reasoning tokens) but reports success, 
@@ -905,42 +956,13 @@ export class GeminiController extends EventEmitter {
           }
         }
 
-        // [STALL DETECTOR] Reset timer on ANY stdout or stderr activity.
-        // This ensures the process is considered "alive" as long as it's emitting tokens,
-        // logs, or debug info, even if it hasn't finished a complete JSONL line yet.
-        resetStallTimer = () => {
-          if (proc.stallTimer) {
-            clearTimeout(proc.stallTimer);
-            proc.stallTimer = null;
-          }
-          // [IONOSPHERE] Dynamic Stall Timeout calculation (Synchronized)
-          const baseStall = parseInt(process.env.CLI_STALL_TIMEOUT_MS) || 120000;
-          const msPerToken = parseFloat(process.env.CLI_STALL_MS_PER_TOKEN) || 10;
-          const estimatedTokens = (proc._perfStdinPayloadBytes || 0) / 3;
-          const dynamicStallTimeout = Math.max(baseStall, Math.min(900000, baseStall + Math.round(estimatedTokens * msPerToken)));
-          
-          const extraStall = !proc.firstByteTime ? 60000 : 0;
-          const STALL_TIMEOUT_MS = dynamicStallTimeout + extraStall;
+        // [IONOSPHERE] The stall detector is now initialized and managed 
+        // at the top of sendPrompt via attachStallProtection().
+        // No redundant definition needed here.
 
-          if (GEMINI_DEBUG_HANDOFF) {
-            console.log(`[GeminiController] [Turn ${turnId}] Dynamic Stall Threshold: ${Math.round(STALL_TIMEOUT_MS/1000)}s (Base: ${baseStall}, EstTokens: ${Math.round(estimatedTokens)})`);
-          }
 
-          proc.stallTimer = setTimeout(() => {
-            console.error(
-              `[GeminiController] [STALL FATAL] [Turn ${turnId}] No CLI output for ${STALL_TIMEOUT_MS / 1000}s. Killing stalled process. (Wait method: ${proc._perfSpawnMethod}, First byte: ${!!proc.firstByteTime})`,
-            );
-            proc.isStalled = true;
-            proc.pendingRetryError = new RetryableError(
-              `CLI stalled after ${STALL_TIMEOUT_MS / 1000}s`,
-              "stall",
-              0,
-              false,
-              true // isStall
-            );
-            proc.kill("SIGKILL");
-          }, STALL_TIMEOUT_MS);
-        };
+        // Expose the reset function so the orchestrator can keep us alive while parked
+        proc.resetStallTimer = resetStallTimer;
 
         // Initially arm it (will be reset/re-armed on data)
         resetStallTimer();
@@ -1009,6 +1031,14 @@ export class GeminiController extends EventEmitter {
             clearTimeout(proc.stallTimer);
             proc.stallTimer = null;
           }
+          if (proc._exitWatchdog) {
+            clearTimeout(proc._exitWatchdog);
+            proc._exitWatchdog = null;
+          }
+          if (stallTimer) {
+            clearTimeout(stallTimer);
+            stallTimer = null;
+          }
           clearTimeout(timeout);
           const procRef = this.processes.get(turnId);
           const usageSummary =
@@ -1020,6 +1050,8 @@ export class GeminiController extends EventEmitter {
           );
 
           this.processes.delete(turnId);
+          this.emit("turn_closed", turnId);
+
           if (PERF_ENABLED) {
             proc._perfCloseTime = performance.now();
             proc._perfTotalCliMs = proc._perfCloseTime - (proc._perfPromiseStart || proc._perfCloseTime);
@@ -1047,7 +1079,13 @@ export class GeminiController extends EventEmitter {
           }
 
           // [IONOSPHERE] Unified Retry Signaling
+          if (proc.isStallKill) {
+            reject(new RetryableError(`CLI stalled (no output for ${dynamicStallTimeout}ms)`, "stall"));
+            return;
+          }
+
           if (proc.pendingRetryError) {
+
             reject(proc.pendingRetryError);
             return;
           }
@@ -1068,6 +1106,7 @@ export class GeminiController extends EventEmitter {
             };
             
             const fingerprint = proc.extraEnv?.IONOSPHERE_HISTORY_HASH || turnId;
+            this.repetitionBreaker.finalize(proc);
             const fullText = proc.accumulatedText || "";
             this.repetitionBreaker.trackTurnResult(fingerprint, fullText);
             resolve(resultWithPerf);

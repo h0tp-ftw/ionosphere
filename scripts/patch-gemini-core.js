@@ -1021,4 +1021,47 @@ if (fs.existsSync(chatTarget)) {
   fs.writeFileSync(chatTarget, content, "utf8");
 }
 
+// 13. Patch environmentContext.js (Session Context Overrides)
+const envContextTarget = path.resolve(
+  __dirname,
+  "..",
+  "node_modules",
+  "@google",
+  "gemini-cli-core",
+  "dist",
+  "src",
+  "utils",
+  "environmentContext.js",
+);
+if (fs.existsSync(envContextTarget)) {
+  console.log(`[Patcher] Patching environmentContext.js for session context overrides: ${envContextTarget}`);
+  let content = fs.readFileSync(envContextTarget, "utf8");
+
+  // 13a. Patch getEnvironmentContext variables to allow env overrides
+  const contextVarsSearch = /const today = new Date\(\)\.toLocaleDateString\(undefined, \{[\s\S]*?const tempDir = config\.storage\.getProjectTempDir\(\);/;
+  const contextVarsReplace = `const today = process.env.IONOSPHERE_DATE || new Date().toLocaleDateString(undefined, {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+    });
+    const platform = process.env.IONOSPHERE_PLATFORM || process.platform;
+    let directoryContext = '';
+    if (process.env.IONOSPHERE_DISABLE_DIR_CONTEXT !== 'true') {
+        directoryContext = process.env.IONOSPHERE_DIR_CONTEXT || (config.getIncludeDirectoryTree()
+            ? await getDirectoryContextString(config)
+            : '');
+    }
+    const tempDir = process.env.IONOSPHERE_TEMP_DIR || config.storage.getProjectTempDir();`;
+
+  if (content.includes("const today =") && !content.includes("IONOSPHERE_PLATFORM")) {
+    content = content.replace(contextVarsSearch, contextVarsReplace);
+    console.log("  - Applied session context environment overrides (Platform, TempDir, Date, DirContext).");
+  } else if (content.includes("IONOSPHERE_PLATFORM")) {
+    console.log("  - Session context environment overrides already applied.");
+  }
+
+  fs.writeFileSync(envContextTarget, content, "utf8");
+}
+
 console.log("[Patcher] Patching complete.");

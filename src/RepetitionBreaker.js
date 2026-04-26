@@ -190,29 +190,6 @@ export class RepetitionBreaker {
       return true;
     }
 
-    // 1. Summary Repetition Detection
-    // Catches "cycling" loops where the model changes content but keeps the same higher-level intent.
-    const summary = json.summary || "";
-    if (summary && summary.length > 5) {
-      if (!proc.summaryMap) proc.summaryMap = new Map();
-      const sCount = (proc.summaryMap.get(summary) || 0) + 1;
-      proc.summaryMap.set(summary, sCount);
-
-      const sThreshold = parseInt(process.env.REPETITION_THRESHOLD) || 3;
-      if (sCount >= sThreshold) {
-        const errorMsg = `Response terminated: Model repeated the same reasoning summary ('${summary}') ${sCount} times.`;
-        console.error(`[RepetitionBreaker] IDENTICAL SUMMARY DETECTED: Turn ${turnId} for summary: "${summary}"`);
-        if (activeCallbacks.onError) {
-          activeCallbacks.onError({
-            message: errorMsg,
-            type: "server_error",
-            code: "reasoning_loop",
-          });
-        }
-        return true;
-      }
-    }
-
     const content = typeof json.content === "string" ? json.content : (json.thought || "");
     if (!content || content.length < 10) return false; // Ignore empty or trivial thoughts for the exact-content/substring checks
 

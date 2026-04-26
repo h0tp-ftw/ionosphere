@@ -2523,7 +2523,7 @@ const MODELS_LIST = [
     object: "model",
     created: 1731628800,
     owned_by: "google",
-    context_window: 2000000,
+    context_window: 700000,
     description: "Ionosphere Auto-Model Ladder (3.x series)",
   },
   {
@@ -2531,7 +2531,7 @@ const MODELS_LIST = [
     object: "model",
     created: 1731628800,
     owned_by: "google",
-    context_window: 2000000,
+    context_window: 700000,
     description: "Ionosphere Auto-Model Ladder (2.5 series)",
   },
   {
@@ -2539,7 +2539,7 @@ const MODELS_LIST = [
     object: "model",
     created: 1731628800,
     owned_by: "google",
-    context_window: 2000000,
+    context_window: 700000,
     description: "Gemini 3.1 Pro (Preview)",
   },
   {
@@ -2547,7 +2547,7 @@ const MODELS_LIST = [
     object: "model",
     created: 1731628800,
     owned_by: "google",
-    context_window: 1000000,
+    context_window: 700000,
     description: "Gemini 3 Flash (Preview)",
   },
   {
@@ -2555,7 +2555,7 @@ const MODELS_LIST = [
     object: "model",
     created: 1715731200,
     owned_by: "google",
-    context_window: 2000000,
+    context_window: 700000,
     description: "Gemini 2.5 Pro",
   },
   {
@@ -2563,7 +2563,7 @@ const MODELS_LIST = [
     object: "model",
     created: 1715731200,
     owned_by: "google",
-    context_window: 1000000,
+    context_window: 700000,
     description: "Gemini 2.5 Flash",
   },
   {
@@ -2571,7 +2571,7 @@ const MODELS_LIST = [
     object: "model",
     created: 1715731200,
     owned_by: "google",
-    context_window: 1000000,
+    context_window: 700000,
     description: "Gemini 2.5 Flash Lite",
   },
 ];

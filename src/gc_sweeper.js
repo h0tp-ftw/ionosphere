@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { logger } from "./logger.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const UUID_EXTRACT_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
@@ -34,14 +35,14 @@ const sweepDirectory = (dirPath, now, gcTtlMs, isTurnActive) => {
     if (entry.isDirectory() && UUID_RE.test(entry.name)) {
       const lastActivity = Math.max(stats.mtimeMs, newestMtimeInDir(entryPath));
       if (now - lastActivity <= gcTtlMs) continue;
-      console.log(`[GC] Sweeping abandoned workspace: ${entryPath}`);
+      logger.info(`[GC] Sweeping abandoned workspace: ${entryPath}`);
       fs.rmSync(entryPath, { recursive: true, force: true });
     } else if (entry.isDirectory()) {
       sweepDirectory(entryPath, now, gcTtlMs, isTurnActive);
       try {
         const remaining = fs.readdirSync(entryPath);
         if (remaining.length === 0) {
-          console.log(`[GC] Removing empty directory: ${entryPath}`);
+          logger.info(`[GC] Removing empty directory: ${entryPath}`);
           fs.rmdirSync(entryPath);
         }
       } catch (_) {}
@@ -49,7 +50,7 @@ const sweepDirectory = (dirPath, now, gcTtlMs, isTurnActive) => {
       const isHistoryFile = entry.name.startsWith("turn-") && entry.name.endsWith("-history.json");
       const isDebugFile = entry.name.endsWith(".txt") || entry.name.endsWith(".json");
       if (isHistoryFile || isDebugFile) {
-        console.log(`[GC] Sweeping orphaned temp file: ${entry.name}`);
+        logger.info(`[GC] Sweeping orphaned temp file: ${entry.name}`);
         fs.unlinkSync(entryPath);
       }
     }
@@ -70,7 +71,7 @@ const startGcSweeper = (baseTempDir, isTurnActive) => {
         const gcTtlMs = parseInt(process.env.GC_WORKSPACE_TTL_MS) || 30 * 60 * 1000;
         sweepDirectory(baseTempDir, now, gcTtlMs, isTurnActive);
       } catch (e) {
-        console.error(`[GC] Sweeper error:`, e);
+        logger.error(`[GC] Sweeper error:`, e);
       }
     },
     5 * 60 * 1000,

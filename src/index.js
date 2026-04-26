@@ -2015,6 +2015,9 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
             timer.measure('handoff');
             timer.addMeta('path', 're-emit');
             timer.finish();
+            if (process.env.GEMINI_DEBUG_KEEP_TEMP !== "true" && fs.existsSync(turnTempDir)) {
+              fs.rmSync(turnTempDir, { recursive: true, force: true });
+            }
             return; // Request handled by re-emit
           }
 
@@ -2023,6 +2026,9 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
           timer.addMeta('path', 'tool-resolution');
           timer.finish();
           await parked.executePromise;
+          if (process.env.GEMINI_DEBUG_KEEP_TEMP !== "true" && fs.existsSync(turnTempDir)) {
+            fs.rmSync(turnTempDir, { recursive: true, force: true });
+          }
           return;
         }
       }

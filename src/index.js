@@ -550,41 +550,57 @@ async function enqueueControllerPrompt(executeTask) {
 }
 
 // Garbage Collector: Force-delete temp/ entries older than GC_WORKSPACE_TTL_MS (default: 30 minutes)
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const UUID_EXTRACT_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+
+const isTurnActive = (name) => {
+  const turnIdMatch = name.match(UUID_EXTRACT_RE);
+  const associatedTurnId = turnIdMatch ? turnIdMatch[0] : name;
+  return parkedTurns.has(associatedTurnId) || controller.processes.has(associatedTurnId);
+};
+
+const sweepDirectory = (dirPath, now, gcTtlMs) => {
+  if (!fs.existsSync(dirPath)) return;
+  const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+
+  for (const entry of entries) {
+    const entryPath = path.join(dirPath, entry.name);
+    let stats;
+    try { stats = fs.statSync(entryPath); } catch (_) { continue; }
+
+    if (now - stats.mtimeMs <= gcTtlMs) continue;
+    if (isTurnActive(entry.name)) continue;
+
+    if (entry.isDirectory() && UUID_RE.test(entry.name)) {
+      console.log(`[GC] Sweeping abandoned workspace: ${entryPath}`);
+      fs.rmSync(entryPath, { recursive: true, force: true });
+    } else if (entry.isDirectory()) {
+      sweepDirectory(entryPath, now, gcTtlMs);
+      // Remove the parent dir if it's now empty
+      try {
+        const remaining = fs.readdirSync(entryPath);
+        if (remaining.length === 0) {
+          console.log(`[GC] Removing empty directory: ${entryPath}`);
+          fs.rmdirSync(entryPath);
+        }
+      } catch (_) {}
+    } else if (entry.isFile()) {
+      const isHistoryFile = entry.name.startsWith("turn-") && entry.name.endsWith("-history.json");
+      const isDebugFile = entry.name.endsWith(".txt") || entry.name.endsWith(".json");
+      if (isHistoryFile || isDebugFile) {
+        console.log(`[GC] Sweeping orphaned temp file: ${entry.name}`);
+        fs.unlinkSync(entryPath);
+      }
+    }
+  }
+};
+
 setInterval(
   () => {
     try {
-      if (fs.existsSync(baseTempDir)) {
-        const now = Date.now();
-        const gcTtlMs = parseInt(process.env.GC_WORKSPACE_TTL_MS) || 30 * 60 * 1000;
-        const entries = fs.readdirSync(baseTempDir, { withFileTypes: true });
-        
-        for (const entry of entries) {
-          const entryPath = path.join(baseTempDir, entry.name);
-          const stats = fs.statSync(entryPath);
-          
-          if (now - stats.mtimeMs > gcTtlMs) {
-            const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(entry.name);
-            const isHistoryFile = entry.name.startsWith("turn-") && entry.name.endsWith("-history.json");
-            const isDebugFile = entry.name.endsWith(".txt") || entry.name.endsWith(".json");
-
-            // Safety Check: Never delete if currently active in Ionosphere state maps
-            const turnIdMatch = entry.name.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
-            const associatedTurnId = turnIdMatch ? turnIdMatch[0] : entry.name;
-            
-            if (parkedTurns.has(associatedTurnId) || controller.processes.has(associatedTurnId)) {
-              continue; 
-            }
-
-            if (entry.isDirectory() && isUUID) {
-              console.log(`[GC] Sweeping abandoned workspace: ${entry.name}`);
-              fs.rmSync(entryPath, { recursive: true, force: true });
-            } else if (entry.isFile() && (isHistoryFile || isDebugFile)) {
-              console.log(`[GC] Sweeping orphaned temp file: ${entry.name}`);
-              fs.unlinkSync(entryPath);
-            }
-          }
-        }
-      }
+      const now = Date.now();
+      const gcTtlMs = parseInt(process.env.GC_WORKSPACE_TTL_MS) || 30 * 60 * 1000;
+      sweepDirectory(baseTempDir, now, gcTtlMs);
     } catch (e) {
       console.error(`[GC] Sweeper error:`, e);
     }

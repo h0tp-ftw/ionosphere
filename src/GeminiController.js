@@ -1078,6 +1078,13 @@ export class GeminiController extends EventEmitter {
             try { fs.unlinkSync(proc._historyFilePath); } catch (_) {}
           }
 
+          // Cancelled turns (e.g. client disconnect grace period) resolve
+          // cleanly so executeTask completes and currentlyRunning decrements.
+          if (proc.isCancelled) {
+            resolve(null);
+            return;
+          }
+
           // [IONOSPHERE] Unified Retry Signaling
           if (proc.isStallKill) {
             reject(new RetryableError(`CLI stalled (no output for ${dynamicStallTimeout}ms)`, "stall"));
@@ -1203,8 +1210,9 @@ export class GeminiController extends EventEmitter {
           }
         } catch (_) {}
       }, 2000);
-      this.processes.delete(turnId);
-      this.callbacksByTurn.delete(turnId);
+      // Do NOT delete from this.processes here — let onCleanup handle it
+      // when the process actually exits so the promise settles and
+      // currentlyRunning is properly decremented.
     }
   }
 

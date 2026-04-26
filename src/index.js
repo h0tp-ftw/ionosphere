@@ -1382,6 +1382,16 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
     // --- WAIT-AND-HIJACK CASE ---
     // If a turn is active but NOT yet parked, wait for it to park using event-driven notification.
     if (hijackedTurnId && !parkedTurns.has(hijackedTurnId)) {
+      // If the process is already dead, skip the 30s wait — go straight to fresh turn.
+      if (!controller.processes.has(hijackedTurnId)) {
+        console.warn(
+          `[API] Wait-and-Hijack: Turn ${hijackedTurnId} has no live process. Skipping wait, falling back to fresh turn.`,
+        );
+        hijackedTurnId = null;
+      }
+    }
+
+    if (hijackedTurnId && !parkedTurns.has(hijackedTurnId)) {
       console.log(
         `[API] Wait-and-Hijack: Turn ${hijackedTurnId} is running. Waiting for parking event...`,
       );

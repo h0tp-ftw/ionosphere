@@ -623,15 +623,44 @@ setInterval(
 ); // Run every 5 minutes
 
 
-// Process Safety
-process.on("SIGINT", () => {
-  controller.destroyAll();
-  process.exit(0);
-});
-process.on("SIGTERM", () => {
-  controller.destroyAll();
-  process.exit(0);
-});
+// Graceful Shutdown: drain in-flight requests before exiting.
+let isShuttingDown = false;
+
+const gracefulShutdown = (signal) => {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+
+  const SHUTDOWN_TIMEOUT_MS = parseInt(process.env.SHUTDOWN_TIMEOUT_MS) || 30000;
+
+  console.log(`[Shutdown] ${signal} received. Draining ${currentlyRunning} active turn(s) and ${requestQueue.length} queued request(s)...`);
+
+  // Stop accepting new connections
+  if (httpServer) {
+    httpServer.close(() => {
+      console.log("[Shutdown] HTTP server closed.");
+    });
+  }
+
+  // Drain: wait for active turns to finish, then exit
+  const drainStart = Date.now();
+  const drainCheck = setInterval(() => {
+    const elapsed = Date.now() - drainStart;
+    if (currentlyRunning === 0 && requestQueue.length === 0) {
+      clearInterval(drainCheck);
+      console.log(`[Shutdown] All turns drained. Exiting cleanly.`);
+      controller.destroyAll();
+      process.exit(0);
+    } else if (elapsed > SHUTDOWN_TIMEOUT_MS) {
+      clearInterval(drainCheck);
+      console.warn(`[Shutdown] Drain timeout (${SHUTDOWN_TIMEOUT_MS}ms) exceeded. ${currentlyRunning} turn(s) still active. Force-killing.`);
+      controller.destroyAll();
+      process.exit(1);
+    }
+  }, 500);
+};
+
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
 
 const handleUpload = (req, res, next) => {
   if (req.is("multipart/form-data")) {
@@ -2928,7 +2957,7 @@ app.get("/v1/models/:model", (req, res) => {
 
 app.get("/health", (req, res) => res.json({ status: "ok" }));
 
-app.listen(PORT, "0.0.0.0", () => {
+const httpServer = app.listen(PORT, "0.0.0.0", () => {
   console.log(`Ionosphere Orchestrator listening on port ${PORT}`);
   // Seed the warm pool immediately so the first request hits a pre-warmed process
   // instead of spawning cold. Each process is a fresh stateless spawn that blocks

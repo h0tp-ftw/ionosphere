@@ -49,8 +49,13 @@ export const getConversationFingerprint = (messages) => {
     const system = extractText(systemMsg?.content);
     const firstUser = extractText(firstUserMsg?.content);
 
-    // Hash the purified content (first 500 chars)
-    const result = createHash('sha256').update(`${system.substring(0, 50)}:${firstUser.substring(0, 200)}`).digest('hex').substring(0, 12);
+    // Include the last user message and message count to differentiate
+    // conversations that share the same system prompt and opening message.
+    const userMessages = messages.filter(m => m.role === 'user');
+    const lastUser = userMessages.length > 1 ? extractText(userMessages[userMessages.length - 1].content) : "";
+    const msgCount = messages.length;
+
+    const result = createHash('sha256').update(`${system.substring(0, 50)}:${firstUser.substring(0, 200)}:${lastUser.substring(0, 200)}:${msgCount}`).digest('hex').substring(0, 12);
     if (PERF_ENABLED) {
         getConversationFingerprint._lastDurationMs = performance.now() - start;
     }

@@ -914,7 +914,7 @@ export class GeminiController extends EventEmitter {
               const hasNoContent = ((json.stats?.output_tokens || 0) === 0 || (proc.accumulatedText || "").trim().length === 0) && (proc.toolUsage?.size || 0) === 0;
               
               if (json.status === "success" && hasNoContent) {
-                console.log(`[GeminiController] [Turn ${turnId}] Early exit for zero-content success to trigger immediate retry.`);
+                console.log(`[GeminiController] [Turn ${turnId}] Early exit for zero-content success to trigger immediate retry. Full Metadata: ${JSON.stringify(json)}`);
                 proc.isZeroOutputSuccess = true;
                 proc.kill("SIGKILL");
               }
@@ -953,7 +953,7 @@ export class GeminiController extends EventEmitter {
             resetStallTimer(); 
           } else if (json.type === "safety") {
             // [IONOSPHERE] Enhanced JSON Protocol: safety/content filter
-            console.warn(`[GeminiController] [Turn ${turnId}] ⚠️ Safety block: ${json.reason || 'unknown reason'}`);
+            console.warn(`[GeminiController] [Turn ${turnId}] ⚠️ Safety block: ${json.reason || 'unknown reason'}. Details: ${JSON.stringify(json)}`);
             // Explicitly notify orchestrator that this was a safety refusal
             if (activeCallbacks.onSafety) {
               activeCallbacks.onSafety(json);

@@ -1194,14 +1194,14 @@ export class GeminiController extends EventEmitter {
       proc.kill("SIGINT");
       // Fallback for unresponsive CLI
       setTimeout(() => {
-        if (this.processes.has(turnId)) {
-          console.warn(
-            `[GeminiController] Turn ${turnId} unresponsive to SIGINT, sending SIGKILL.`,
-          );
-          try {
+        try {
+          if (!proc.killed) {
+            console.warn(
+              `[GeminiController] Turn ${turnId} unresponsive to SIGINT, sending SIGKILL.`,
+            );
             proc.kill("SIGKILL");
-          } catch (_) {}
-        }
+          }
+        } catch (_) {}
       }, 2000);
       this.processes.delete(turnId);
       this.callbacksByTurn.delete(turnId);

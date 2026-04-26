@@ -2329,23 +2329,25 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
       });
     });
 
-    await new Promise((resolve) => {
-      ipcServer.listen(ipcPath, () => resolve());
+    await new Promise((resolve, reject) => {
+      let retried = false;
       ipcServer.on("error", (err) => {
         if (process.platform !== "win32") {
           try {
             if (fs.existsSync(ipcPath)) fs.unlinkSync(ipcPath);
           } catch (_) { }
         }
-        if (err.code === "EADDRINUSE") {
+        if (err.code === "EADDRINUSE" && !retried) {
+          retried = true;
           console.warn(
             `[IPC] Address in use, retrying after cleanup: ${ipcPath}`,
           );
           ipcServer.listen(ipcPath, () => resolve());
         } else {
-          console.error(`[IPC] Server error: ${err.message}`);
+          reject(new Error(`[IPC] Server error: ${err.message}`));
         }
       });
+      ipcServer.listen(ipcPath, () => resolve());
     });
 
     // Write raw request JSON for offline forensics

@@ -1986,7 +1986,15 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
             // Removed break to allow parallel tool resolution
           }
 
-          // [IONOSPHERE] Partial Parallel Handoff Fix: 
+          // If we resolved any tool call, the client is alive — reset re-emit
+          // counters on sibling pending calls to prevent false DEADBOLT kills.
+          if (resolvedAny) {
+            for (const [, p] of pendingToolCalls.entries()) {
+              if (p.turnId === hijackedTurnId) p.reemitCount = 0;
+            }
+          }
+
+          // [IONOSPHERE] Partial Parallel Handoff Fix:
           // ALWAYS check for remaining pending tool calls after the history scan.
           // If the model is still waiting for more tools, we must re-emit them to the client
           // to prevent a deadlock where the model and client wait on each other.

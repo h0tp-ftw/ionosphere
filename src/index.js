@@ -143,6 +143,16 @@ controller.on("turn_closed", (turnId) => {
     }
     parkedTurns.delete(turnId);
   }
+
+  // Purge any stale hash/fingerprint entries pointing to this turn
+  for (const [key, value] of activeTurnsByHash.entries()) {
+    if (value === turnId) activeTurnsByHash.delete(key);
+  }
+
+  // Purge any orphaned pending tool calls for this turn
+  for (const [callKey, pending] of pendingToolCalls.entries()) {
+    if (pending.turnId === turnId) pendingToolCalls.delete(callKey);
+  }
 });
 
 const WARM_HANDOFF_ENABLED = process.env.WARM_HANDOFF_ENABLED !== "false";

@@ -2955,7 +2955,29 @@ app.get("/v1/models/:model", (req, res) => {
   });
 });
 
-app.get("/health", (req, res) => res.json({ status: "ok" }));
+const serverStartTime = Date.now();
+
+app.get("/health", (req, res) => {
+  const uptimeMs = Date.now() - serverStartTime;
+  const uptimeMin = Math.floor(uptimeMs / 60000);
+  const uptimeHr = Math.floor(uptimeMin / 60);
+
+  res.json({
+    status: isShuttingDown ? "draining" : "ok",
+    uptime: uptimeHr > 0 ? `${uptimeHr}h ${uptimeMin % 60}m` : `${uptimeMin}m`,
+    uptimeMs,
+    turns: {
+      active: currentlyRunning,
+      parked: parkedTurns.size,
+      queued: requestQueue.length,
+      maxConcurrent: MAX_CONCURRENT_CLI,
+    },
+    processes: controller.processes.size,
+    pendingToolCalls: pendingToolCalls.size,
+    warmHandoff: WARM_HANDOFF_ENABLED,
+    model: process.env.GEMINI_MODEL || "gemini-2.5-flash-lite",
+  });
+});
 
 const httpServer = app.listen(PORT, "0.0.0.0", () => {
   console.log(`Ionosphere Orchestrator listening on port ${PORT}`);

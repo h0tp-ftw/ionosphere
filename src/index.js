@@ -559,6 +559,20 @@ const isTurnActive = (name) => {
   return parkedTurns.has(associatedTurnId) || controller.processes.has(associatedTurnId);
 };
 
+const newestMtimeInDir = (dirPath) => {
+  let newest = 0;
+  try {
+    for (const child of fs.readdirSync(dirPath, { withFileTypes: true })) {
+      const childPath = path.join(dirPath, child.name);
+      try {
+        const s = fs.statSync(childPath);
+        if (s.mtimeMs > newest) newest = s.mtimeMs;
+      } catch (_) {}
+    }
+  } catch (_) {}
+  return newest;
+};
+
 const sweepDirectory = (dirPath, now, gcTtlMs) => {
   if (!fs.existsSync(dirPath)) return;
   const entries = fs.readdirSync(dirPath, { withFileTypes: true });
@@ -568,15 +582,15 @@ const sweepDirectory = (dirPath, now, gcTtlMs) => {
     let stats;
     try { stats = fs.statSync(entryPath); } catch (_) { continue; }
 
-    if (now - stats.mtimeMs <= gcTtlMs) continue;
     if (isTurnActive(entry.name)) continue;
 
     if (entry.isDirectory() && UUID_RE.test(entry.name)) {
+      const lastActivity = Math.max(stats.mtimeMs, newestMtimeInDir(entryPath));
+      if (now - lastActivity <= gcTtlMs) continue;
       console.log(`[GC] Sweeping abandoned workspace: ${entryPath}`);
       fs.rmSync(entryPath, { recursive: true, force: true });
     } else if (entry.isDirectory()) {
       sweepDirectory(entryPath, now, gcTtlMs);
-      // Remove the parent dir if it's now empty
       try {
         const remaining = fs.readdirSync(entryPath);
         if (remaining.length === 0) {
@@ -584,7 +598,7 @@ const sweepDirectory = (dirPath, now, gcTtlMs) => {
           fs.rmdirSync(entryPath);
         }
       } catch (_) {}
-    } else if (entry.isFile()) {
+    } else if (entry.isFile() && now - stats.mtimeMs > gcTtlMs) {
       const isHistoryFile = entry.name.startsWith("turn-") && entry.name.endsWith("-history.json");
       const isDebugFile = entry.name.endsWith(".txt") || entry.name.endsWith(".json");
       if (isHistoryFile || isDebugFile) {

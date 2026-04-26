@@ -1,4 +1,4 @@
-import { spawn } from "child_process";
+import { spawn, execSync } from "child_process";
 import EventEmitter from "events";
 import path from "path";
 import fs from "fs";
@@ -444,8 +444,30 @@ export class GeminiController extends EventEmitter {
           if (stallTimer) clearTimeout(stallTimer);
           stallTimer = setTimeout(() => {
             if (this.processes.has(turnId)) {
-               console.error(`[GeminiController] [Turn ${turnId}] STALL: No output from CLI for ${dynamicStallTimeout}ms. Killing process.`);
                const p = this.processes.get(turnId);
+               const diagLines = [
+                 `[STALL DIAGNOSTICS] Turn ${turnId}`,
+                 `  pid: ${p?.pid}, killed: ${p?.killed}, exitCode: ${p?.exitCode}, signalCode: ${p?.signalCode}`,
+                 `  phase: ${p?.currentPhase}, firstByte: ${!!p?.firstByteTime}, stdinEnd: ${!!p?.stdinEndTime}`,
+                 `  hasStdout: ${!!p?.stdout}, hasStderr: ${!!p?.stderr}`,
+                 `  stdoutReadable: ${p?.stdout?.readable}, stderrReadable: ${p?.stderr?.readable}`,
+                 `  stdinWritable: ${p?.stdin?.writable}, stdinDestroyed: ${p?.stdin?.destroyed}`,
+                 `  concurrentProcesses: ${this.processes.size}`,
+                 `  rawOutputLines: ${p?.rawOutputBuffer?.length || 0}`,
+                 `  elapsed: ${Date.now() - (p?.spawnStartTime || Date.now())}ms`,
+               ];
+               try {
+                 const procStatus = execSync(`cat /proc/${p?.pid}/status 2>/dev/null | head -10 || echo "process gone"`, { timeout: 2000 }).toString().trim();
+                 diagLines.push(`  /proc/${p?.pid}/status:\n${procStatus.split('\n').map(l => '    ' + l).join('\n')}`);
+                 const fdCount = execSync(`ls /proc/${p?.pid}/fd 2>/dev/null | wc -l || echo "?"`, { timeout: 2000 }).toString().trim();
+                 diagLines.push(`  open fds: ${fdCount}`);
+                 const childPids = execSync(`pgrep -P ${p?.pid} 2>/dev/null || echo "none"`, { timeout: 2000 }).toString().trim();
+                 diagLines.push(`  child pids: ${childPids}`);
+               } catch (_) {
+                 diagLines.push(`  /proc inspection failed`);
+               }
+               console.error(diagLines.join('\n'));
+               console.error(`[GeminiController] [Turn ${turnId}] STALL: No output from CLI for ${dynamicStallTimeout}ms. Killing process.`);
                if (p) {
                  p.isStallKill = true;
                  p.kill("SIGKILL");
@@ -502,9 +524,21 @@ export class GeminiController extends EventEmitter {
           }
           proc.currentPhase = "spawning";
           proc.spawnStartTime = Date.now();
-          if (process.env.GEMINI_DEBUG_PROMPTS === "true") {
-            console.log(`[GeminiController] [Turn ${turnId}] Spawned CLI process ${proc.pid}`);
-          }
+          console.log(`[GeminiController] [Turn ${turnId}] Spawned PID ${proc.pid} (concurrent: ${this.processes.size + 1}, cwd: ${workspacePath})`);
+
+          // Early stall warning: if no stdout AND no stderr after 30s, log diagnostics
+          proc._earlyStallCheck = setTimeout(() => {
+            if (!proc.firstByteTime && !proc.killed) {
+              const elapsed = Date.now() - proc.spawnStartTime;
+              try {
+                const childPids = execSync(`pgrep -P ${proc.pid} 2>/dev/null || echo "none"`, { timeout: 2000 }).toString().trim();
+                const procState = execSync(`cat /proc/${proc.pid}/status 2>/dev/null | grep -E '^(State|Threads|VmRSS)' || echo "gone"`, { timeout: 2000 }).toString().trim();
+                console.warn(`[EARLY STALL WARNING] Turn ${turnId} PID ${proc.pid}: no output after ${elapsed}ms. Children: [${childPids}] State: [${procState.replace(/\n/g, ', ')}] stdinDestroyed: ${proc.stdin?.destroyed} phase: ${proc.currentPhase}`);
+              } catch (_) {
+                console.warn(`[EARLY STALL WARNING] Turn ${turnId} PID ${proc.pid}: no output after ${elapsed}ms (proc inspection failed)`);
+              }
+            }
+          }, 30000);
           
           accumulator = new JsonlAccumulator();
           proc.rawOutputBuffer = []; // Reactive Debugging
@@ -513,6 +547,7 @@ export class GeminiController extends EventEmitter {
             if (!proc.firstByteTime) {
               proc.firstByteTime = Date.now();
               proc.currentPhase = "responding";
+              if (proc._earlyStallCheck) clearTimeout(proc._earlyStallCheck);
               const startupDuration = proc.firstByteTime - (proc.spawnStartTime || Date.now());
               console.log(`[GeminiController] [Turn ${turnId}] First byte received (TTFB) after ${startupDuration}ms`);
             }
@@ -982,7 +1017,9 @@ export class GeminiController extends EventEmitter {
         }
 
         let lastStderrLines = [];
+        proc._stderrReceived = false;
         proc.stderr.on("data", (chunk) => {
+          proc._stderrReceived = true;
           // STALL DETECTION: Reset timer on ANY stderr activity too.
           // This ensures that periodic CLI meta-logs like "Still waiting" 
           // don't prevent the stall detector from killing a stuck model.
@@ -1026,6 +1063,10 @@ export class GeminiController extends EventEmitter {
 
           if (rawLogStream) {
             rawLogStream.end();
+          }
+          if (proc._earlyStallCheck) {
+            clearTimeout(proc._earlyStallCheck);
+            proc._earlyStallCheck = null;
           }
           if (proc.stallTimer) {
             clearTimeout(proc.stallTimer);

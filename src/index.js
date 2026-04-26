@@ -151,7 +151,10 @@ controller.on("turn_closed", (turnId) => {
 
   // Purge any orphaned pending tool calls for this turn
   for (const [callKey, pending] of pendingToolCalls.entries()) {
-    if (pending.turnId === turnId) pendingToolCalls.delete(callKey);
+    if (pending.turnId === turnId) {
+      if (pending.parkTimer) clearTimeout(pending.parkTimer);
+      pendingToolCalls.delete(callKey);
+    }
   }
 });
 
@@ -190,6 +193,7 @@ const resolveToolCall = (callKey, result) => {
     }
     return false;
   }
+  if (pending.parkTimer) clearTimeout(pending.parkTimer);
   pendingToolCalls.delete(callKey);
 
   // [IONOSPHERE] State Persistence: Reset the stall timer of the parent process
@@ -2032,6 +2036,17 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
                 .digest('hex')
                 .substring(0, 16);
 
+              const PARK_TIMEOUT_MS = parseInt(process.env.PARK_TIMEOUT_MS) || 60000;
+              const parkTimer = setTimeout(() => {
+                if (pendingToolCalls.has(callKey)) {
+                  console.error(
+                    `[Turn ${activeTurnId}] Park timeout: tool call ${clientToolName} (${callKey}) unanswered after ${PARK_TIMEOUT_MS / 1000}s. Killing process.`,
+                  );
+                  pendingToolCalls.delete(callKey);
+                  controller.cancelCurrentTurn(activeTurnId);
+                }
+              }, PARK_TIMEOUT_MS);
+
               pendingToolCalls.set(callKey, {
                 socket,
                 turnId: activeTurnId,
@@ -2039,6 +2054,7 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
                 clientName: clientToolName, // Stripped name for client compatibility
                 arguments: argsStr,
                 contentHash,
+                parkTimer,
               });
 
               // Ensure the turn is marked as PARKED if it wasn't already

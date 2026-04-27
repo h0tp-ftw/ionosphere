@@ -55,11 +55,11 @@ export class CliErrorParser {
     if (isResourceError) {
       const errorMsg = `Gemini API Quota/Capacity Exhausted (429). Raw: ${stderrText}`;
       console.log(`[DEBUG] CliErrorParser: Matched isResourceError! Error message: ${errorMsg}`);
-      if (process.env.GEMINI_SILENT_FALLBACK === "true") {
-        console.log(`[CliErrorParser] Seamless Fallback: Ignoring 429 error.`);
-        return { type: "IGNORE", message: errorMsg };
-      }
-      if (activeCallbacks.onError)
+      // [IONOSPHERE] Proactive Termination: Even with SILENT_FALLBACK, we return FATAL 
+      // so the GeminiController kills the stuck CLI process immediately. This allows 
+      // the orchestrator (index.js) to trigger fallback/retry logic without waiting 
+      // for the CLI's internal retry timeouts.
+      if (activeCallbacks.onError && process.env.GEMINI_SILENT_FALLBACK !== "true")
         activeCallbacks.onError(
           createError(errorMsg, ErrorType.RATE_LIMIT, ErrorCode.RATE_LIMIT_EXCEEDED),
         );

@@ -2454,6 +2454,8 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
               console.warn(`[API] [Turn ${activeTurnId}] Quota error detected, but suppressed retry because text was already sent.`);
               throw err;
             }
+            
+            const isFutile = /reset after|quota will reset/i.test(err.message);
             quotaRetries++;
             
             // [IONOSPHERE] Auto-Model Fallback Logic
@@ -2462,6 +2464,10 @@ app.post("/v1/chat/completions", handleUpload, async (req, res) => {
               responseModel = modelQueue.shift();
               console.log(`[API] [Turn ${activeTurnId}] Unified Retry: Quota Fallback (${quotaRetries}/${MAX_QUOTA_RETRIES}). Switching: ${oldModel} -> ${responseModel}`);
             } else {
+              if (isFutile) {
+                console.warn(`[API] [Turn ${activeTurnId}] Quota error is futile (long reset). Failing immediately.`);
+                throw err;
+              }
               console.log(`[API] [Turn ${activeTurnId}] Unified Retry: Quota (Attempt ${quotaRetries}/${MAX_QUOTA_RETRIES}). Backing off 10s...`);
             }
             
